@@ -6,6 +6,9 @@ Everything here is **new and separate**: folder `/srv/jarvis`, database `jarvis`
 
 Run everything as `root` on the VPS (`ssh root@201.18.193.128`).
 
+> **Paste one command at a time when a block contains `sudo`.** Ubuntu's `sudo` swallows the lines
+> pasted after it, so they silently never run (this is how `CREATE DATABASE` got skipped on the first install).
+
 ---
 
 ## 0. Look first (read-only, changes nothing)
@@ -31,6 +34,7 @@ apt-get install -y postgresql postgresql-contrib
 DBPASS="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | head -c 32)"; echo "DB password: $DBPASS"   # save it
 sudo -u postgres psql -c "CREATE ROLE jarvis LOGIN PASSWORD '$DBPASS';"
 sudo -u postgres psql -c "CREATE DATABASE jarvis OWNER jarvis;"
+sudo -u postgres psql -tAc "SELECT datname FROM pg_database WHERE datname='jarvis'"   # must print: jarvis
 ```
 
 ## 3. Linux user that runs JARVIS (no login, no root rights)
@@ -98,12 +102,31 @@ curl -s -o /dev/null -w "%{http_code}\n" https://jarvis.YOUR-DOMAIN.com/api/v1/h
 ```
 On the phone, log in with server **`https://jarvis.YOUR-DOMAIN.com`**.
 
+### 8b. No domain yet: IP + port 8088 (what the first install uses)
+Plain HTTP — fine for a demo with test tasks, **not** for real MD data (switch to 8 with HTTPS before that).
+In `.env`:
+```
+DJANGO_ALLOWED_HOSTS=201.18.193.128,127.0.0.1,localhost
+DJANGO_CSRF_TRUSTED_ORIGINS=http://201.18.193.128:8088
+DJANGO_BEHIND_HTTPS_PROXY=false
+```
+Then (a separate port, so the existing project's nginx sites on 80/443 are never affected):
+```bash
+sed -e 's/listen 80;/listen 8088;/' -e 's/server_name jarvis.example.com;/server_name _;/' /srv/jarvis/deploy/nginx-jarvis.conf > /etc/nginx/sites-available/jarvis
+ln -s /etc/nginx/sites-available/jarvis /etc/nginx/sites-enabled/jarvis
+nginx -t && systemctl reload nginx
+ufw allow 8088/tcp
+```
+Phone server address: **`201.18.193.128:8088`**.
+
 ## 9. Automatic deploy on every push to `main` (CI/CD)
 A separate key that can **only** run the JARVIS deploy script:
 ```bash
 ssh-keygen -t ed25519 -f /root/.ssh/jarvis_ci -N "" -C "jarvis-github-actions"
-echo "command=\"bash /srv/jarvis/deploy/deploy.sh\",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty $(cat /root/.ssh/jarvis_ci.pub)" >> /root/.ssh/authorized_keys
-cat /root/.ssh/jarvis_ci          # private key → GitHub secret (next step), then you may delete this file
+PM2_DIR="$(dirname "$(command -v pm2)")"   # pm2 may live under nvm, which non-interactive SSH does not load
+echo "command=\"PATH=$PM2_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash /srv/jarvis/deploy/deploy.sh\",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty $(cat /root/.ssh/jarvis_ci.pub)" >> /root/.ssh/authorized_keys
+ssh -i /root/.ssh/jarvis_ci -o StrictHostKeyChecking=accept-new root@127.0.0.1   # test: runs the deploy, then closes
+cat /root/.ssh/jarvis_ci          # private key → GitHub secret (next step), then: shred -u /root/.ssh/jarvis_ci
 ```
 GitHub → repo **jarvis** → Settings → Secrets and variables → **Actions** → New repository secret:
 
@@ -123,6 +146,15 @@ pm2 logs jarvis-worker --lines 50    # TaskPanel worker log
 pm2 restart jarvis-api jarvis-worker # restart only JARVIS
 bash /srv/jarvis/deploy/deploy.sh    # manual deploy of the latest main
 ```
+
+## If something fails
+- **`password authentication failed for user "jarvis"`** — `.env` and the database disagree. Reset both in ONE line:
+  `cd /srv/jarvis/backend && P="$(openssl rand -hex 16)" && sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=$P|" .env && sudo -u postgres psql -c "ALTER ROLE jarvis PASSWORD '$P';" && chown root:jarvis .env && chmod 640 .env; unset P`
+- **`database "jarvis" does not exist`** — `sudo -u postgres psql -c "CREATE DATABASE jarvis OWNER jarvis;"`
+- **`pm2 list` as root shows only JARVIS** — normal: each Linux user has its own PM2. The existing project runs
+  under another user's PM2 (`ps -eo user,cmd | grep "God Daemon"` shows which).
+- **Phone says "Cannot reach the JARVIS server"** — sign out, clear the server box, type `201.18.193.128:8088`;
+  test the same address in the phone's Chrome; if Chrome can't open it either, try mobile data.
 
 ## Backup of the JARVIS database (recommended daily cron)
 ```bash
