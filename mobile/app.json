@@ -1,0 +1,74 @@
+{
+  "expo": {
+    "name": "JARVIS",
+    "slug": "jarvis",
+    "scheme": "jarvis",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#F6F3EC",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.qtcinfotech.jarvis"
+    },
+    "android": {
+      "package": "com.qtcinfotech.jarvis",
+      "adaptiveIcon": {
+        "backgroundColor": "#13233A",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "softwareKeyboardLayoutMode": "pan",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "android.permission.USE_EXACT_ALARM",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "JARVIS listens only while you tap the mic, to capture your command.",
+          "speechRecognitionPermission": "JARVIS converts your spoken command to text.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox", "com.google.android.as"]
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#13233A"
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Unlock JARVIS with Face ID."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      "expo-status-bar",
+      ["./plugins/withAndroidCmakeVersion", { "version": "3.31.6" }]
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+"""India-time helpers. Instants are stored in UTC; everything shown or spoken is IST."""
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+from django.conf import settings
+from django.utils import timezone
+
+IST = ZoneInfo(settings.JARVIS_TIMEZONE)
+
+
+def now_local() -> datetime:
+    return timezone.now().astimezone(IST)
+
+
+def today_local() -> date:
+    return now_local().date()
+
+
+def combine_local(d: date, t: time) -> datetime:
+    return datetime.combine(d, t, tzinfo=IST)
+
+
+def day_bounds(d: date) -> tuple[datetime, datetime]:
+    start = combine_local(d, time(0, 0))
+    return start, start + timedelta(days=1)
+
+
+def to_local(dt: datetime | None) -> datetime | None:
+    return dt.astimezone(IST) if dt else None
+
+
+def fmt_time(dt: datetime) -> str:
+    local = to_local(dt)
+    hour = local.hour % 12 or 12
+    suffix = "AM" if local.hour < 12 else "PM"
+    return f"{hour}:{local.minute:02d} {suffix}" if local.minute else f"{hour} {suffix}"
+
+
+def fmt_day(d: date) -> str:
+    today = today_local()
+    if d == today:
+        return "today"
+    if d == today + timedelta(days=1):
+        return "tomorrow"
+    if d == today - timedelta(days=1):
+        return "yesterday"
+    return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}"
+
+
+def due_phrase(due_kind: str, due_date: date | None, due_at: datetime | None) -> str:
+    if due_kind == "TIMED" and due_at:
+        local = to_local(due_at)
+        return f"{fmt_day(local.date())} at {fmt_time(local)}"
+    if due_kind == "DATE" and due_date:
+        return fmt_day(due_date)
+    return ""

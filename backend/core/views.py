@@ -1,0 +1,476 @@
+import logging
+from datetime import date
+
+from django.core.exceptions import ObjectDoesNotExist
+from django.http import Http404
+from rest_framework import status
+from rest_framework.exceptions import ValidationError
+from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView, exception_handler as drf_exception_handler
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+from . import ai_brain, assistant, services
+from . import timeutils as tu
+from .idempotency import error, idempotent
+from .models import (
+    Alert, IntegrationCommand, PrivateTask, ReminderAck, SharedTask, StaffMember, Status, TaskCategory, TaskRequest,
+)
+from .taskpanel.client import TaskPanelError, get_client as tp_client
+from .permissions import IsMD, IsMDOrPA, IsPA
+from .reminders import reminders_for
+from .serializers import (
+    AckSerializer,
+    DecisionSerializer,
+    DelegationInputSerializer,
+    InterpretSerializer,
+    LoginSerializer,
+    PaTaskInputSerializer,
+    PaTaskStatusSerializer,
+    RequestInputSerializer,
+    TeamDelegationSerializer,
+    TaskInputSerializer,
+    TaskPatchSerializer,
+    VersionSerializer,
+)
+from .services import ServiceError
+
+log = logging.getLogger("jarvis.api")
+
+
+def exception_handler(exc, context):
+    if isinstance(exc, ServiceError):
+        return error(exc.code, exc.message, exc.status, **exc.extra)
+    if isinstance(exc, (ObjectDoesNotExist, Http404)):
+        return error("not_found", "Not found.", 404)
+    if isinstance(exc, ValidationError):
+        return error("invalid", "Please check the highlighted fields.", 422, field_errors=exc.detail)
+    response = drf_exception_handler(exc, context)
+    if response is not None and isinstance(response.data, dict) and "code" not in response.data:
+        detail = response.data.get("detail", "Request failed.")
+        response.data = {"code": getattr(detail, "code", "error"), "message": str(detail),
+                         "retryable": response.status_code >= 500 or response.status_code == 429}
+    return response
+
+
+# ------------------------------------------------------------------ auth
+class LoginView(TokenObtainPairView):
+    serializer_class = LoginSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+
+class LogoutView(APIView):
+    def post(self, request):
+        token = request.data.get("refresh", "")
+        try:
+            RefreshToken(token).blacklist()
+        except TokenError:
+            pass
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MeView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        u = request.user
+        return Response({
+            "username": u.username,
+            "role": u.role,
+            "name": u.spoken_name,
+            "features": {
+                "ai": ai_brain.ai_available(),
+                "taskpanel": {**tp_client().describe(), "linked": services.user_link(u) is not None},
+            },
+        })
+
+
+class HealthView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        unresolved = IntegrationCommand.objects.filter(
+            state__in=[IntegrationCommand.State.QUEUED, IntegrationCommand.State.SENDING,
+                       IntegrationCommand.State.OUTCOME_UNKNOWN]
+        ).count()
+        link = services.user_link(request.user)
+        cursor = getattr(link, "cursor", None) if link else None
+        return Response({
+            "server_time": tu.now_local().isoformat(),
+            "ai": {"enabled": ai_brain.ai_available()},
+            "taskpanel": {
+                **tp_client().describe(),
+                "linked": link is not None,
+                "unconfirmed_commands": unresolved,
+                "last_sync": cursor.last_success_at.isoformat() if cursor and cursor.last_success_at else None,
+                "last_sync_error": cursor.last_error if cursor else "",
+            },
+        })
+
+
+# ------------------------------------------------------------------ dashboard
+class TodayView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        if request.query_params.get("refresh") == "1":
+            try:
+                services.refresh_delegations(request.user)
+            except Exception:  # never block the dashboard on TaskPanel
+                log.warning("TaskPanel refresh failed", exc_info=True)
+        return Response(services.dashboard(request.user))
+
+
+class BusyView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        raw = request.query_params.get("date")
+        try:
+            day = date.fromisoformat(raw) if raw else tu.today_local()
+        except ValueError:
+            return error("invalid", "date must be YYYY-MM-DD.", 422)
+        return Response({"date": day.isoformat(), "busy": services.busy_windows(day)})
+
+
+# ------------------------------------------------------------------ private tasks (MD only)
+class PrivateTaskListView(APIView):
+    permission_classes = [IsMD]
+
+    def get(self, request):
+        qs = services.md_private_qs(request.user).order_by("-created_at")
+        if request.query_params.get("include_closed") != "1":
+            qs = qs.exclude(status__in=[Status.COMPLETED, Status.CANCELLED])
+        return Response({"results": [services.private_item(t) for t in qs[:200]]})
+
+    @idempotent("private_tasks.create")
+    def post(self, request):
+        s = TaskInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        source = PrivateTask.Source.VOICE if request.data.get("source") == "VOICE" else PrivateTask.Source.MANUAL
+        task = services.create_private_task(request.user, s.validated_data, source=source)
+        return Response(services.private_item(task), status=201)
+
+
+class PrivateTaskDetailView(APIView):
+    permission_classes = [IsMD]
+
+    def get(self, request, task_id):
+        return Response(services.private_item(services.md_private_qs(request.user).get(id=task_id)))
+
+    def patch(self, request, task_id):
+        s = TaskPatchSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        task = services.update_private_task(request.user, task_id, s.changes(), s.validated_data["expected_version"])
+        return Response(services.private_item(task))
+
+
+class PrivateTaskCompleteView(APIView):
+    permission_classes = [IsMD]
+
+    def post(self, request, task_id):
+        s = VersionSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        task = services.update_private_task(request.user, task_id, {"status": Status.COMPLETED},
+                                            s.validated_data["expected_version"])
+        return Response(services.private_item(task))
+
+
+# ------------------------------------------------------------------ shared MD tasks
+class SharedTaskDetailView(APIView):
+    """MD edits directly. A PA edit becomes a change request for the MD (202)."""
+
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request, task_id):
+        return Response(services.shared_item(SharedTask.objects.select_related("staff", "created_by").get(id=task_id)))
+
+    def patch(self, request, task_id):
+        s = TaskPatchSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        version = s.validated_data["expected_version"]
+        if request.user.is_md:
+            task = services.update_shared_md_task(request.user, task_id, s.changes(), version)
+            return Response(services.shared_item(task))
+        if SharedTask.objects.filter(id=task_id, assignee_type=SharedTask.Assignee.PA).exists():
+            return error("forbidden", "Only Sir can change this task. You can update its status.", 403)
+        req = services.propose_change(request.user, task_id, s.changes(), version, s.validated_data.get("reason", ""))
+        return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
+
+
+class SharedTaskCompleteView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, task_id):
+        s = VersionSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        version = s.validated_data["expected_version"]
+        task = SharedTask.objects.get(id=task_id)
+        if task.assignee_type == SharedTask.Assignee.PA:
+            # A task the MD gave the PA: the PA completes it herself; the MD may also close it.
+            if request.user.is_pa:
+                done = services.update_pa_task_status(request.user, task_id, Status.COMPLETED, version)
+            else:
+                done = services.update_shared_md_task(request.user, task_id, {"status": Status.COMPLETED}, version)
+            return Response(services.shared_item(done))
+        if request.user.is_md:
+            task = services.update_shared_md_task(request.user, task_id, {"status": Status.COMPLETED}, version)
+            return Response(services.shared_item(task))
+        req = services.propose_change(request.user, task_id, {"status": Status.COMPLETED}, version, "Marked done")
+        return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
+
+
+# ------------------------------------------------------------------ MD -> PA tasks
+class PaTaskListView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        qs = services.pa_tasks_qs().exclude(status=Status.CANCELLED).order_by("-created_at")[:100]
+        return Response({"results": [services.shared_item(t) for t in qs]})
+
+    @idempotent("pa_tasks.create")
+    def post(self, request):
+        if not request.user.is_md:
+            return error("forbidden", "Only Sir can assign tasks to the PA.", 403)
+        s = PaTaskInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        task = services.create_pa_task(request.user, s.validated_data,
+                                       meeting_with_pa=s.validated_data["meeting_with_pa"])
+        return Response(services.shared_item(task), status=201)
+
+
+class PaTaskStatusView(APIView):
+    """The PA updates her task: Not started / Working / Hold (reason required) / Done."""
+
+    permission_classes = [IsPA]
+
+    def post(self, request, task_id):
+        s = PaTaskStatusSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        task = services.update_pa_task_status(request.user, task_id, s.validated_data["status"],
+                                              s.validated_data["expected_version"], s.validated_data["note"])
+        return Response(services.shared_item(task))
+
+
+# ------------------------------------------------------------------ delegation to TaskPanel staff
+class StaffListView(APIView):
+    """TaskPanel directory: staff (with leave) and task categories."""
+
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        from .taskpanel import sync as tp_sync
+
+        tp_sync.ensure_directory(request.user)
+        staff = StaffMember.objects.filter(active=True)
+        categories = TaskCategory.objects.filter(active=True)
+        return Response({
+            "results": [{"id": s.id, "name": s.name, "department": s.department, "designation": s.designation,
+                         "on_leave": s.on_leave, "leave_until": s.leave_until.isoformat() if s.leave_until else None}
+                        for s in staff],
+            "categories": [{"key": c.key, "name": c.name, "department": c.department} for c in categories],
+        })
+
+
+class StaffSyncView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        try:
+            count = services.sync_staff(request.user)
+        except TaskPanelError as exc:
+            return error(exc.code, exc.message, 503 if exc.status in (0, 503) else exc.status)
+        return Response({"synced": count})
+
+
+class DelegationListView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        qs = services.delegated_qs().order_by("-created_at")[:100]
+        return Response({"results": [services.shared_item(t) for t in qs]})
+
+    @idempotent("delegations.create")
+    def post(self, request):
+        s = DelegationInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        staff = StaffMember.objects.get(id=s.validated_data["staff_id"])
+        task, command = services.delegate_to_staff(
+            request.user, s.validated_data, staff,
+            category_key=s.validated_data["category_key"], description=s.validated_data["description"],
+        )
+        if command.state == IntegrationCommand.State.REJECTED:
+            # TaskPanel refused (leave, department rule, unknown person…): nothing was assigned.
+            message = command.error_message or "TaskPanel did not accept this task."
+            code = command.error_code or "rejected"
+            task.delete()
+            return error(code, message, 422)
+        if command.state == IntegrationCommand.State.SUCCEEDED:
+            return Response({**services.shared_item(task), "result": "assigned"}, status=201)
+        # Sent but not confirmed yet (TaskPanel slow/unreachable): never claim "assigned".
+        return Response({**services.shared_item(task), "result": "pending_confirmation"}, status=202)
+
+
+class TeamDelegationView(APIView):
+    """One TaskPanel task per person in the chosen team (people on leave were already left out)."""
+
+    permission_classes = [IsMDOrPA]
+
+    @idempotent("delegations.team")
+    def post(self, request):
+        s = TeamDelegationSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        results = services.delegate_to_team(
+            request.user, s.validated_data, s.validated_data["staff_ids"],
+            category_key=s.validated_data["category_key"], description=s.validated_data["description"],
+        )
+        status_code = 201 if results["assigned"] and not results["pending"] else 202
+        return Response(results, status=status_code)
+
+
+class DelegationRefreshView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        try:
+            changed = services.refresh_delegations(request.user)
+        except TaskPanelError as exc:
+            return error(exc.code, exc.message, 503)
+        return Response({"changed": changed})
+
+
+class DelegationCheckView(APIView):
+    """"Check again" for one staff task: resend if unconfirmed, then refresh its status."""
+
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, task_id):
+        task = services.recheck_delegation(request.user, task_id)
+        return Response(services.shared_item(task))
+
+
+# ------------------------------------------------------------------ PA -> MD requests
+class RequestListView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        qs = TaskRequest.objects.select_related("requested_by", "target")
+        if request.user.is_pa:
+            qs = qs.filter(requested_by=request.user)
+        state = request.query_params.get("state")
+        if state:
+            qs = qs.filter(state=state.upper())
+        return Response({"results": [services.request_item(r) for r in qs[:100]]})
+
+    @idempotent("requests.create")
+    def post(self, request):
+        if not request.user.is_pa:
+            return error("forbidden", "MD creates tasks directly; requests come from the PA.", 403)
+        s = RequestInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        req = services.create_md_request(request.user, s.validated_data)
+        return Response(services.request_item(req), status=201)
+
+
+class RequestAcceptView(APIView):
+    permission_classes = [IsMD]
+
+    @idempotent("requests.accept")
+    def post(self, request, request_id):
+        req = services.accept_request(request.user, request_id)
+        body = services.request_item(req)
+        if req.state == TaskRequest.State.CONFLICT:
+            return error("conflict", "The task changed after this request was made. The PA has been told.", 409,
+                         request=body)
+        return Response(body)
+
+
+class RequestDeclineView(APIView):
+    permission_classes = [IsMD]
+
+    @idempotent("requests.decline")
+    def post(self, request, request_id):
+        s = DecisionSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        req = services.decline_request(request.user, request_id, s.validated_data["note"])
+        return Response(services.request_item(req))
+
+
+class RequestWithdrawView(APIView):
+    permission_classes = [IsPA]
+
+    def post(self, request, request_id):
+        return Response(services.request_item(services.withdraw_request(request.user, request_id)))
+
+
+# ------------------------------------------------------------------ assistant
+class InterpretView(APIView):
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant"
+
+    def post(self, request):
+        s = InterpretSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        draft = assistant.build_draft(request.user, s.validated_data["text"], s.validated_data["previous"])
+        return Response(draft)
+
+
+class BriefingView(APIView):
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant"
+
+    def get(self, request):
+        kind = request.query_params.get("kind", "now")
+        if kind not in {"morning", "evening", "now"}:
+            kind = "now"
+        facts, fallback = services.briefing_facts(request.user, kind)
+        text, engine = ai_brain.briefing(facts, fallback)
+        return Response({"kind": kind, "text": text, "engine": engine, "generated_at": tu.now_local().isoformat()})
+
+
+# ------------------------------------------------------------------ reminders + alerts
+class ReminderListView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        try:
+            hours = max(1, min(int(request.query_params.get("hours", 48)), 168))
+        except ValueError:
+            hours = 48
+        return Response(reminders_for(request.user, hours))
+
+
+class ReminderAckView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        s = AckSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        ReminderAck.objects.get_or_create(user=request.user, key=s.validated_data["key"])
+        return Response({"acknowledged": s.validated_data["key"]})
+
+
+class AlertListView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        qs = Alert.objects.filter(recipient=request.user, acknowledged_at__isnull=True)[:50]
+        return Response({"results": [services.alert_item(a) for a in qs]})
+
+
+class AlertAckView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, alert_id):
+        from django.utils import timezone
+
+        alert = Alert.objects.get(id=alert_id, recipient=request.user)
+        if not alert.acknowledged_at:
+            alert.acknowledged_at = timezone.now()
+            alert.save(update_fields=["acknowledged_at"])
+        return Response({"acknowledged": str(alert.id)})

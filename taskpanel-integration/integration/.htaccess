@@ -1,0 +1,16 @@
+# NEW file: applies only to /taskPanel/integration/. TaskPanel's own .htaccess is NOT changed.
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # Never serve internals directly.
+    RewriteRule ^(src|migrations|bin|storage)(/|$) - [F,L]
+    RewriteRule ^config(\.local)?\.php$ - [F,L]
+    # Everything else goes to this folder's front controller.
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [QSA,L]
+</IfModule>
+
+<FilesMatch "\.(sql|md|example)$">
+    Require all denied
+</FilesMatch>

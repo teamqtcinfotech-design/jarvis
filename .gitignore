@@ -1,0 +1,24 @@
+# ---- Secrets: never commit
+.env
+.env.*
+!.env.example
+**/config.local.php
+
+# ---- Python
+backend/.venv/
+__pycache__/
+*.pyc
+backend/dev.sqlite3
+backend/staticfiles/
+
+# ---- Node / Expo (mobile/.gitignore has the app-specific rules)
+node_modules/
+
+# ---- Build outputs and archives
+*.apk
+*.aab
+*.zip
+
+# ---- Local tool settings
+.claude/
+.vscode/
