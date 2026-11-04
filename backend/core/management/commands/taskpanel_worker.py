@@ -14,10 +14,12 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 
+from core import followups
 from core import timeutils as tu
 from core.taskpanel import dispatcher, sync
 
 log = logging.getLogger("jarvis.taskpanel")
+FOLLOWUP_EVERY_SECONDS = 10 * 60
 
 
 class Command(BaseCommand):
@@ -32,10 +34,16 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"TaskPanel worker started ({settings.TASKPANEL_MODE} mode). Ctrl+C to stop."))
         last_pull = last_dir = 0.0
+        last_follow = -1e9  # first cycle runs the follow-up check straight away
         while not stop["flag"]:
             close_old_connections()
             now = time.monotonic()
             try:
+                if now - last_follow >= FOLLOWUP_EVERY_SECONDS:
+                    raised = followups.run()
+                    last_follow = now
+                    if raised:
+                        self.stdout.write(f"{tu.now_local():%H:%M:%S}  raised {raised} follow-up(s)")
                 sent = dispatcher.dispatch_due()
                 if sent:
                     self.stdout.write(f"{tu.now_local():%H:%M:%S}  delivered {sent} command(s)")

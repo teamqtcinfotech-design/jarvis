@@ -748,6 +748,77 @@ class SmartAssistantTests(BaseCase):
         # The PA's settings are her own.
         self.assertEqual(self.pa_client.get("/api/v1/me/prefs/").json()["voiceAccent"], "hi-IN")
 
+    @override_settings(JARVIS_AI_ENABLED=True, ANTHROPIC_API_KEY="test-key")
+    def test_pa_hears_a_composed_professional_note(self):
+        from types import SimpleNamespace as NS
+        client = mock.Mock()
+        client.messages.create.return_value = NS(
+            content=[NS(type="text", text="Mansi, please keep 10:00 today free for a meeting with Sir. It is urgent.")],
+            stop_reason="end_turn", usage=NS(input_tokens=50, output_tokens=20, cache_creation_input_tokens=0,
+                                             cache_read_input_tokens=0, server_tool_use=None))
+        when = tu.now_local() + timedelta(hours=3)
+        with mock.patch("core.ai_brain._get_client", return_value=client):
+            r = self.md_client.post("/api/v1/pa-tasks/", {
+                "title": "Meeting with Mansi", "kind": "MEETING", "priority": "URGENT", "meeting_with_pa": True,
+                "due_date": when.date().isoformat(), "due_time": when.strftime("%H:%M"),
+                "description": "Mansi ke saath 10 baje meeting, urgent"}, format="json", HTTP_IDEMPOTENCY_KEY="note-1")
+        self.assertEqual(r.status_code, 201)
+        alert = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertEqual(alert["spoken_text"], "Mansi, please keep 10:00 today free for a meeting with Sir. It is urgent.")
+        sent = json.dumps(client.messages.create.call_args.kwargs, default=str)
+        self.assertNotIn(SECRET, sent)  # only the task's own facts go to the model
+
+    def test_composed_note_falls_back_to_template_when_ai_is_off(self):
+        r = self.md_client.post("/api/v1/pa-tasks/", {"title": "Book the Pune flights", "kind": "TASK"},
+                                format="json", HTTP_IDEMPOTENCY_KEY="note-2")
+        self.assertEqual(r.status_code, 201)
+        alert = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertIn("Book the Pune flights", alert["spoken_text"])
+
+    def test_followups_raise_once_and_only_in_the_day(self):
+        from core import followups
+        from core.models import Alert
+        import datetime as dt
+        day = tu.now_local().replace(hour=11, minute=0, second=0, microsecond=0)
+        # A staff task that has not moved for 3 days.
+        task = SharedTask.objects.get(assignee_type=SharedTask.Assignee.STAFF) if SharedTask.objects.filter(
+            assignee_type=SharedTask.Assignee.STAFF).exists() else None
+        if task is None:
+            ramesh = StaffMember.objects.filter(name="Ramesh Kumar").first()
+            task, _ = services.delegate_to_staff(self.md, {"title": "Submit GST reconciliation", "kind": Kind.TASK,
+                                                           "priority": Priority.HIGH}, ramesh, category_key="accounts",
+                                                 description="GST reconciliation")
+        SharedTask.objects.filter(id=task.id).update(updated_at=day - dt.timedelta(days=3), created_at=day - dt.timedelta(days=3))
+        # A request from Mansi waiting 6 hours.
+        req = services.create_md_request(self.pa, {"title": "Sign the vendor agreement", "kind": Kind.TASK, "priority": Priority.HIGH})
+        TaskRequest.objects.filter(id=req.id).update(created_at=day - dt.timedelta(hours=6))
+        Alert.objects.all().delete()
+
+        self.assertEqual(followups.run(now=day.replace(hour=23)), 0)  # night: silence
+        raised = followups.run(now=day)
+        self.assertGreaterEqual(raised, 3)
+        md_alerts = [a for a in Alert.objects.filter(recipient=self.md, ref_type="followup")]
+        spoken = " | ".join(a.spoken_text for a in md_alerts)
+        self.assertIn("no update for 3 days", spoken)
+        self.assertIn("waiting 6 hours", spoken)
+        self.assertTrue(Alert.objects.filter(recipient=self.pa, ref_type="followup").exists())
+        self.assertEqual(followups.run(now=day + dt.timedelta(minutes=10)), 0)  # not repeated
+        self.assert_no_secret(self.pa_client.get("/api/v1/alerts/"))
+
+    def test_end_of_day_digest_counts_private_items_without_naming_them(self):
+        from core import followups
+        from core.models import Alert
+        today = tu.today_local()
+        services.create_private_task(self.md, {"title": SECRET + " errand", "kind": Kind.TASK, "priority": Priority.NORMAL,
+                                               "due_date": today})
+        Alert.objects.all().delete()
+        at = tu.now_local().replace(hour=18, minute=45, second=0, microsecond=0)
+        followups.run(now=at)
+        digest = Alert.objects.filter(recipient=self.md, ref_id__startswith="digest:").first()
+        self.assertIsNotNone(digest)
+        self.assertIn("private", digest.spoken_text)
+        self.assertNotIn(SECRET, digest.spoken_text + digest.body + digest.title)
+
     def test_device_token_is_a_separate_login_chain(self):
         self.assertEqual(APIClient().post("/api/v1/auth/device-token/", {}, format="json").status_code, 401)
         r = self.md_client.post("/api/v1/auth/device-token/", {}, format="json")

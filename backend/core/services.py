@@ -501,9 +501,16 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
         title = "New task from Sir"
         spoken = (f"{pa.spoken_name}, Sir has given you a new {task.priority.lower()} priority task: "
                   f"{task.title}" + (f", {when}" if when else "") + ".")
+    # A brief professional note in Sir's name (template above if the AI is unavailable).
+    from .compose import compose  # local import: compose depends on the AI client, services must not
+    message = compose(
+        "meeting_with_pa" if meeting_with_pa else "task_for_pa", "Sir (the Managing Director)", pa.spoken_name,
+        {"title": task.title, "when": when, "priority": task.priority.lower(), "instruction": task.description,
+         "notes": task.notes}, fallback=spoken, user=md,
+    )
     Alert.objects.create(
         recipient=pa, kind=Alert.Kind.TASK_ASSIGNED, priority=task.priority, title=title,
-        body=task.title + (f" · {when}" if when else ""), spoken_text=spoken[:400],
+        body=message[:400], spoken_text=message[:400],
         ref_type="shared_task", ref_id=str(task.id),
     )
     audit(md, "pa_meeting.create" if meeting_with_pa else "pa_task.create", "shared_task", task.id)
@@ -581,13 +588,20 @@ def _notify_md_new_request(req: TaskRequest):
         when = f", {item['due_label']}" if item["due_label"] else ""
         spoken = f"Sir, {pa_name} has sent you a new {item['priority'].lower()} priority task: {item['title']}{when}. Would you like to accept it?"
         title = f"New task from {pa_name}"
+        kind = "request_to_md"
     else:
         spoken = f"Sir, {pa_name} has proposed a change to {item['target_title']}. Please review it."
         title = f"Change proposed by {pa_name}"
+        kind = "change_request"
+    # A courteous note in Mansi's name (template above if the AI is unavailable).
+    from .compose import compose
+    message = compose(kind, f"{pa_name} (the MD's personal assistant)", "Sir", {
+        "title": item["title"], "when": item["due_label"], "priority": item["priority"].lower(),
+        "reason": req.reason, "target": item.get("target_title") or "",
+    }, fallback=spoken, user=req.requested_by)
     Alert.objects.create(
         recipient=md, kind=Alert.Kind.NEW_REQUEST, priority=item["priority"], title=title,
-        body=item["title"] + (f" · {item['due_label']}" if item["due_label"] else ""),
-        spoken_text=spoken[:400], ref_type="request", ref_id=str(req.id),
+        body=message[:400], spoken_text=message[:400], ref_type="request", ref_id=str(req.id),
     )
 
 
