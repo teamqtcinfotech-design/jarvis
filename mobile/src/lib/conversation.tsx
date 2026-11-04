@@ -107,9 +107,18 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   });
   const { start: startVoice, stop: stopVoice, cancel: cancelVoice, probe } = voice;
 
-  // The alert engine borrows the microphone for its 2-second "is anyone talking?" check.
+  // The alert engine borrows the microphone for its 2-second "is anyone talking?" check
+  // (the background listener steps aside for it).
   useEffect(() => {
-    setVoiceProbe(probe);
+    setVoiceProbe(async () => {
+      wakePause();
+      await new Promise((r) => setTimeout(r, 250));
+      try {
+        return await probe();
+      } finally {
+        wakeResume();
+      }
+    });
     return () => setVoiceProbe(null);
   }, [setVoiceProbe, probe]);
 
@@ -142,14 +151,20 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     messagesRef.current.filter((m) => m.tone !== 'error').slice(-8).map((m) => ({ role: m.role, text: m.text }));
   const listen = () => {
     if (!user) return;
-    startVoice();
+    if (wakeSupported && prefs.wakeWordEnabled) {
+      // One microphone user at a time: the background listener lets go first, then the recogniser starts.
+      wakePause();
+      setTimeout(startVoice, 250);
+    } else {
+      startVoice();
+    }
   };
   /** Show a JARVIS line, speak it, and listen again only when it is a question. */
   const reply = (show: string, speakText: string | undefined, lang: SpeakLang, expectAnswer: boolean, extra: Partial<Msg> = {}) => {
     push('jarvis', show, extra);
     expectingRef.current = expectAnswer;
     silenceRef.current = 0;
-    say(speakText || show, { interrupt: true, lang, onDone: expectAnswer ? listen : undefined });
+    say(speakText || show, { interrupt: true, lang, fallback: show, onDone: expectAnswer ? listen : undefined });
   };
   /** The card waiting for a yes / no / change (a card still asking a question is not "waiting"). */
   const waitingCard = () => {
@@ -181,7 +196,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         // One gentle nudge after a question, then wait quietly.
         silenceRef.current = 1;
         const hi = hiLine(`${address}?`, isMD ? 'सर?' : `${address}?`);
-        if (hi) say(hi.speak, { interrupt: true, lang: 'hi', onDone: listen });
+        if (hi) say(hi.speak, { interrupt: true, lang: 'hi', fallback: hi.show, onDone: listen });
         else say(`${address}?`, { interrupt: true, onDone: listen });
       } else {
         silenceRef.current = 0;
@@ -204,7 +219,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     expectingRef.current = true;
     silenceRef.current = 0;
     const hi = langRef.current === 'hi';
-    say(hi ? o.textHi : o.text, { interrupt: true, lang: hi ? 'hi' : 'en', onDone: listen });
+    say(hi ? o.textHi : o.text, { interrupt: true, lang: hi ? 'hi' : 'en', fallback: o.text, onDone: listen });
   };
 
   // Woken by "Hey JARVIS": come to the orb screen, greet, listen.
@@ -262,7 +277,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
     if (d.action === 'ask') {
       push('jarvis', d.spoken_reply);
-      say(speakText, { interrupt: true, lang }); // "Ek second Sir…" while the search runs
+      say(speakText, { interrupt: true, lang, fallback: d.spoken_reply }); // "Ek second Sir…" while the search runs
       ask(d.ask_text, d.reply_language);
       return;
     }
@@ -274,7 +289,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
     if (d.action === 'briefing') {
       push('jarvis', d.spoken_reply);
-      say(speakText, { interrupt: true, lang });
+      say(speakText, { interrupt: true, lang, fallback: d.spoken_reply });
       briefing();
       return;
     }
@@ -319,7 +334,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const a = res.data;
       push('jarvis', a.text, { sources: a.sources });
       expectingRef.current = false;
-      say(a.speak_text || a.text, { lang: a.speak_lang === 'hi' ? 'hi' : 'en' }); // queued after the holding line
+      say(a.speak_text || a.text, { lang: a.speak_lang === 'hi' ? 'hi' : 'en', fallback: a.text }); // queued after the holding line
     } catch (e) {
       setBusy('');
       const msg = e instanceof ApiError && e.code === 'timeout' ? 'That search took too long.' : "I couldn't get the answer.";
@@ -490,9 +505,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   const greet = () => {
-    push('jarvis', isMD ? 'Ji Sir?' : `Ji ${user?.name ?? ''}?`);
+    const show = isMD ? 'Ji Sir?' : `Ji ${user?.name ?? ''}?`;
+    push('jarvis', show);
     expectingRef.current = true;
-    say(isMD ? 'जी सर?' : 'जी?', { lang: 'hi', interrupt: true, onDone: listen });
+    say(isMD ? 'जी सर?' : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
   };
 
   useEffect(() => {

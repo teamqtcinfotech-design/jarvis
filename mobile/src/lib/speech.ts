@@ -1,27 +1,33 @@
 import * as Speech from 'expo-speech';
 
+import { onTts, ttsAvailable, ttsSpeak, ttsStop } from './wake';
+
 // One voice at a time. Speaking stops instantly when the mic opens.
-// onDone fires when an utterance finishes naturally or fails (so a conversation never gets stuck),
+// onDone fires when an utterance finishes naturally, fails, or times out (so a conversation never gets stuck),
 // but not when it is interrupted on purpose.
 export type SpeakLang = 'hi' | 'en';
 
 interface Utterance {
+  id: string;
   text: string;
   lang: SpeakLang;
+  /** Plain-letter version of a Devanagari sentence, used if the phone has no Hindi voice. */
+  fallback?: string;
   onDone?: () => void;
 }
 
 let queue: Utterance[] = [];
-let speaking = false;
+let current: { item: Utterance; watchdog: ReturnType<typeof setTimeout> } | null = null;
 // Voice used for English sentences. 'hi-IN' = Hindi accent (default), 'en-IN' = Indian English.
 let accent = 'hi-IN';
+let seq = 0;
 const listeners = new Set<(speaking: boolean) => void>();
 
 export function setVoiceAccent(value: string) {
   accent = value;
 }
 
-/** Subscribe to speaking on/off (for the "Speaking…" status). Returns an unsubscribe function. */
+/** Subscribe to speaking on/off (for the orb). Returns an unsubscribe function. */
 export function onSpeakingChange(fn: (speaking: boolean) => void) {
   listeners.add(fn);
   return () => {
@@ -29,57 +35,66 @@ export function onSpeakingChange(fn: (speaking: boolean) => void) {
   };
 }
 
-function setSpeaking(value: boolean) {
-  if (speaking === value) return;
-  speaking = value;
-  listeners.forEach((fn) => fn(value));
+function notify(speaking: boolean) {
+  listeners.forEach((fn) => fn(speaking));
 }
 
+/** Called when the native voice (or expo-speech, or the watchdog) says the current sentence has ended. */
+function finish(id: string, event: 'done' | 'error' | 'stopped' | 'timeout') {
+  if (!current || current.item.id !== id) return;
+  clearTimeout(current.watchdog);
+  const { item } = current;
+  current = null;
+  notify(false);
+  if (event !== 'stopped') item.onDone?.(); // an error or a hang still moves the conversation on
+  pump();
+}
+
+if (ttsAvailable) onTts((e) => finish(e.id, e.event));
+
 function pump() {
-  if (speaking || queue.length === 0) return;
+  if (current || queue.length === 0) return;
   const item = queue.shift()!;
-  setSpeaking(true);
+  const language = item.lang === 'hi' ? 'hi-IN' : accent;
+  // If the engine never answers (lost connection, missing voice), give up after a generous reading time.
+  const watchdog = setTimeout(() => finish(item.id, 'timeout'), 5000 + item.text.length * 90);
+  current = { item, watchdog };
+  notify(true);
+  if (ttsAvailable) {
+    if (!ttsSpeak(item.id, item.text, language, item.fallback ?? null, 0.95)) finish(item.id, 'error');
+    return;
+  }
   Speech.speak(item.text, {
-    language: item.lang === 'hi' ? 'hi-IN' : accent,
+    language,
     rate: 0.95,
     pitch: 1.0,
-    onDone: () => {
-      setSpeaking(false);
-      item.onDone?.();
-      pump();
-    },
-    onStopped: () => {
-      setSpeaking(false);
-      pump();
-    },
-    onError: () => {
-      setSpeaking(false);
-      item.onDone?.();
-      pump();
-    },
+    onDone: () => finish(item.id, 'done'),
+    onStopped: () => finish(item.id, 'stopped'),
+    onError: () => finish(item.id, 'error'),
   });
 }
 
-export function say(text: string, opts: { interrupt?: boolean; onDone?: () => void; lang?: SpeakLang } = {}) {
+export function say(text: string, opts: { interrupt?: boolean; onDone?: () => void; lang?: SpeakLang; fallback?: string } = {}) {
   if (!text?.trim()) {
     opts.onDone?.();
     return;
   }
-  if (opts.interrupt) {
-    queue = [];
-    Speech.stop();
-    setSpeaking(false);
-  }
-  queue.push({ text, lang: opts.lang ?? 'en', onDone: opts.onDone });
+  if (opts.interrupt) stopSpeaking();
+  queue.push({ id: `u${Date.now()}-${seq++}`, text, lang: opts.lang ?? 'en', fallback: opts.fallback, onDone: opts.onDone });
   pump();
 }
 
 export function stopSpeaking() {
   queue = [];
-  Speech.stop();
-  setSpeaking(false);
+  if (ttsAvailable) ttsStop();
+  else Speech.stop();
+  if (current) {
+    clearTimeout(current.watchdog);
+    current = null;
+    notify(false);
+  }
 }
 
 export function isSpeaking() {
-  return speaking;
+  return current !== null;
 }

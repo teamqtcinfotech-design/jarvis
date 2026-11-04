@@ -112,7 +112,9 @@ export default function Settings() {
   };
 
   const testVoice = () => {
-    say(isMD ? 'नमस्ते सर, मैं जार्विस हूँ। बताइए, मैं क्या करूँ?' : `नमस्ते, मैं जार्विस हूँ।`, { interrupt: true, lang: 'hi' });
+    say(isMD ? 'नमस्ते सर, मैं जार्विस हूँ। बताइए, मैं क्या करूँ?' : `नमस्ते, मैं जार्विस हूँ।`, {
+      interrupt: true, lang: 'hi', fallback: isMD ? 'Namaste Sir, main JARVIS hoon. Bataiye, main kya karoon?' : 'Namaste, main JARVIS hoon.',
+    });
     say(isMD ? 'Good day, Sir. JARVIS is ready.' : `Hello ${user?.name}. JARVIS is ready.`);
   };
 

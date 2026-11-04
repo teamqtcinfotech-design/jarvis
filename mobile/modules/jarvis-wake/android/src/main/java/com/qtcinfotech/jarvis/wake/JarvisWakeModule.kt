@@ -20,14 +20,28 @@ class JarvisWakeModule : Module() {
 
     override fun definition() = ModuleDefinition {
         Name("JarvisWake")
-        Events("wake")
+        Events("wake", "tts")
 
         OnCreate {
             WakeBus.listener = { sendEvent("wake", emptyMap<String, Any>()) }
+            TtsEngine.init(context)
+            TtsEngine.callback = { id, event ->
+                try {
+                    sendEvent("tts", mapOf("id" to id, "event" to event))
+                } catch (_: Throwable) {
+                }
+            }
         }
         OnDestroy {
             WakeBus.listener = null
+            TtsEngine.callback = null
         }
+
+        // JARVIS's voice: reconnects by itself and always reports back (see TtsEngine).
+        Function("speak") { id: String, text: String, lang: String, fallback: String?, rate: Double ->
+            TtsEngine.speak(TtsEngine.Request(id, text, fallback, lang, rate.toFloat()))
+        }
+        Function("stopSpeaking") { TtsEngine.stop() }
         OnActivityEntersForeground {
             WakeBus.appInForeground = true
             val extras = appContext.currentActivity?.intent

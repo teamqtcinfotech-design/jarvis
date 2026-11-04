@@ -22,6 +22,11 @@ export interface WakeStatus {
   manufacturer: string;
 }
 
+export interface TtsEvent {
+  id: string;
+  event: 'done' | 'error' | 'stopped';
+}
+
 type Native = {
   getStatus: () => Promise<WakeStatus>;
   start: (config: WakeConfig) => Promise<boolean>;
@@ -32,7 +37,10 @@ type Native = {
   openOverlaySettings: () => void;
   openBatterySettings: () => void;
   openAutostartSettings: () => boolean;
-  addListener: (event: 'wake', listener: () => void) => { remove: () => void };
+  speak: (id: string, text: string, lang: string, fallback: string | null, rate: number) => void;
+  stopSpeaking: () => void;
+  addListener: ((event: 'wake', listener: () => void) => { remove: () => void }) &
+    ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void });
 };
 
 let native: Native | null = null;
@@ -106,6 +114,37 @@ export function onWake(listener: () => void): () => void {
   if (!native) return () => undefined;
   try {
     const sub = native.addListener('wake', listener);
+    return () => sub.remove();
+  } catch {
+    return () => undefined;
+  }
+}
+
+// ---------------------------------------------------------------- the voice (self-healing TTS)
+export const ttsAvailable = native !== null && typeof native.speak === 'function';
+
+export function ttsSpeak(id: string, text: string, lang: string, fallback: string | null, rate: number): boolean {
+  if (!native || !ttsAvailable) return false;
+  try {
+    native.speak(id, text, lang, fallback, rate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function ttsStop() {
+  try {
+    native?.stopSpeaking();
+  } catch {
+    // ignore
+  }
+}
+
+export function onTts(listener: (e: TtsEvent) => void): () => void {
+  if (!native || !ttsAvailable) return () => undefined;
+  try {
+    const sub = native.addListener('tts', listener);
     return () => sub.remove();
   } catch {
     return () => undefined;

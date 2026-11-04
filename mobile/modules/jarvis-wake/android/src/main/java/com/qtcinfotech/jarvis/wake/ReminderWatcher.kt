@@ -3,7 +3,6 @@ package com.qtcinfotech.jarvis.wake
 import android.app.KeyguardManager
 import android.content.Context
 import android.os.PowerManager
-import android.speech.tts.TextToSpeech
 import android.util.Log
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -24,16 +23,9 @@ import java.util.Locale
  */
 class ReminderWatcher(private val context: Context, private val notifier: WakeNotifier) {
     private val prefs = WakeBus.prefs(context)
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
 
     init {
-        tts = TextToSpeech(context.applicationContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale("hi", "IN") // the app's default: an Indian voice
-                ttsReady = true
-            }
-        }
+        TtsEngine.init(context)
     }
 
     /** Returns false when the login has expired for good (the service should stop and let the app re-issue it). */
@@ -106,8 +98,8 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
     }
 
     private fun speak(text: String) {
-        if (!ttsReady || text.isBlank() || WakeBus.appInForeground) return
-        tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "jarvis-" + System.nanoTime())
+        if (text.isBlank() || WakeBus.appInForeground) return
+        TtsEngine.speak(TtsEngine.Request("bg-" + System.nanoTime(), text, null, "hi-IN", 0.95f))
     }
 
     // ------------------------------------------------------------------ HTTP with its own token chain
@@ -169,9 +161,7 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
     }
 
     fun close() {
-        tts?.stop()
-        tts?.shutdown()
-        tts = null
+        // The shared voice stays alive for the app.
     }
 
     companion object {

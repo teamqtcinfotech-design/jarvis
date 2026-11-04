@@ -92,6 +92,11 @@ class WakeService : Service() {
             val chunk = ShortArray(WakeDetector.CHUNK)
             var cooldownUntil = 0L
             var recording = false
+            var windowMax = 0f
+            var windowLevel = 0.0
+            var windowChunks = 0
+            var lastReport = System.currentTimeMillis()
+            Log.i(TAG, "Listening for Hey JARVIS (models loaded)")
             try {
                 while (!stopped) {
                     if (WakeBus.paused || WakeBus.appInForeground && WakeBus.listener == null) {
@@ -99,13 +104,15 @@ class WakeService : Service() {
                         if (recording) {
                             record.stop()
                             recording = false
+                            Log.i(TAG, "paused: microphone released")
                         }
-                        Thread.sleep(150)
+                        Thread.sleep(100)
                         continue
                     }
                     if (!recording) {
                         record.startRecording()
                         recording = true
+                        Log.i(TAG, "listening again (state=${record.recordingState})")
                     }
                     var got = 0
                     while (got < chunk.size && !stopped) {
@@ -115,9 +122,23 @@ class WakeService : Service() {
                     }
                     if (got < chunk.size) continue
                     val score = detector.process(chunk)
+                    // Diagnostics: every 2 s, the loudest score and the sound level (0 = silence, ~3000 = speech).
+                    var sum = 0.0
+                    for (s in chunk) sum += (s * s).toDouble()
+                    windowLevel += Math.sqrt(sum / chunk.size)
+                    windowChunks += 1
+                    if (score > windowMax) windowMax = score
                     val now = System.currentTimeMillis()
+                    if (now - lastReport >= 2000) {
+                        Log.i(TAG, String.format("score max=%.3f level=%.0f", windowMax, windowLevel / windowChunks))
+                        windowMax = 0f
+                        windowLevel = 0.0
+                        windowChunks = 0
+                        lastReport = now
+                    }
                     if (score >= THRESHOLD && now > cooldownUntil) {
                         cooldownUntil = now + 2500
+                        Log.i(TAG, String.format("Hey JARVIS detected (score %.3f)", score))
                         onWakeWord()
                     }
                 }
