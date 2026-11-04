@@ -409,6 +409,18 @@ class RequestWithdrawView(APIView):
         return Response(services.request_item(services.withdraw_request(request.user, request_id)))
 
 
+class MePrefsView(APIView):
+    """Settings shared by the app and the background listener (JARVIS changes them by voice too)."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        return Response(services.get_prefs(request.user))
+
+    def patch(self, request):
+        patch = request.data if isinstance(request.data, dict) else {}
+        return Response(services.set_prefs(request.user, patch))
+
+
 class DeviceTokenView(APIView):
     """A separate login for the phone's background "Hey JARVIS" service.
 

@@ -211,10 +211,12 @@ function describeHeld(items: EngineItem[], isMD: boolean): { en: string; hi: str
 
 export function AlertEngineProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
-  const { prefs } = usePrefs();
+  const { prefs, update: updatePrefs } = usePrefs();
   const address = user?.role === 'MD' ? 'Sir' : user?.name ?? '';
 
-  const [meetingMode, setMeetingMode] = useState(false);
+  // Meeting mode is a shared setting (JARVIS can switch it by voice, even from the background listener).
+  const meetingMode = prefs.meetingMode;
+  const setMeetingMode = useCallback((on: boolean) => updatePrefs({ meetingMode: on }), [updatePrefs]);
   const [busyWindows, setBusyWindows] = useState<{ start: string; end: string }[]>([]);
   const presence = usePresence({
     awayAfterMinutes: prefs.awayAfterMinutes,

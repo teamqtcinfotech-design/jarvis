@@ -100,7 +100,8 @@ class ChoiceItemSerializer(serializers.Serializer):
 
 class ChoicesSerializer(serializers.Serializer):
     """JARVIS just asked "which one?" — these are the options; the new text is the answer."""
-    intent = serializers.ChoiceField(choices=[(i, i) for i in ("complete_task", "accept_request", "decline_request")])
+    intent = serializers.ChoiceField(choices=[(i, i) for i in ("complete_task", "accept_request", "decline_request",
+                                                               "change_task", "delete_task")])
     items = ChoiceItemSerializer(many=True, max_length=10)
 
 

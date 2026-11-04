@@ -15,6 +15,8 @@ from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
 TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation"}
+EDIT_ACTIONS = {"change_task", "delete_task"}
+_CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind"}
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _KINDS = {k for k, _ in Kind.choices}
@@ -55,6 +57,42 @@ def _match_items(words: str, items: list[dict]) -> list[dict]:
         return []
     best = max(s for s, _ in scored)
     return [i for s, i in scored if s == best]
+
+
+def _changes_from(cmd: dict) -> dict:
+    """The validated new values for change_task (only the fields the model listed)."""
+    out = {}
+    for field in cmd.get("changed_fields") or []:
+        if field not in _CHANGE_FIELDS:
+            continue
+        value = cmd.get(field)
+        if field == "title" and (value or "").strip():
+            out["title"] = value.strip()[:200]
+        elif field == "due_date" and _safe_date(value or ""):
+            out["due_date"] = _safe_date(value)
+        elif field == "due_time" and _safe_time(value or ""):
+            out["due_time"] = value
+        elif field == "priority" and value in _PRIORITIES:
+            out["priority"] = value
+        elif field == "kind" and value in _KINDS:
+            out["kind"] = value
+    return out
+
+
+def describe_changes(changes: dict) -> str:
+    bits = []
+    if "title" in changes:
+        bits.append(f"rename to '{changes['title']}'")
+    if "due_date" in changes or "due_time" in changes:
+        d = changes.get("due_date")
+        t = changes.get("due_time")
+        when = _due_label(d, t) if d else (tu.fmt_time(tu.combine_local(tu.today_local(), time.fromisoformat(t))) if t else "")
+        bits.append(f"move to {when}" if d else f"time to {when}")
+    if "priority" in changes:
+        bits.append(f"priority to {changes['priority'].lower()}")
+    if "kind" in changes:
+        bits.append(f"type to {changes['kind'].lower().replace('_', '-')}")
+    return ", ".join(bits)
 
 
 def _chosen(cmd: dict, by_id: dict) -> list[dict]:
@@ -301,8 +339,11 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "pa_name": "",
         "team": None,
         "target": None,
-        "targets": [],          # every item this applies to (complete / accept / decline can take several)
+        "targets": [],          # every item this applies to (complete / accept / decline / change / delete can take several)
         "target_candidates": [],
+        "changes": {},          # change_task: the new values
+        "setting_key": "",      # set_setting
+        "setting_value": "",
         "needs_clarification": bool(cmd.get("needs_clarification")),
         "question": (cmd.get("clarification_question") or "").strip(),
         "spoken_reply": (cmd.get("spoken_reply") or "").strip(),
@@ -386,6 +427,51 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             draft["target_candidates"] = matches[:5]
             draft["question"] = (f"{address}, which one did you finish: " + "; ".join(m["title"] for m in matches[:3])
                                  + ". Or both?" if matches else f"{address}, which task did you finish?")
+    elif intent in EDIT_ACTIONS:
+        draft["action"] = intent
+        open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
+        by_id = {i["id"]: i for i in open_items}
+        chosen = _chosen(cmd, by_id)
+        matches = chosen or _match_items(full_text, open_items)
+        if chosen or len(matches) == 1:
+            draft["targets"] = matches
+            draft["target"] = matches[0]
+            names = "; ".join(m["title"] for m in matches)
+            if intent == "change_task":
+                draft["changes"] = _changes_from(cmd)
+                if not draft["changes"]:
+                    draft["needs_clarification"] = True
+                    draft["question"] = f"{address}, what should I change about '{names}': the time, the day, the priority or the name?"
+                else:
+                    draft["spoken_reply"] = f"{address}, {describe_changes(draft['changes'])} for '{names}'?"
+            else:
+                # Deleting always asks first. It is a cancel, not an erase, so it can be undone from the app.
+                draft["spoken_reply"] = (f"{address}, delete '{names}'? It will be cancelled, not erased."
+                                         if len(matches) == 1 else f"{address}, delete these {len(matches)}: {names}?")
+        else:
+            draft["needs_clarification"] = True
+            draft["target_candidates"] = matches[:5]
+            verb = "change" if intent == "change_task" else "delete"
+            draft["question"] = (f"{address}, which one should I {verb}: " + "; ".join(m["title"] for m in matches[:3]) + "?"
+                                 if matches else f"{address}, which task should I {verb}?")
+    elif intent == "set_setting":
+        draft["action"] = "set_setting"
+        key = (cmd.get("setting_key") or "").strip()
+        value = (cmd.get("setting_value") or "").strip()
+        try:
+            patch = services.expand_pref_patch({key: value}) if key else {}
+            clean = dict(services.coerce_pref(k, v) for k, v in patch.items())
+            if not clean:
+                raise services.ServiceError("invalid", "Which setting should I change?", 422)
+            draft["setting_key"] = key
+            draft["setting_value"] = value
+            draft["setting_patch"] = clean
+            if not draft["spoken_reply"]:
+                what = ", ".join(services.describe_pref(k, v) for k, v in clean.items())
+                draft["spoken_reply"] = f"Done {address}: {what}."
+        except services.ServiceError as err:
+            draft["needs_clarification"] = True
+            draft["question"] = f"{address}, {err.message}"
     elif intent == "briefing":
         draft["action"] = "briefing"
         draft["spoken_reply"] = draft["spoken_reply"] or f"Here is your briefing, {address}."

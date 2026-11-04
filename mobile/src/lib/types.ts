@@ -129,6 +129,9 @@ export type DraftAction =
   | 'accept_request'
   | 'decline_request'
   | 'complete'
+  | 'change_task'
+  | 'delete_task'
+  | 'set_setting'
   | 'briefing'
   | 'ask'
   | 'remember'
@@ -163,6 +166,11 @@ export interface Draft {
   /** Every item this applies to: "mark both as done", "accept all three". */
   targets: { id: string; title: string; scope?: string; version?: number }[];
   target_candidates: { id: string; title: string; scope?: string; version?: number }[];
+  /** change_task: the new values (title / due_date / due_time / priority / kind). */
+  changes: Record<string, string>;
+  setting_key: string;
+  setting_value: string;
+  setting_patch?: Record<string, string | number | boolean>;
   needs_clarification: boolean;
   question: string;
   spoken_reply: string;

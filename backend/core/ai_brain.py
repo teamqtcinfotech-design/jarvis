@@ -32,6 +32,9 @@ INTENTS = [
     "accept_request",
     "decline_request",
     "complete_task",
+    "change_task",
+    "delete_task",
+    "set_setting",
     "query",
     "briefing",
     "general_question",
@@ -61,6 +64,10 @@ COMMAND_SCHEMA = {
         "target_ref": {"type": "string"},
         "target_refs": {"type": "array", "items": {"type": "string"},
                         "description": "ids of ALL the items meant (from open_items, pending_requests or choices); several when the user means more than one"},
+        "changed_fields": {"type": "array", "items": {"type": "string", "enum": ["title", "due_date", "due_time", "priority", "kind"]},
+                           "description": "change_task only: which of title/due_date/due_time/priority/kind carry NEW values"},
+        "setting_key": {"type": "string", "description": "set_setting only: a key from settings in the context, or quietHours"},
+        "setting_value": {"type": "string", "description": "set_setting only: the new value as text (hi-IN, en-IN, on, off, a number, or 22-7)"},
         "needs_clarification": {"type": "boolean"},
         "clarification_question": {"type": "string"},
         "spoken_reply": {"type": "string"},
@@ -75,7 +82,8 @@ COMMAND_SCHEMA = {
     },
     "required": [
         "intent", "title", "notes", "kind", "priority", "due_date", "due_time", "duration_minutes",
-        "remind_before_minutes", "staff_name", "team_name", "category_key", "target_ref", "target_refs", "needs_clarification",
+        "remind_before_minutes", "staff_name", "team_name", "category_key", "target_ref", "target_refs", "changed_fields",
+        "setting_key", "setting_value", "needs_clarification",
         "clarification_question", "spoken_reply", "spoken_reply_hi", "reply_language", "question", "memory_text",
         "done_reply", "done_reply_hi", "reminder_line", "confidence",
     ],
@@ -119,6 +127,9 @@ Rules:
 - category_key: for assign_to_staff only, pick the best matching key from task_categories (consider the person's department); use default_category when unsure. Never invent a key.
 - title vs notes: the title is short; the server keeps the user's full original sentence as the task description, so do not drop details from the instruction.
 - target_ref / target_refs: for complete_task, accept_request and decline_request, find the item(s) the speaker means BY MEANING in open_items (or pending_requests) and put their ids in target_refs (target_ref = the first). Match loosely: "Mehta wala call" matches "Call Mehta ji about the Pune franchise". "both", "dono", "sab", "all of them", "ye dono" = every matching item. Only ids that appear in the context; never invent one. Ask (needs_clarification) only when the words fit nothing or truly fit several and the speaker did not mean all of them.
+- change_task: an EXISTING task must be moved, renamed, re-prioritised or re-typed ("meeting ko 5 baje kar do", "Mehta wala call kal karo", "isko urgent kar do", "Sharma meeting cancel mat karo, 11 baje kar do"). Identify it in target_refs like complete_task. Put ONLY the new values in title / due_date / due_time / priority / kind and list exactly those in changed_fields; leave the others empty. Moving to another day without a new time: changed_fields ["due_date"] only (the time is kept). spoken_reply reads the change back as a question: "Sir, move the Sharma meeting to tomorrow 5 PM?"
+- delete_task: an existing task must be removed or cancelled ("hata do", "delete kar do", "cancel the meeting with Sharma", "ye task nahi chahiye"). Identify it in target_refs. The server will ask for a yes before anything is cancelled; spoken_reply: "Sir, delete 'X'?"
+- set_setting: a JARVIS setting must change, from settings in the context: "Hindi mein bolo" / "Hindi voice" -> setting_key voiceAccent, setting_value hi-IN; "English mein bolo" -> voiceAccent en-IN; "sirf Hindi samjho" -> listenLang hi-IN; "Hinglish / English samjho" -> listenLang auto; "meeting mode on/off" -> meetingMode on/off; "quiet hours 10 baje se 7 baje tak" -> setting_key quietHours, setting_value "22-7" (24-hour); "quiet hours band karo" -> quietHoursEnabled off; "Hey JARVIS band karo" -> wakeWordEnabled off; "5 minute baad away maano" -> awayAfterMinutes 5; "private reminders lock par bhi bolo" -> privateAloudWhenLocked on. One setting per command. spoken_reply: a short confirmation of what is being done ("Done Sir, switching to the Hindi voice."); no question.
 - When the context has choices, JARVIS has just asked "which one?" and the instruction is the ANSWER. Resolve it against choices.items only, by meaning: "the franchise one" -> that id; "pehla / first" -> the first; "both / dono / sab" -> all of them; "none / koi nahi" -> intent unknown with a short spoken_reply. Use intent = choices.intent and fill target_refs. Do not ask the same question again unless the answer fits none of them.
 - If something essential is missing or ambiguous (who, which task, which day), set needs_clarification true and ask ONE short question in clarification_question.
 - query: answer the question in spoken_reply using only facts in the context. Never reveal anything that is not in the context.

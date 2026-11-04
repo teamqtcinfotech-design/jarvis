@@ -391,6 +391,14 @@ class Memory(models.Model):
         ordering = ["-created_at"]
 
 
+class UserPrefs(models.Model):
+    """Settings shared by the app and the background listener. JARVIS can change them by voice."""
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="prefs")
+    data = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class ConversationState(models.Model):
     """Short memory of the voice conversation for the phone's background listener: the card waiting for a
     yes/no, the options after "which one?", the missed reminders JARVIS offered to read.

@@ -4,7 +4,17 @@ import type { Draft, DraftAction } from './types';
 export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delegation', 'team_delegation', 'pa_task', 'pa_meeting'];
 
 /** Cards that end with a question ("shall I save it?") and wait for a yes / no / change. */
-export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'accept_request', 'decline_request', 'complete', 'remember'];
+export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'accept_request', 'decline_request', 'complete', 'remember',
+  'change_task', 'delete_task'];
+
+const CHANGE_LABEL: Record<string, string> = { title: 'name', due_date: 'day', due_time: 'time', priority: 'priority', kind: 'type' };
+
+export function describeChanges(changes: Record<string, string> | undefined): string {
+  if (!changes) return '';
+  return Object.entries(changes)
+    .map(([k, v]) => `${CHANGE_LABEL[k] ?? k} → ${k === 'due_date' ? dayLabel(v) : v.toLowerCase()}`)
+    .join(', ');
+}
 
 /** Plain-English heading and "who sees it" line for each kind of draft. */
 export function draftHeading(d: Draft): { title: string; detail: string; icon: string } {
@@ -34,6 +44,12 @@ export function draftHeading(d: Draft): { title: string; detail: string; icon: s
       return { title: 'Decline request', detail: 'The sender will be told.', icon: 'close-circle-outline' };
     case 'complete':
       return { title: 'Mark as done', detail: '', icon: 'checkmark-done-outline' };
+    case 'change_task':
+      return { title: 'Change task', detail: describeChanges(d.changes), icon: 'create-outline' };
+    case 'delete_task':
+      return { title: 'Delete task', detail: 'It will be cancelled, not erased.', icon: 'trash-outline' };
+    case 'set_setting':
+      return { title: 'Setting', detail: '', icon: 'settings-outline' };
     case 'remember':
       return { title: 'Remember this', detail: 'Only you can see your notes. Delete them any time in Settings.', icon: 'bookmark-outline' };
     case 'choose_destination':

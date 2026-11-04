@@ -22,7 +22,7 @@ log = logging.getLogger("jarvis.conversation")
 
 STATE_TTL = timedelta(minutes=10)
 MAX_HISTORY = 8
-CONFIRMABLE = TASK_ACTIONS | {"accept_request", "decline_request", "complete", "remember"}
+CONFIRMABLE = TASK_ACTIONS | {"accept_request", "decline_request", "complete", "remember", "change_task", "delete_task"}
 AI_DONE_OK = {"private_task", "pa_task", "pa_meeting", "md_request", "remember", "accept_request", "decline_request",
               "complete"}
 EMPTY = {"history": [], "pending": None, "choices": None, "offer": None}
@@ -63,6 +63,7 @@ def _heading(p: dict) -> str:
         "team_delegation": f"Task for {(p.get('team') or {}).get('label', 'the team')}",
         "md_request": "Request to Sir", "accept_request": "Accept request", "decline_request": "Decline request",
         "complete": "Mark as done", "remember": "Remember this", "choose_destination": "Where should this go?",
+        "change_task": "Change task", "delete_task": "Delete task",
     }.get(p.get("action", ""), "JARVIS")
 
 
@@ -72,7 +73,8 @@ def _describe(p: dict) -> str:
         " + ".join(t["title"] for t in targets) if targets else p.get("title", ""))
     when = f", {p['due_label']}" if p.get("due_label") else ""
     who = f", for {p['staff']['name']}" if p.get("action") == "delegation" and p.get("staff") else ""
-    return f"{_heading(p)}: {what}{when}{who}"[:400]
+    change = f" ({assistant.describe_changes(p['changes'])})" if p.get("action") == "change_task" and p.get("changes") else ""
+    return f"{_heading(p)}: {what}{when}{who}{change}"[:400]
 
 
 def _slim(draft: dict) -> dict:
@@ -80,7 +82,8 @@ def _slim(draft: dict) -> dict:
 
 
 def _choices_for(draft: dict) -> dict | None:
-    intent = {"complete": "complete_task", "accept_request": "accept_request", "decline_request": "decline_request"}.get(draft["action"])
+    intent = {"complete": "complete_task", "accept_request": "accept_request", "decline_request": "decline_request",
+              "change_task": "change_task", "delete_task": "delete_task"}.get(draft["action"])
     if intent and draft.get("target_candidates"):
         return {"intent": intent, "items": [{"id": c["id"], "title": c["title"]} for c in draft["target_candidates"][:10]]}
     return None
@@ -143,6 +146,12 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         facts, fallback = services.briefing_facts(user, "now")
         txt, _engine = ai_brain.briefing(facts, fallback, user=user)
         resp = _resp(txt, listen=True, action="briefing")
+    elif action == "set_setting" and not draft["needs_clarification"]:
+        try:
+            services.set_prefs(user, draft.get("setting_patch") or {})
+            resp = _resp(show, speak, lang, listen=True, action="setting_applied")
+        except ServiceError as err:
+            resp = _resp(f"{address}, {err.message}", listen=True, action="error")
     elif draft["needs_clarification"] or action == "choose_destination":
         state["pending"] = _slim(draft) if (action in CONFIRMABLE or action == "choose_destination") else None
         state["choices"] = _choices_for(draft)
@@ -217,6 +226,24 @@ def _complete_one(user: User, t: dict) -> bool:
     return True
 
 
+def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
+    """Apply a change (or a cancel) to one task. Returns True when it went to Sir for approval instead."""
+    version = int(t.get("version") or 1)
+    clean = dict(changes)
+    if clean.get("due_date"):
+        clean["due_date"] = date.fromisoformat(clean["due_date"])
+    if clean.get("due_time"):
+        clean["due_time"] = time.fromisoformat(clean["due_time"])
+    if t.get("scope") == "private":
+        services.update_private_task(user, t["id"], clean, version)
+        return False
+    if user.is_md:
+        services.update_shared_md_task(user, t["id"], clean, version)
+        return False
+    services.propose_change(user, t["id"], clean, version, reason)
+    return True
+
+
 def _execute(user: User, p: dict, address: str) -> dict:
     a = p.get("action")
     targets = p.get("targets") or ([p["target"]] if p.get("target") else [])
@@ -280,6 +307,24 @@ def _execute(user: User, p: dict, address: str) -> dict:
         elif a == "remember":
             services.add_memory(user, p.get("memory_text", ""))
             spoken = f"Done, {address}. I'll remember that."
+        elif a in {"change_task", "delete_task"}:
+            if not targets:
+                raise ServiceError("invalid", "I don't know which task.", 422)
+            if a == "change_task":
+                changes = p.get("changes") or {}
+                if not changes:
+                    raise ServiceError("invalid", "nothing to change.", 422)
+                reason = "Changed by voice: " + assistant.describe_changes(changes)
+            else:
+                changes, reason = {"status": Status.CANCELLED}, "Cancelled by voice"
+            to_sir = sum(1 for t in targets if _change_one(user, t, changes, reason))
+            what = "Changed" if a == "change_task" else "Deleted"
+            if to_sir:
+                spoken = f"Sent to Sir to confirm, {address}."
+            elif len(targets) == 1:
+                spoken = f"{what}, {address}." + (" It's cancelled, not erased." if a == "delete_task" else "")
+            else:
+                spoken = f"{what} {len(targets)}, {address}."
         else:
             raise ServiceError("invalid", "I can't do that from here.", 422)
     except ServiceError as err:

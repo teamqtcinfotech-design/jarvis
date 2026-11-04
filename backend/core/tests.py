@@ -1,6 +1,6 @@
 """Release-blocking tests: privacy boundary, approval flow, idempotency, parser."""
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from django.db import IntegrityError, connection
 from django.test import TestCase, override_settings
@@ -517,7 +517,8 @@ def _cmd(**fields) -> dict:
     base = {
         "intent": "unknown", "title": "", "notes": "", "kind": "TASK", "priority": "NORMAL", "due_date": "",
         "due_time": "", "duration_minutes": 0, "remind_before_minutes": 0, "staff_name": "", "team_name": "",
-        "category_key": "", "target_ref": "", "target_refs": [], "needs_clarification": False, "clarification_question": "",
+        "category_key": "", "target_ref": "", "target_refs": [], "changed_fields": [], "setting_key": "", "setting_value": "",
+        "needs_clarification": False, "clarification_question": "",
         "spoken_reply": "", "spoken_reply_hi": "", "reply_language": "en", "question": "", "memory_text": "",
         "reminder_line": "", "confidence": 0.9, "engine": "ai",
     }
@@ -703,6 +704,49 @@ class SmartAssistantTests(BaseCase):
         self.assertNotIn(SECRET, json.dumps(r))
         from core.models import ConversationState
         self.assertNotIn(SECRET, ConversationState.objects.get(user=self.pa).state_json)
+
+    def test_change_task_by_voice_moves_the_time(self):
+        tomorrow = tu.today_local() + timedelta(days=1)
+        task = services.create_private_task(self.md, {"title": "Meeting with Sharma ji", "kind": Kind.MEETING,
+                                                      "priority": Priority.NORMAL, "due_date": tomorrow,
+                                                      "due_time": time(9, 0)})
+        r = self.turn(self.md_client, "Sharma meeting 5 baje kar do", _cmd(
+            intent="change_task", target_refs=[str(task.id)], changed_fields=["due_time"], due_time="17:00",
+            spoken_reply="Sir, move the Sharma meeting to 5 PM?"))
+        self.assertEqual(r["action"], "change_task")
+        task.refresh_from_db()
+        self.assertNotEqual(tu.to_local(task.due_at).hour, 17)  # nothing changes before the yes
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved")
+        task.refresh_from_db()
+        self.assertEqual(tu.to_local(task.due_at).hour, 17)
+        self.assertEqual(task.version, 2)
+
+    def test_delete_task_by_voice_always_asks_then_cancels(self):
+        task = services.create_private_task(self.md, {"title": "Renew club membership", "kind": Kind.TASK,
+                                                      "priority": Priority.LOW, "due_date": tu.today_local()})
+        r = self.turn(self.md_client, "club wala task hata do", _cmd(intent="delete_task", target_refs=[str(task.id)]))
+        self.assertEqual(r["action"], "delete_task")
+        self.assertIn("delete", r["show"].lower())
+        task.refresh_from_db()
+        self.assertEqual(task.status, "OPEN")
+        self.turn(self.md_client, "haan hata do", _cmd(intent="confirm_pending"))
+        task.refresh_from_db()
+        self.assertEqual(task.status, "CANCELLED")
+
+    def test_settings_by_voice_and_api(self):
+        r = self.turn(self.md_client, "Hindi mein bolo", _cmd(intent="set_setting", setting_key="voiceAccent",
+                                                               setting_value="Hindi", spoken_reply="Done Sir, Hindi voice."))
+        self.assertEqual(r["action"], "setting_applied")
+        self.assertEqual(self.md_client.get("/api/v1/me/prefs/").json()["voiceAccent"], "hi-IN")
+        r = self.turn(self.md_client, "quiet hours 10 baje se 7 tak", _cmd(intent="set_setting", setting_key="quietHours",
+                                                                            setting_value="22-7", spoken_reply=""))
+        prefs = self.md_client.get("/api/v1/me/prefs/").json()
+        self.assertEqual((prefs["quietStartHour"], prefs["quietEndHour"], prefs["quietHoursEnabled"]), (22, 7, True))
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"meetingMode": "on"}, format="json").json()["meetingMode"], True)
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"nonsense": 1}, format="json").status_code, 422)
+        # The PA's settings are her own.
+        self.assertEqual(self.pa_client.get("/api/v1/me/prefs/").json()["voiceAccent"], "hi-IN")
 
     def test_device_token_is_a_separate_login_chain(self):
         self.assertEqual(APIClient().post("/api/v1/auth/device-token/", {}, format="json").status_code, 401)

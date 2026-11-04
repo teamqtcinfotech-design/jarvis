@@ -8,6 +8,7 @@ Privacy rules enforced in this module:
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import date, datetime, time, timedelta
 
@@ -35,6 +36,7 @@ from .models import (
     TaskCategory,
     TaskRequest,
     User,
+    UserPrefs,
 )
 from .taskpanel import dispatcher as tp_dispatcher
 from .taskpanel import sync as tp_sync
@@ -928,7 +930,111 @@ def ai_context(user: User, include_private: bool = True) -> dict:
         ctx["my_requests"] = [{"title": r["title"], "state": r["state"]} for r in dash["requests"][:10]]
     # Only the speaker's own remembered facts (the MD's never reach a PA context and vice versa).
     ctx["memories"] = [m.text for m in Memory.objects.filter(owner=user)[:MEMORY_LIMIT]]
+    # JARVIS settings the speaker may change by voice.
+    current = get_prefs(user)
+    ctx["settings"] = {
+        k: {"now": current[k], "allowed": v["values"] if v["type"] == "enum" else ("on/off" if v["type"] == "bool" else f"{v['min']}-{v['max']}"),
+            "means": v["say"]}
+        for k, v in PREF_SCHEMA.items()
+    }
+    ctx["settings"]["quietHours"] = {"now": f"{current['quietStartHour']}-{current['quietEndHour']}", "allowed": "START-END in 24h",
+                                     "means": "quiet hours start and end together"}
     return ctx
+
+
+# ------------------------------------------------------------------ settings (shared by app + background listener)
+PREF_SCHEMA = {
+    "listenLang": {"type": "enum", "values": ["auto", "hi-IN"], "default": "auto", "say": "listening language",
+                   "aliases": {"auto": "auto", "english": "auto", "hinglish": "auto", "both": "auto", "mixed": "auto",
+                               "hindi": "hi-IN", "hi": "hi-IN", "hi-in": "hi-IN"},
+                   "labels": {"auto": "Hindi and English together", "hi-IN": "pure Hindi"}},
+    "voiceAccent": {"type": "enum", "values": ["hi-IN", "en-IN"], "default": "hi-IN", "say": "voice",
+                    "aliases": {"hindi": "hi-IN", "hi": "hi-IN", "hi-in": "hi-IN", "english": "en-IN", "en": "en-IN",
+                                "en-in": "en-IN", "indian english": "en-IN"},
+                    "labels": {"hi-IN": "Hindi voice", "en-IN": "Indian English voice"}},
+    "speakPrivateDetails": {"type": "bool", "default": True, "say": "speaking private reminders aloud"},
+    "privateAloudWhenLocked": {"type": "bool", "default": False, "say": "private reminders aloud when the phone is locked"},
+    "awayAfterMinutes": {"type": "int", "min": 1, "max": 120, "default": 10, "say": "away time (minutes)"},
+    "quietHoursEnabled": {"type": "bool", "default": True, "say": "quiet hours"},
+    "quietStartHour": {"type": "int", "min": 0, "max": 23, "default": 22, "say": "quiet hours start"},
+    "quietEndHour": {"type": "int", "min": 0, "max": 23, "default": 7, "say": "quiet hours end"},
+    "wakeWordEnabled": {"type": "bool", "default": False, "say": "Hey JARVIS listening"},
+    "meetingMode": {"type": "bool", "default": False, "say": "meeting mode"},
+}
+_TRUE_WORDS = {"on", "true", "yes", "1", "haan", "han", "ha", "enable", "enabled", "chalu", "chaalu", "start"}
+_FALSE_WORDS = {"off", "false", "no", "0", "nahi", "nahin", "disable", "disabled", "band", "stop"}
+
+
+def pref_defaults() -> dict:
+    return {k: v["default"] for k, v in PREF_SCHEMA.items()}
+
+
+def get_prefs(user: User) -> dict:
+    row = UserPrefs.objects.filter(user=user).first()
+    stored = (row.data if row else None) or {}
+    return {**pref_defaults(), **{k: v for k, v in stored.items() if k in PREF_SCHEMA}}
+
+
+def coerce_pref(key: str, value) -> tuple[str, object]:
+    """Validate one setting from the API or from the AI ("Hindi", "on", "5"). Returns (key, clean value)."""
+    spec = PREF_SCHEMA.get(key)
+    if not spec:
+        raise ServiceError("invalid", f"There is no setting called {key}.", 422)
+    t = spec["type"]
+    if t == "bool":
+        if isinstance(value, bool):
+            return key, value
+        s = str(value).strip().lower()
+        if s in _TRUE_WORDS:
+            return key, True
+        if s in _FALSE_WORDS:
+            return key, False
+        raise ServiceError("invalid", f"Say on or off for {spec['say']}.", 422)
+    if t == "int":
+        try:
+            n = int(str(value).strip())
+        except ValueError:
+            raise ServiceError("invalid", f"{spec['say']} needs a number.", 422)
+        if not spec["min"] <= n <= spec["max"]:
+            raise ServiceError("invalid", f"{spec['say']} must be between {spec['min']} and {spec['max']}.", 422)
+        return key, n
+    s = str(value).strip()
+    s = spec.get("aliases", {}).get(s.lower(), s)
+    if s not in spec["values"]:
+        raise ServiceError("invalid", f"{spec['say']} can be: " + ", ".join(spec["values"]) + ".", 422)
+    return key, s
+
+
+def describe_pref(key: str, value) -> str:
+    spec = PREF_SCHEMA[key]
+    if spec["type"] == "bool":
+        return f"{spec['say']} {'on' if value else 'off'}"
+    if spec["type"] == "int":
+        return f"{spec['say']} {value}"
+    return spec.get("labels", {}).get(value, f"{spec['say']} {value}")
+
+
+def expand_pref_patch(patch: dict) -> dict:
+    """'quietHours': '22-7' (also '10 pm to 7 am' style numbers) -> start, end, enabled."""
+    patch = dict(patch)
+    if "quietHours" in patch:
+        raw = str(patch.pop("quietHours"))
+        nums = [int(n) for n in re.findall(r"\d{1,2}", raw)]
+        if len(nums) != 2:
+            raise ServiceError("invalid", "Quiet hours need a start and an end hour, like 22 to 7.", 422)
+        patch.update({"quietStartHour": nums[0], "quietEndHour": nums[1], "quietHoursEnabled": True})
+    return patch
+
+
+def set_prefs(user: User, patch: dict) -> dict:
+    clean = dict(coerce_pref(k, v) for k, v in expand_pref_patch(patch or {}).items())
+    if not clean:
+        raise ServiceError("invalid", "Nothing to change.", 422)
+    row, _ = UserPrefs.objects.get_or_create(user=user)
+    row.data = {**(row.data or {}), **clean}
+    row.save()
+    audit(user, "prefs.update", "user", user.id, "keys: " + ",".join(sorted(clean)))
+    return get_prefs(user)
 
 
 # ------------------------------------------------------------------ memory (explicit "remember this")

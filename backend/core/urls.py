@@ -9,6 +9,7 @@ urlpatterns = [
     path("auth/logout/", views.LogoutView.as_view()),
     path("auth/device-token/", views.DeviceTokenView.as_view()),
     path("me/", views.MeView.as_view()),
+    path("me/prefs/", views.MePrefsView.as_view()),
     path("health/", views.HealthView.as_view()),
     path("today/", views.TodayView.as_view()),
     path("busy/", views.BusyView.as_view()),

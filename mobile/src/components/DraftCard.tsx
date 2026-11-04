@@ -22,6 +22,8 @@ const SAVE_LABEL: Partial<Record<DraftAction, string>> = {
   decline_request: 'Decline',
   complete: 'Mark done',
   remember: 'Yes, remember',
+  change_task: 'Change',
+  delete_task: 'Delete',
 };
 
 interface Props {

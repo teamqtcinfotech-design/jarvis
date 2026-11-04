@@ -75,7 +75,7 @@ const newId = () => `m${Date.now()}-${seq++}`;
 
 export function ConversationProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
-  const { prefs } = usePrefs();
+  const { prefs, applyServerPrefs } = usePrefs();
   const { setVoiceProbe, offer, acceptOffer, declineOffer, setHeldVisible, held } = useAlertEngine();
   const isMD = user?.role === 'MD';
   const address = isMD ? 'Sir' : user?.name ?? '';
@@ -99,7 +99,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const presentedOffer = useRef(0);
   const wokeAtRef = useRef(0);
   // JARVIS just asked "which one?": the options, so the next words are matched against them by the AI.
-  const choicesRef = useRef<{ intent: 'complete_task' | 'accept_request' | 'decline_request'; items: { id: string; title: string }[] } | null>(null);
+  const choicesRef = useRef<{
+    intent: 'complete_task' | 'accept_request' | 'decline_request' | 'change_task' | 'delete_task';
+    items: { id: string; title: string }[];
+  } | null>(null);
   const fns = useRef<{
     heard: (t: string) => void;
     voiceError: (m: string, c: string) => void;
@@ -322,6 +325,14 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       save(); // the AI understood a "yes" in whatever words were used
       return;
     }
+    if (d.action === 'set_setting' && !d.needs_clarification && d.setting_patch) {
+      // Settings change straight away (no yes needed): the server already validated them.
+      api('/me/prefs/', { method: 'PATCH', body: d.setting_patch })
+        .then((r) => applyServerPrefs(r.data))
+        .catch(() => undefined);
+      reply(d.spoken_reply, speakText, lang, true);
+      return;
+    }
     if (d.action === 'cancel_pending') {
       setDraft(null);
       previousRef.current = '';
@@ -333,7 +344,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       previousRef.current = d.transcript;
       if (CONFIRMABLE.includes(d.action) || d.action === 'choose_destination') setDraft(d);
       // "Which one?" — remember the options so the answer ("both", "the franchise one") is matched against them.
-      const intent = d.action === 'complete' ? 'complete_task' : d.action === 'accept_request' || d.action === 'decline_request' ? d.action : null;
+      const intent = d.action === 'complete' ? 'complete_task'
+        : d.action === 'accept_request' || d.action === 'decline_request' || d.action === 'change_task' || d.action === 'delete_task' ? d.action
+        : null;
       if (intent && d.target_candidates?.length) {
         choicesRef.current = { intent, items: d.target_candidates.map((c) => ({ id: c.id, title: c.title })) };
       }
@@ -486,6 +499,20 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       } else if (d.action === 'remember') {
         await api('/memories/', { method: 'POST', body: { text: d.memory_text }, idempotencyKey: key });
         spoken = `Done, ${address}. I'll remember that.`;
+      } else if (d.action === 'change_task' || d.action === 'delete_task') {
+        const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
+        if (!list.length) return setBusy('');
+        const patch = d.action === 'change_task' ? d.changes : { status: 'CANCELLED' };
+        let sentToSir = 0;
+        for (const t of list) {
+          const path = t.scope === 'private' ? `/private-tasks/${t.id}/` : `/shared-tasks/${t.id}/`;
+          const res = await api(path, { method: 'PATCH', body: { expected_version: t.version ?? 1, ...patch } });
+          if (res.status === 202) sentToSir += 1;
+        }
+        const what = d.action === 'change_task' ? 'Changed' : 'Deleted';
+        spoken = sentToSir ? `Sent to Sir to confirm, ${address}.`
+          : list.length === 1 ? `${what}, ${address}.${d.action === 'delete_task' ? " It's cancelled, not erased." : ''}`
+          : `${what} ${list.length}, ${address}.`;
       }
       setBusy('');
       setDraft(null);
