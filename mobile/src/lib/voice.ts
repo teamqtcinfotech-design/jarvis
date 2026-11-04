@@ -23,6 +23,8 @@ export const SILENCE_CODES = new Set(['no-speech', 'speech-timeout']);
 interface Handlers {
   onFinal?: (text: string) => void;
   onError?: (message: string, code: string) => void;
+  /** Words the recogniser should expect (JARVIS, Mansi, staff names) so they are not misheard. */
+  hints?: string[];
 }
 
 /** Android's built-in recogniser ('auto' = Hindi + English, or 'hi-IN'). Audio never reaches our server. */
@@ -86,8 +88,9 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       interimResults: true,
       continuous: false,
       addsPunctuation: true,
+      contextualStrings: handlersRef.current.hints?.length ? handlersRef.current.hints.slice(0, 60) : undefined,
       androidIntentOptions: {
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1600,
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1000,
         ...(canSwitch
           ? {
               EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced' as const,

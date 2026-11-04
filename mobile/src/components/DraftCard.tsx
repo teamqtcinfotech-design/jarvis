@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { StyleSheet, TextInput, View } from 'react-native';
 
 import { api } from '@/lib/api';
+import { TASK_DRAFTS, draftHeading } from '@/lib/drafts';
 import { addDays, dayLabel, isoDate } from '@/lib/format';
 import { colors, kindLabel, priorityColor, priorityLabel, radius, shadow } from '@/lib/theme';
 import type { CategoryOption, Draft, DraftAction, Kind, Priority, StaffOption } from '@/lib/types';
@@ -10,45 +11,6 @@ import { Button, Chip, Icon, Txt } from './ui';
 
 const PRIORITIES: Priority[] = ['URGENT', 'HIGH', 'NORMAL', 'LOW'];
 const KINDS: Kind[] = ['TASK', 'MEETING', 'CALL', 'PAYMENT', 'FOLLOW_UP'];
-
-export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delegation', 'team_delegation', 'pa_task', 'pa_meeting'];
-
-/** Plain-English heading and "who sees it" line for each kind of draft. */
-export function draftHeading(d: Draft): { title: string; detail: string; icon: string } {
-  const pa = d.pa_name || 'your PA';
-  switch (d.action) {
-    case 'private_task':
-      return { title: 'Your personal task', detail: 'Only you can see this.', icon: 'lock-closed-outline' };
-    case 'pa_task':
-      return { title: `Task for ${pa}`, detail: `${pa} does it. You both get reminders.`, icon: 'person-outline' };
-    case 'pa_meeting':
-      return { title: `Meeting with ${pa}`, detail: `${pa} is told. You both get reminders.`, icon: 'people-outline' };
-    case 'delegation':
-      return d.staff
-        ? { title: `Task for ${d.staff.name}`, detail: `${d.staff.department} · goes to the staff task app`, icon: 'briefcase-outline' }
-        : { title: 'Task for a staff member', detail: 'Choose who should do it.', icon: 'briefcase-outline' };
-    case 'team_delegation':
-      return {
-        title: `Task for ${d.team?.label ?? 'the team'}`,
-        detail: `${d.team?.members.length ?? 0} people · each gets their own task`,
-        icon: 'people-circle-outline',
-      };
-    case 'md_request':
-      return { title: 'Request to Sir', detail: 'Sir will accept or decline it.', icon: 'paper-plane-outline' };
-    case 'accept_request':
-      return { title: 'Accept request', detail: 'It will be added to your list.', icon: 'checkmark-circle-outline' };
-    case 'decline_request':
-      return { title: 'Decline request', detail: 'The sender will be told.', icon: 'close-circle-outline' };
-    case 'complete':
-      return { title: 'Mark as done', detail: '', icon: 'checkmark-done-outline' };
-    case 'remember':
-      return { title: 'Remember this', detail: 'Only you can see your notes. Delete them any time in Settings.', icon: 'bookmark-outline' };
-    case 'choose_destination':
-      return { title: 'Where should this go?', detail: 'Say: personal, your PA, or a staff name.', icon: 'help-circle-outline' };
-    default:
-      return { title: 'JARVIS', detail: '', icon: 'sparkles-outline' };
-  }
-}
 
 const SAVE_LABEL: Partial<Record<DraftAction, string>> = {
   private_task: 'Save',

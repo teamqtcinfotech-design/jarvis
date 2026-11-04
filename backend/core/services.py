@@ -895,18 +895,19 @@ def ai_context(user: User) -> dict:
         return {k: item.get(k) for k in ("id", "title", "kind", "priority", "status", "due_label", "scope", "version")} | (
             {"assignee": item["assignee"].get("staff_name")} if item.get("assignee", {}).get("staff_name") else {}
         )
+    # Kept short on purpose: every item here is sent to the model on every command, and size costs seconds.
     ctx["open_items"] = {
-        "overdue": [brief(i) for i in dash["overdue"][:15]],
-        "today": [brief(i) for i in dash["today"][:20]],
-        "upcoming": [brief(i) for i in dash["upcoming"][:15]],
+        "overdue": [brief(i) for i in dash["overdue"][:8]],
+        "today": [brief(i) for i in dash["today"][:12]],
+        "upcoming": [brief(i) for i in dash["upcoming"][:8]],
     }
-    ctx["delegated"] = [brief(i) for i in dash["delegated"][:20]]
+    ctx["delegated"] = [brief(i) for i in dash["delegated"][:10]]
     pa = get_pa()
     if user.is_md:
         ctx["pa_name"] = pa.spoken_name if pa else ""
-        ctx["tasks_given_to_pa"] = [brief(i) | {"status_label": i["status_label"]} for i in dash.get("pa_tasks", [])[:20]]
+        ctx["tasks_given_to_pa"] = [brief(i) | {"status_label": i["status_label"]} for i in dash.get("pa_tasks", [])[:10]]
     else:
-        ctx["md_tasks_from_my_requests"] = [brief(i) for i in dash.get("md_tasks", [])[:20]]
+        ctx["md_tasks_from_my_requests"] = [brief(i) for i in dash.get("md_tasks", [])[:10]]
     if user.is_md:
         ctx["pending_requests"] = [
             {"id": r["id"], "title": r["title"], "from": r["requested_by"], "priority": r["priority"],
