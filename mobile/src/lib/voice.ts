@@ -1,5 +1,6 @@
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 
 import { stopSpeaking } from './speech';
 
@@ -75,16 +76,19 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     }
     setState('listening');
     const auto = lang === 'auto';
+    // The automatic Hindi/English switch exists only on Android 14+ (API 34). Older phones fail to start the
+    // recogniser if these options are even passed, so they are added only where Android has them.
+    const canSwitch = auto && Platform.OS === 'android' && Number(Platform.Version) >= 34;
     ExpoSpeechRecognitionModule.start({
-      // 'auto': start in Indian English (understands Hinglish too) and let the phone switch to Hindi by itself
-      // where Android supports it (Android 14+); older phones simply ignore the switch options.
+      // 'auto': start in Indian English (understands Hinglish too) and, on Android 14+, let the phone switch
+      // to Hindi by itself.
       lang: auto ? 'en-IN' : lang,
       interimResults: true,
       continuous: false,
       addsPunctuation: true,
       androidIntentOptions: {
         EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1600,
-        ...(auto
+        ...(canSwitch
           ? {
               EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced' as const,
               EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ['en-IN', 'hi-IN'],

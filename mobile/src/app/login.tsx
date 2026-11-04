@@ -3,16 +3,17 @@ import React, { useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { Button, Icon, Txt } from '@/components/ui';
-import { ApiError } from '@/lib/api';
-import { DEFAULT_SERVER, isDevServer } from '@/lib/config';
+import { Button, Chip, Icon, Txt } from '@/components/ui';
+import { ApiError, normalizeServer } from '@/lib/api';
+import { DEFAULT_SERVER, LOCAL_SERVER } from '@/lib/config';
 import { useSession } from '@/lib/session';
 import { colors, fonts, radius, shadow } from '@/lib/theme';
 
 export default function Login() {
   const { user, signIn, server: savedServer } = useSession();
-  // The live server is filled in; an old laptop/USB address from testing is replaced by it.
-  const [server, setServer] = useState(savedServer && !isDevServer(savedServer) ? savedServer : DEFAULT_SERVER);
+  // The last address used on this phone is kept (live server or laptop); a fresh install gets the live server.
+  const [server, setServer] = useState(savedServer || DEFAULT_SERVER);
+  const current = normalizeServer(server);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -54,6 +55,10 @@ export default function Login() {
               keyboardType="url"
               style={s.input}
             />
+            <View style={s.servers}>
+              <Chip label="Live server" icon="cloud-outline" selected={current === DEFAULT_SERVER} onPress={() => setServer(DEFAULT_SERVER)} />
+              <Chip label="Laptop over USB" icon="laptop-outline" selected={current === LOCAL_SERVER} onPress={() => setServer(LOCAL_SERVER)} />
+            </View>
             <Txt variant="label" style={s.label}>Username</Txt>
             <TextInput value={username} onChangeText={setUsername} autoCapitalize="none" autoCorrect={false} style={s.input} />
             <Txt variant="label" style={s.label}>Password</Txt>
@@ -85,6 +90,7 @@ const s = StyleSheet.create({
   brand: { fontFamily: fonts.serif, fontSize: 32, lineHeight: 46, letterSpacing: 8, paddingLeft: 10, paddingRight: 2, textAlign: 'center', color: colors.ink, marginTop: 16 },
   card: { alignSelf: 'stretch', backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, padding: 20, marginTop: 30, ...shadow },
   label: { marginTop: 12, color: colors.inkSoft },
+  servers: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 8 },
   input: {
     backgroundColor: colors.bg,
     borderWidth: 1,
