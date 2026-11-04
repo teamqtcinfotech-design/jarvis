@@ -9,6 +9,8 @@ android {
   defaultConfig {
     versionCode 1
     versionName "1.0.0"
+    // Applied to the app's release build too, so the shrinker leaves ONNX Runtime alone.
+    consumerProguardFiles "proguard-rules.pro"
   }
   lintOptions {
     abortOnError false
