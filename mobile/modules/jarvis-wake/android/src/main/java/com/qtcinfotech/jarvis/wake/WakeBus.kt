@@ -10,6 +10,8 @@ object WakeBus {
     @Volatile var appInForeground = false
     @Volatile var paused = false
     @Volatile var running = false
+    /** A background (voice-only) conversation is going on: the wake-word mic and the reminder watcher stand aside. */
+    @Volatile var inConversation = false
 
     fun onWake() {
         val l = listener

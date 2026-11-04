@@ -646,6 +646,64 @@ class SmartAssistantTests(BaseCase):
         draft, _ = self.interpret(self.md_client, "done", _cmd(intent="complete_task", target_refs=["not-a-real-id"], title="xyz"))
         self.assertNotEqual(draft["action"], "complete") if draft["targets"] else self.assertTrue(draft["needs_clarification"])
 
+    def turn(self, client, text, cmd=None, **extra):
+        if cmd is None:
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        else:
+            with mock.patch("core.ai_brain.interpret", return_value=cmd):
+                r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_background_conversation_creates_a_task_after_yes(self):
+        tomorrow = (tu.today_local() + timedelta(days=1)).isoformat()
+        r = self.turn(self.md_client, "kal 4 baje Sharma ji ke saath meeting", _cmd(
+            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", due_date=tomorrow, due_time="16:00",
+            spoken_reply="Sir, meeting with Sharma ji tomorrow at 4 PM. Shall I save it?",
+            done_reply="Ho gaya Sir, kal 4 baje yaad dila dunga."))
+        self.assertEqual(r["action"], "private_task")
+        self.assertTrue(r["listen"])
+        before = PrivateTask.objects.filter(owner=self.md).count()
+        r = self.turn(self.md_client, "bilkul kar do", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved")
+        self.assertEqual(r["show"], "Ho gaya Sir, kal 4 baje yaad dila dunga.")
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before + 1)
+        # Nothing is waiting any more: a second "yes" saves nothing.
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before + 1)
+        self.assertNotEqual(r["action"], "saved")
+
+    def test_background_conversation_ends_and_forgets(self):
+        self.turn(self.md_client, "Mehta ji ko call", _cmd(intent="create_task", title="Call Mehta ji", spoken_reply="Save?"))
+        r = self.turn(self.md_client, "bas, stop listening", _cmd(intent="end_conversation", spoken_reply="Ji Sir."))
+        self.assertFalse(r["listen"])
+        before = PrivateTask.objects.filter(owner=self.md).count()
+        self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before)  # the draft was forgotten
+
+    def test_wake_offers_missed_reminders_and_hides_private_when_locked(self):
+        past = tu.now_local() - timedelta(minutes=20)
+        services.create_private_task(self.md, {"title": SECRET + " call", "kind": Kind.CALL, "priority": Priority.HIGH,
+                                               "due_date": past.date(), "due_time": past.time().replace(second=0, microsecond=0)})
+        r = self.turn(self.md_client, "", event="wake", locked=True, private_ok=False)
+        self.assertEqual(r["action"], "offer")
+        self.assertIn("Shall I read them?", r["show"])
+        self.assertNotIn(SECRET, json.dumps(r))
+        r = self.turn(self.md_client, "haan padho", _cmd(intent="confirm_pending"), locked=True, private_ok=False)
+        self.assertEqual(r["action"], "read_missed")
+        self.assertNotIn(SECRET, r["say"])  # locked phone: only "you have a private reminder"
+        self.assertIn("private reminder", r["say"])
+        # Unlocked: the real text is read.
+        r = self.turn(self.md_client, "", event="wake")
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertIn(SECRET, r["say"])
+
+    def test_background_turn_never_shows_private_items_to_pa(self):
+        r = self.turn(self.pa_client, "Sir ke tasks batao", _cmd(intent="query", spoken_reply="Nothing from Sir today."))
+        self.assertNotIn(SECRET, json.dumps(r))
+        from core.models import ConversationState
+        self.assertNotIn(SECRET, ConversationState.objects.get(user=self.pa).state_json)
+
     def test_device_token_is_a_separate_login_chain(self):
         self.assertEqual(APIClient().post("/api/v1/auth/device-token/", {}, format="json").status_code, 401)
         r = self.md_client.post("/api/v1/auth/device-token/", {}, format="json")

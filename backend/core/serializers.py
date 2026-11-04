@@ -117,6 +117,14 @@ class InterpretSerializer(serializers.Serializer):
         return value[-8:]
 
 
+class TurnSerializer(serializers.Serializer):
+    """One thing the user said to the background listener (or a wake / reset event)."""
+    text = serializers.CharField(max_length=1000, required=False, allow_blank=True, default="", trim_whitespace=True)
+    event = serializers.ChoiceField(choices=[("", ""), ("wake", "wake"), ("reset", "reset")], required=False, default="")
+    locked = serializers.BooleanField(required=False, default=False)
+    private_ok = serializers.BooleanField(required=False, default=True)
+
+
 class AskSerializer(serializers.Serializer):
     question = serializers.CharField(max_length=1000, trim_whitespace=True)
     lang = serializers.ChoiceField(choices=[("en", "en"), ("hi", "hi")], required=False, default="en")

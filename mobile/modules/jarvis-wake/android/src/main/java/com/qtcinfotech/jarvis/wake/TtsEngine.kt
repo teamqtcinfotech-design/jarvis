@@ -24,6 +24,18 @@ object TtsEngine {
     private var ready = false
     private val pending = ArrayDeque<Request>()
     @Volatile var callback: ((id: String, event: String) -> Unit)? = null
+    private val thenCallbacks = java.util.concurrent.ConcurrentHashMap<String, () -> Unit>()
+
+    /** Speak, then run [onDone] once it has finished (or failed, or was stopped) — used by the background conversation. */
+    fun speakThen(req: Request, onDone: () -> Unit) {
+        thenCallbacks[req.id] = onDone
+        speak(req)
+    }
+
+    private fun finished(id: String, event: String) {
+        callback?.invoke(id, event)
+        thenCallbacks.remove(id)?.invoke()
+    }
 
     fun init(context: Context) {
         synchronized(lock) {
@@ -50,20 +62,20 @@ object TtsEngine {
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) {
-                utteranceId?.let { callback?.invoke(it, "done") }
+                utteranceId?.let { finished(it, "done") }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                utteranceId?.let { callback?.invoke(it, "error") }
+                utteranceId?.let { finished(it, "error") }
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
-                utteranceId?.let { callback?.invoke(it, "error") }
+                utteranceId?.let { finished(it, "error") }
             }
 
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                utteranceId?.let { callback?.invoke(it, "stopped") }
+                utteranceId?.let { finished(it, "stopped") }
             }
         })
         tts = engine
@@ -118,7 +130,7 @@ object TtsEngine {
     }
 
     private fun failOne(req: Request) {
-        callback?.invoke(req.id, "error")
+        finished(req.id, "error")
     }
 
     fun stop() {
@@ -129,5 +141,6 @@ object TtsEngine {
             } catch (_: Throwable) {
             }
         }
+        for (id in thenCallbacks.keys.toList()) thenCallbacks.remove(id)?.invoke()
     }
 }

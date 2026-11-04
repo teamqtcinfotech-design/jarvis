@@ -3,10 +3,6 @@ package com.qtcinfotech.jarvis.wake
 import android.app.KeyguardManager
 import android.content.Context
 import android.os.PowerManager
-import android.util.Log
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -30,11 +26,9 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
 
     /** Returns false when the login has expired for good (the service should stop and let the app re-issue it). */
     fun check(): Boolean {
-        if (WakeBus.appInForeground) return true
-        val server = prefs.getString(WakeBus.KEY_SERVER, "") ?: ""
-        if (server.isEmpty()) return true
-        val reminders = get("$server/api/v1/reminders/?hours=1") ?: return tokensAlive()
-        val alerts = get("$server/api/v1/alerts/")
+        if (WakeBus.appInForeground || WakeBus.inConversation) return true
+        val reminders = Api.get(context, "/reminders/?hours=1") ?: return !Api.tokensDead
+        val alerts = Api.get(context, "/alerts/")
         val nowSec = System.currentTimeMillis() / 1000
         val spoken = prefs.getStringSet(WakeBus.KEY_SPOKEN, emptySet())?.toMutableSet() ?: mutableSetOf()
         var changed = false
@@ -102,69 +96,8 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         TtsEngine.speak(TtsEngine.Request("bg-" + System.nanoTime(), text, null, "hi-IN", 0.95f))
     }
 
-    // ------------------------------------------------------------------ HTTP with its own token chain
-    private fun get(url: String): JSONObject? {
-        val first = request("GET", url, null, prefs.getString(WakeBus.KEY_ACCESS, "") ?: "")
-        if (first.first != 401) return first.second
-        if (!refresh()) return null
-        return request("GET", url, null, prefs.getString(WakeBus.KEY_ACCESS, "") ?: "").second
-    }
-
-    private var tokensDead = false
-    private fun tokensAlive() = !tokensDead
-
-    private fun refresh(): Boolean {
-        val server = prefs.getString(WakeBus.KEY_SERVER, "") ?: ""
-        val refreshToken = prefs.getString(WakeBus.KEY_REFRESH, "") ?: ""
-        if (refreshToken.isEmpty()) {
-            tokensDead = true
-            return false
-        }
-        val body = JSONObject().put("refresh", refreshToken).toString()
-        val (code, json) = request("POST", "$server/api/v1/auth/refresh/", body, null)
-        if (code != 200 || json == null) {
-            if (code == 401) tokensDead = true
-            return false
-        }
-        prefs.edit()
-            .putString(WakeBus.KEY_ACCESS, json.optString("access"))
-            .putString(WakeBus.KEY_REFRESH, json.optString("refresh", refreshToken))
-            .apply()
-        return true
-    }
-
-    private fun request(method: String, url: String, body: String?, bearer: String?): Pair<Int, JSONObject?> {
-        var conn: HttpURLConnection? = null
-        return try {
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = method
-                connectTimeout = 8000
-                readTimeout = 12000
-                setRequestProperty("Accept", "application/json")
-                if (!bearer.isNullOrEmpty()) setRequestProperty("Authorization", "Bearer $bearer")
-                if (body != null) {
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json")
-                    outputStream.use { it.write(body.toByteArray()) }
-                }
-            }
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-            Pair(code, runCatching { JSONObject(text) }.getOrNull())
-        } catch (e: Exception) {
-            Log.w(TAG, "request failed: ${e.message}")
-            Pair(0, null)
-        } finally {
-            conn?.disconnect()
-        }
-    }
-
     fun close() {
         // The shared voice stays alive for the app.
     }
 
-    companion object {
-        private const val TAG = "JarvisWake"
-    }
 }

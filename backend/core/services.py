@@ -873,8 +873,12 @@ def recheck_delegation(user: User, task_id) -> SharedTask:
 
 
 # --------------------------------------------------------------------------- AI context
-def ai_context(user: User) -> dict:
-    """Facts the AI may use. Strictly scoped: a PA context contains no MD private data."""
+def ai_context(user: User, include_private: bool = True) -> dict:
+    """Facts the AI may use. Strictly scoped: a PA context contains no MD private data.
+
+    include_private=False (phone locked, talking to the background listener): the MD's private items are
+    left out as well, so nothing private is spoken to whoever is holding a locked phone.
+    """
     now = tu.now_local()
     tp_sync.ensure_directory(user)
     staff = [{"id": s.external_id, "name": s.name, "department": s.department, "on_leave": s.on_leave}
@@ -896,11 +900,16 @@ def ai_context(user: User) -> dict:
             {"assignee": item["assignee"].get("staff_name")} if item.get("assignee", {}).get("staff_name") else {}
         )
     # Kept short on purpose: every item here is sent to the model on every command, and size costs seconds.
+    def keep(item):
+        return include_private or item.get("scope") != "private"
     ctx["open_items"] = {
-        "overdue": [brief(i) for i in dash["overdue"][:8]],
-        "today": [brief(i) for i in dash["today"][:12]],
-        "upcoming": [brief(i) for i in dash["upcoming"][:8]],
+        "overdue": [brief(i) for i in dash["overdue"] if keep(i)][:8],
+        "today": [brief(i) for i in dash["today"] if keep(i)][:12],
+        "upcoming": [brief(i) for i in dash["upcoming"] if keep(i)][:8],
     }
+    if not include_private:
+        ctx["note"] = ("The phone is locked, so the MD's private items are not in this list. If asked about them, "
+                       "say they will be available once the phone is unlocked.")
     ctx["delegated"] = [brief(i) for i in dash["delegated"][:10]]
     pa = get_pa()
     if user.is_md:

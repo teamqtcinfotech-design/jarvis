@@ -12,7 +12,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from . import ai_brain, ai_usage, assistant, services
+from . import ai_brain, ai_usage, assistant, conversation, services
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
@@ -35,6 +35,7 @@ from .serializers import (
     TeamDelegationSerializer,
     TaskInputSerializer,
     TaskPatchSerializer,
+    TurnSerializer,
     VersionSerializer,
 )
 from .services import ServiceError
@@ -437,6 +438,20 @@ class InterpretView(APIView):
                                       s.validated_data["history"], s.validated_data["awaiting"],
                                       s.validated_data.get("choices"))
         return Response(draft)
+
+
+class ConversationTurnView(APIView):
+    """Voice-only conversation for the phone's background listener: say → (JARVIS does the work) → reply."""
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant"
+
+    def post(self, request):
+        s = TurnSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        return Response(conversation.turn(request.user, d["text"], event=d["event"], locked=d["locked"],
+                                          private_ok=d["private_ok"]))
 
 
 class AskView(APIView):

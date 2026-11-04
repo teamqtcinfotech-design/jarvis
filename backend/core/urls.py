@@ -37,6 +37,7 @@ urlpatterns = [
     # Assistant
     path("assistant/interpret/", views.InterpretView.as_view()),
     path("assistant/ask/", views.AskView.as_view()),
+    path("assistant/turn/", views.ConversationTurnView.as_view()),
     path("assistant/briefing/", views.BriefingView.as_view()),
     path("assistant/usage/", views.AiUsageView.as_view()),
     # Things the user asked JARVIS to remember (owner-only)

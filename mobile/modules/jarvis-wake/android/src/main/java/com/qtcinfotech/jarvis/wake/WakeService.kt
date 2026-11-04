@@ -29,6 +29,7 @@ class WakeService : Service() {
     @Volatile private var stopped = false
     private var watcherThread: HandlerThread? = null
     private var watcher: ReminderWatcher? = null
+    private var loop: ConversationLoop? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -100,7 +101,7 @@ class WakeService : Service() {
             Log.i(TAG, "Listening for Hey JARVIS (models loaded)")
             try {
                 while (!stopped) {
-                    if (WakeBus.paused || WakeBus.appInForeground && WakeBus.listener == null) {
+                    if (WakeBus.paused || WakeBus.inConversation || WakeBus.appInForeground && WakeBus.listener == null) {
                         // Someone else needs the mic (JARVIS itself is listening or talking): let it go.
                         if (recording) {
                             record.stop()
@@ -167,10 +168,16 @@ class WakeService : Service() {
         } catch (_: Throwable) {
         }
         if (WakeBus.appInForeground && WakeBus.listener != null) {
-            WakeBus.onWake()
+            WakeBus.onWake() // the app is open: it runs the conversation on screen
             return
         }
-        // App closed or behind another app: bring it to the front; the app greets ("Ji Sir?") once it is up.
+        // App closed (or behind another app, or the phone locked): talk right here, voice only. The screen stays as it is.
+        if (ConversationLoop.available(this)) {
+            val l = loop ?: ConversationLoop(this, notifier).also { loop = it }
+            l.start()
+            return
+        }
+        // No speech recognition service on this phone: fall back to bringing the app up.
         WakeBus.pendingWake = true
         val launch = packageManager.getLaunchIntentForPackage(packageName) ?: return
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
@@ -223,6 +230,8 @@ class WakeService : Service() {
     override fun onDestroy() {
         stopped = true
         WakeBus.running = false
+        loop?.destroy()
+        loop = null
         audioThread?.interrupt()
         audioThread = null
         watcher?.close()

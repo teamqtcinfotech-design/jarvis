@@ -90,6 +90,25 @@ class WakeNotifier(private val context: Context) {
 
     fun cancelSwitchOn() = manager.cancel(SWITCH_ON_ID)
 
+    /** During a voice-only conversation the permanent notification shows the last line, so he can glance at it. */
+    fun showConversation(text: String) {
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, CHANNEL_SERVICE)
+        else @Suppress("DEPRECATION") Notification.Builder(context)
+        manager.notify(
+            SERVICE_ID,
+            builder.setSmallIcon(icon())
+                .setContentTitle("JARVIS")
+                .setContentText(text)
+                .setStyle(Notification.BigTextStyle().bigText(text))
+                .setContentIntent(openApp())
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build(),
+        )
+    }
+
+    fun restoreServiceNotification() = manager.notify(SERVICE_ID, serviceNotification())
+
     /** "Ji Sir? Tap to talk" when the phone would not let JARVIS pop up by itself. */
     fun showWakeFallback(address: String) {
         val open = openApp(WakeService.EXTRA_WAKE)

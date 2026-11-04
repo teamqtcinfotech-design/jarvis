@@ -231,11 +231,12 @@ _TASK_INTENTS = {"create_task", "assign_to_staff", "assign_to_team", "assign_to_
 
 
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
-                awaiting: str = "", choices: dict | None = None) -> dict:
+                awaiting: str = "", choices: dict | None = None, include_private: bool = True) -> dict:
     """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed.
-    choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer."""
+    choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer.
+    include_private=False: phone locked; the MD's private items are kept out of the model's view."""
     full_text = f"{previous}. {text}".strip(". ") if previous else text
-    ctx = services.ai_context(user)
+    ctx = services.ai_context(user, include_private=include_private)
     # The last few turns of THIS conversation, so follow-ups like "aur Neha ko bhi" make sense.
     ctx["conversation"] = ai_brain.history_text(history)
     model_text = full_text

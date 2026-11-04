@@ -391,6 +391,18 @@ class Memory(models.Model):
         ordering = ["-created_at"]
 
 
+class ConversationState(models.Model):
+    """Short memory of the voice conversation for the phone's background listener: the card waiting for a
+    yes/no, the options after "which one?", the missed reminders JARVIS offered to read.
+
+    Encrypted at rest (it can hold a private task title) and forgotten after a few minutes of silence.
+    """
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="conversation_state")
+    state_json = EncryptedTextField(blank=True, default="{}")
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class AiUsage(models.Model):
     """Daily AI counters per user, so spending stays visible and capped."""
 
