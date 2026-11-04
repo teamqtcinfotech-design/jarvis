@@ -13,6 +13,8 @@ backend/staticfiles/
 
 # ---- Node / Expo (mobile/.gitignore has the app-specific rules)
 node_modules/
+mobile/modules/*/android/build/
+mobile/modules/*/android/.cxx/
 
 # ---- Build outputs and archives
 *.apk
