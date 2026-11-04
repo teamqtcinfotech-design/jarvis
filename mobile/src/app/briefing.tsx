@@ -95,5 +95,5 @@ const s = StyleSheet.create({
     borderTopColor: colors.gold,
     padding: 20,
   },
-  text: { fontFamily: 'serif', fontSize: 18, lineHeight: 29, color: colors.text, marginBottom: 14 },
+  text: { fontSize: 17, lineHeight: 27, color: colors.text, marginBottom: 14 },
 });

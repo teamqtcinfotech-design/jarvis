@@ -87,7 +87,7 @@ const s = StyleSheet.create({
   crest: { width: 76, height: 76, borderRadius: 38, borderWidth: 1, borderColor: colors.gold, backgroundColor: colors.goldSoft, alignItems: 'center', justifyContent: 'center' },
   // lineHeight must fit the 32px serif (the body default of 21 clipped the "J"); paddingLeft balances the
   // trailing letter-spacing so the word is centred and the J's hook has room.
-  brand: { fontFamily: fonts.serif, fontSize: 32, lineHeight: 46, letterSpacing: 8, paddingLeft: 10, paddingRight: 2, textAlign: 'center', color: colors.ink, marginTop: 16 },
+  brand: { fontFamily: fonts.serif, fontSize: 28, fontWeight: '700', lineHeight: 40, letterSpacing: 3, paddingLeft: 4, textAlign: 'center', color: colors.ink, marginTop: 16 },
   card: { alignSelf: 'stretch', backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, padding: 20, marginTop: 30, ...shadow },
   label: { marginTop: 12, color: colors.inkSoft },
   servers: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 8 },

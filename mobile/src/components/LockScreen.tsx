@@ -30,5 +30,5 @@ export function LockScreen() {
 const s = StyleSheet.create({
   wrap: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center', zIndex: 100 },
   crest: { width: 84, height: 84, borderRadius: 42, borderWidth: 1, borderColor: colors.gold, backgroundColor: colors.goldSoft, alignItems: 'center', justifyContent: 'center' },
-  brand: { fontFamily: fonts.serif, fontSize: 32, lineHeight: 46, letterSpacing: 8, paddingLeft: 10, paddingRight: 2, textAlign: 'center', color: colors.ink, marginTop: 18 },
+  brand: { fontFamily: fonts.serif, fontSize: 28, fontWeight: '700', lineHeight: 40, letterSpacing: 3, paddingLeft: 4, textAlign: 'center', color: colors.ink, marginTop: 18 },
 });

@@ -33,6 +33,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     private val prefs = WakeBus.prefs(context)
     private val address: String get() = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
     private val isMd: Boolean get() = address == "Sir"
+    private val overlay = OverlayOrb(context) { end() }
 
     fun start() {
         if (active) return
@@ -40,6 +41,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         WakeBus.inConversation = true
         silenceRounds = 0
         retries = 0
+        overlay.show("…", "thinking")
         main.post {
             ensureRecognizer()
             send("", "wake")
@@ -50,6 +52,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         if (!active) return
         active = false
         WakeBus.inConversation = false
+        overlay.hide()
         main.post {
             try {
                 recognizer?.cancel()
@@ -74,6 +77,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     private fun send(text: String, event: String = "") {
         if (!active) return
         notifier.showConversation(if (text.isEmpty()) "Listening…" else "You: $text")
+        overlay.update(if (text.isEmpty()) null else "“$text”", "thinking")
         net.execute {
             val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
             val locked = km.isKeyguardLocked
@@ -97,7 +101,10 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         val say = resp.optString("say", show)
         val lang = if (resp.optString("say_lang") == "hi") "hi-IN" else "hi-IN" // Indian voice for both, like the app
         val listen = resp.optBoolean("listen", true)
-        if (show.isNotBlank()) notifier.showConversation("JARVIS: $show")
+        if (show.isNotBlank()) {
+            notifier.showConversation("JARVIS: $show")
+            overlay.update(show, "speaking")
+        }
         speakThen(say, resp.optString("fallback", show), lang) {
             if (active && listen) listen() else end()
         }
@@ -124,6 +131,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         main.post {
             ensureRecognizer()
             notifier.showConversation("Listening…")
+            overlay.update(null, "listening")
             try {
                 recognizer?.startListening(intent())
             } catch (e: Throwable) {

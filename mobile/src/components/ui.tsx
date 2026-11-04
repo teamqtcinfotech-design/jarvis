@@ -17,13 +17,13 @@ import { colors, fonts, priorityColor, priorityLabel, prioritySoft, radius, shad
 type Variant = 'display' | 'title' | 'heading' | 'body' | 'small' | 'label' | 'caption';
 
 const variantStyle: Record<Variant, TextStyle> = {
-  display: { fontFamily: fonts.serif, fontSize: 30, color: colors.ink, letterSpacing: 0.2 },
-  title: { fontFamily: fonts.serif, fontSize: 22, color: colors.ink },
-  heading: { fontSize: 16, fontWeight: '600', color: colors.text },
-  body: { fontSize: 15, color: colors.text, lineHeight: 21 },
-  small: { fontSize: 13, color: colors.muted, lineHeight: 18 },
-  label: { fontSize: 11, fontWeight: '700', color: colors.gold, letterSpacing: 1.4, textTransform: 'uppercase' },
-  caption: { fontSize: 12, color: colors.faint },
+  display: { fontFamily: fonts.serif, fontSize: 28, fontWeight: '600', color: colors.ink, letterSpacing: -0.3, lineHeight: 36 },
+  title: { fontFamily: fonts.serif, fontSize: 21, fontWeight: '600', color: colors.ink, letterSpacing: -0.2, lineHeight: 28 },
+  heading: { fontSize: 16, fontWeight: '600', color: colors.text, lineHeight: 22 },
+  body: { fontSize: 16, color: colors.text, lineHeight: 24 },
+  small: { fontSize: 14, color: colors.muted, lineHeight: 20 },
+  label: { fontSize: 12, fontWeight: '600', color: colors.muted, letterSpacing: 0.6, textTransform: 'uppercase' },
+  caption: { fontSize: 12, color: colors.faint, lineHeight: 16 },
 };
 
 export function Txt({ variant = 'body', style, ...rest }: TextProps & { variant?: Variant }) {

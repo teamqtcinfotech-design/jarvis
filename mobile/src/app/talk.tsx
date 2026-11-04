@@ -128,7 +128,7 @@ export default function Talk() {
 
 const s = StyleSheet.create({
   top: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingTop: 4, paddingBottom: 6 },
-  brand: { fontFamily: fonts.serif, fontSize: 18, lineHeight: 26, letterSpacing: 4, paddingLeft: 4, color: colors.ink },
+  brand: { fontFamily: fonts.serif, fontSize: 16, fontWeight: '700', lineHeight: 24, letterSpacing: 2, color: colors.ink },
   userRow: { flexDirection: 'row', justifyContent: 'flex-end', marginBottom: 14 },
   userBubble: { maxWidth: '82%', backgroundColor: colors.surfaceAlt, borderRadius: 20, borderBottomRightRadius: 6, paddingVertical: 10, paddingHorizontal: 14 },
   jarvisRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 16 },

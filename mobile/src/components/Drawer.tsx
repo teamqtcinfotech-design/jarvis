@@ -99,7 +99,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 18,
   },
   head: { paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
-  brand: { fontFamily: fonts.serif, fontSize: 20, lineHeight: 28, letterSpacing: 5, paddingLeft: 3, color: colors.ink },
+  brand: { fontFamily: fonts.serif, fontSize: 18, fontWeight: '700', lineHeight: 26, letterSpacing: 2, color: colors.ink },
   meeting: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   item: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, paddingHorizontal: 6, borderRadius: radius.md },
   count: { minWidth: 26, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, backgroundColor: colors.surfaceAlt, alignItems: 'center' },

@@ -1,25 +1,26 @@
-// Light, calm and premium: whitish background, near-black text, one warm accent used sparingly.
+// Clean, quiet, assistant-like: white surfaces, near-black text, neutral greys, one warm accent used sparingly.
+// System sans-serif everywhere (Roboto on Android), sized like a modern chat assistant.
 export const colors = {
-  bg: '#FAFAF8',
+  bg: '#FFFFFF',
   surface: '#FFFFFF',
-  surfaceAlt: '#F2F2EF',
-  ink: '#1C2333', // primary: buttons, mic, headings
-  inkSoft: '#3D4556',
-  text: '#1C1F26',
-  muted: '#6B6F78',
-  faint: '#A0A3AA',
-  line: '#E6E5E0',
-  gold: '#B5854B', // the one accent colour
-  goldSoft: '#F6EEE2',
-  success: '#2E7D5B',
-  successSoft: '#E6F2EC',
-  danger: '#B4372F',
+  surfaceAlt: '#F4F4F5',
+  ink: '#0D0D0D', // primary: buttons, orb, headings
+  inkSoft: '#3F3F46',
+  text: '#1A1A1A',
+  muted: '#6B6B76',
+  faint: '#A1A1AA',
+  line: '#E6E6EA',
+  gold: '#B8864F', // the one accent colour
+  goldSoft: '#F7EFE4',
+  success: '#1F7A4D',
+  successSoft: '#E6F4EC',
+  danger: '#C0392B',
   dangerSoft: '#FBEAE8',
   warn: '#B7791F',
   warnSoft: '#FBF1DF',
   info: '#2F6FB0',
   infoSoft: '#E8F0F9',
-  overlay: 'rgba(20,24,33,0.35)',
+  overlay: 'rgba(13,13,13,0.35)',
   white: '#FFFFFF',
 };
 
@@ -61,14 +62,15 @@ export const kindIcon: Record<string, string> = {
 };
 
 export const fonts = {
-  serif: 'serif',
+  // Kept as a name so headings can switch later; the app now uses the system sans-serif everywhere.
+  serif: 'sans-serif',
 };
 
-export const radius = { sm: 8, md: 12, lg: 18, xl: 28 };
+export const radius = { sm: 10, md: 14, lg: 20, xl: 28 };
 
 export const shadow = {
-  shadowColor: '#1C2333',
-  shadowOpacity: 0.06,
+  shadowColor: '#0D0D0D',
+  shadowOpacity: 0.05,
   shadowRadius: 14,
   shadowOffset: { width: 0, height: 4 },
   elevation: 2,
