@@ -59,7 +59,7 @@ until acknowledged · every reminder is also an exact OS alarm so nothing is los
 
 ## Demo script (5 minutes)
 
-1. Login as **md** → greeting, presence bar "With you", Priya's request is announced aloud → **Accept**.
+1. Login as **md** → greeting, presence bar "With you", Mansi's request is announced aloud → **Accept**.
 2. Tap mic: *"kal subah saade gyarah baje Sharma franchise ke saath meeting, urgent"* → card shows tomorrow 11:30 AM, Urgent → **Save**.
 3. Mic: *"Ramesh ko bolo parso tak GST reconciliation bhej de"* → JARVIS asks *which Ramesh* → pick Ramesh Kumar → **Assign**.
 4. **Briefing** → Sonnet reads the day aloud.

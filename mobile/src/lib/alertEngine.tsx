@@ -206,10 +206,17 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     setCurrent(next);
   }, [setCurrent]);
 
+  // Private details are spoken only while the app is open on screen (and allowed), unless the MD
+  // has also allowed it when the phone is locked or the app is in the background.
+  const privateAloud = useCallback(() => {
+    const p = prefsRef.current;
+    if (!p.speakPrivateDetails) return false;
+    return AppState.currentState === 'active' || p.privateAloudWhenLocked;
+  }, []);
+
   const spokenFor = useCallback(
-    (item: EngineItem) =>
-      item.isPrivate && !prefsRef.current.speakPrivateDetails ? `${address}, you have a private reminder.` : item.spoken,
-    [address],
+    (item: EngineItem) => (item.isPrivate && !privateAloud() ? `${address}, you have a private reminder.` : item.spoken),
+    [address, privateAloud],
   );
 
   const deliver = useCallback(
@@ -255,7 +262,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     announcedHeld.current = items.length;
     const urgent = items.filter((i) => i.priority === 'URGENT').length;
     const first = items[0];
-    const firstText = first.isPrivate && !prefsRef.current.speakPrivateDetails ? '' : ` First: ${first.title}.`;
+    const firstText = first.isPrivate && !privateAloud() ? '' : ` First: ${first.title}.`;
     say(
       `${address}, while you were away: ${items.length} alert${items.length > 1 ? 's' : ''}` +
         (urgent ? `, ${urgent} urgent.` : '.') +
@@ -263,7 +270,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     );
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
     setHeldVisible(true);
-  }, [address]);
+  }, [address, privateAloud]);
 
   const route = useCallback(
     (item: EngineItem, state: PresenceState, now: number) => {
@@ -325,8 +332,9 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       await Notifications.scheduleNotificationAsync({
         identifier: osId(r.key),
         content: {
-          title: r.is_private ? 'JARVIS · Private reminder' : 'JARVIS · Reminder',
-          body: r.title,
+          // Many phones show notification text on the lock screen, so a private reminder never puts its title there.
+          title: r.is_private ? 'JARVIS' : 'JARVIS · Reminder',
+          body: r.is_private ? 'You have a private reminder. Open JARVIS to see it.' : r.title,
           data: { key: r.key },
           sound: r.priority === 'URGENT' ? 'default' : undefined,
         },

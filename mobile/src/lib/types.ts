@@ -130,6 +130,9 @@ export type DraftAction =
   | 'decline_request'
   | 'complete'
   | 'briefing'
+  | 'ask'
+  | 'remember'
+  | 'end'
   | 'answer';
 
 export interface Draft {
@@ -159,4 +162,31 @@ export interface Draft {
   needs_clarification: boolean;
   question: string;
   spoken_reply: string;
+  ask_text: string;
+  memory_text: string;
+  reply_language: 'en' | 'hi';
+  speak_text: string;
+  speak_lang: 'en' | 'hi';
+}
+
+export interface AskAnswer {
+  text: string;
+  speak_text: string;
+  speak_lang: 'en' | 'hi';
+  sources: { title: string; url: string }[];
+  engine: string;
+}
+
+export interface MemoryItem {
+  id: string;
+  text: string;
+  created_at: string;
+}
+
+export interface AiUsageSummary {
+  month: string;
+  requests: number;
+  web_searches: number;
+  questions_today: number;
+  daily_question_limit: number;
 }

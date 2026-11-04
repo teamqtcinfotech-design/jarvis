@@ -124,7 +124,8 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.UserRateThrottle",
         "rest_framework.throttling.AnonRateThrottle",
     ],
-    "DEFAULT_THROTTLE_RATES": {"user": "300/min", "anon": "30/min", "login": "10/min", "assistant": "40/min"},
+    "DEFAULT_THROTTLE_RATES": {"user": "300/min", "anon": "30/min", "login": "10/min", "assistant": "40/min",
+                                "ask": "12/min"},
 }
 
 SIMPLE_JWT = {
@@ -165,6 +166,11 @@ JARVIS_AI_ENABLED = env_bool("JARVIS_AI_ENABLED", bool(ANTHROPIC_API_KEY))
 JARVIS_AI_COMMAND_MODEL = os.environ.get("JARVIS_AI_COMMAND_MODEL", "claude-haiku-5-5")
 JARVIS_AI_BRIEFING_MODEL = os.environ.get("JARVIS_AI_BRIEFING_MODEL", "claude-sonnet-5-5")
 JARVIS_AI_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_TIMEOUT_SECONDS", "20"))
+# General questions ("aaj ka temperature?", "flight price?") use Sonnet with web search.
+JARVIS_AI_ANSWER_MODEL = os.environ.get("JARVIS_AI_ANSWER_MODEL", "claude-sonnet-5-5")
+JARVIS_AI_ANSWER_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_ANSWER_TIMEOUT_SECONDS", "50"))
+JARVIS_AI_MAX_SEARCHES = int(os.environ.get("JARVIS_AI_MAX_SEARCHES", "3"))  # web searches per question
+JARVIS_AI_DAILY_ANSWER_LIMIT = int(os.environ.get("JARVIS_AI_DAILY_ANSWER_LIMIT", "150"))  # per user per day
 
 # TaskPanel connector (public_html/taskPanel integration API, signed server-to-server).
 # "mock" = built-in contract double with the same API shape; "live" = real TaskPanel.

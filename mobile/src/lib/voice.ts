@@ -16,12 +16,15 @@ const ERROR_TEXT: Record<string, string> = {
   'audio-capture': 'Could not use the microphone.',
 };
 
+/** Silence (nothing was said) is not a failure: the conversation asks "are you there?" instead. */
+export const SILENCE_CODES = new Set(['no-speech', 'speech-timeout']);
+
 interface Handlers {
   onFinal?: (text: string) => void;
-  onError?: (message: string) => void;
+  onError?: (message: string, code: string) => void;
 }
 
-/** Push-to-talk with Android's built-in recogniser (hi-IN / en-IN). Audio never reaches our server. */
+/** Android's built-in recogniser (hi-IN / en-IN). Audio never reaches our server. */
 export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const [state, setState] = useState<CaptureState>('idle');
   const [partial, setPartial] = useState('');
@@ -45,7 +48,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     setState('done');
     const text = (finalText.current || latest.current).trim();
     if (text) handlersRef.current.onFinal?.(text);
-    else handlersRef.current.onError?.(ERROR_TEXT['no-speech']);
+    else handlersRef.current.onError?.(ERROR_TEXT['no-speech'], 'no-speech');
   });
   useSpeechRecognitionEvent('error', (event) => {
     if (event.error === 'aborted') {
@@ -54,7 +57,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     }
     errored.current = true;
     setState('error');
-    handlersRef.current.onError?.(ERROR_TEXT[event.error] ?? event.message ?? 'Speech recognition failed.');
+    handlersRef.current.onError?.(ERROR_TEXT[event.error] ?? event.message ?? 'Speech recognition failed.', event.error);
   });
 
   const start = useCallback(async () => {
@@ -67,7 +70,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     if (!perm.granted) {
       errored.current = true;
       setState('error');
-      handlersRef.current.onError?.(ERROR_TEXT['not-allowed']);
+      handlersRef.current.onError?.(ERROR_TEXT['not-allowed'], 'not-allowed');
       return;
     }
     setState('listening');

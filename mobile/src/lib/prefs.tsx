@@ -1,11 +1,17 @@
 import * as SecureStore from 'expo-secure-store';
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
-import { setVoiceLanguage } from './speech';
+import { setVoiceAccent } from './speech';
 
 export interface Prefs {
+  /** Language the phone listens in. English (India) also understands Hinglish and writes it in Roman letters. */
   voiceLang: 'en-IN' | 'hi-IN';
+  /** Voice for English replies: Hindi accent (default) or Indian English. Hindi replies always use the Hindi voice. */
+  voiceAccent: 'hi-IN' | 'en-IN';
+  /** Speak private task details aloud while the app is open on screen. */
   speakPrivateDetails: boolean;
+  /** Also speak them when the app is in the background or the phone is locked. Off: "you have a private reminder". */
+  privateAloudWhenLocked: boolean;
   awayAfterMinutes: number;
   quietHoursEnabled: boolean;
   quietStartHour: number;
@@ -14,7 +20,9 @@ export interface Prefs {
 
 const DEFAULTS: Prefs = {
   voiceLang: 'en-IN',
+  voiceAccent: 'hi-IN',
   speakPrivateDetails: true,
+  privateAloudWhenLocked: false,
   awayAfterMinutes: 10,
   quietHoursEnabled: true,
   quietStartHour: 22,
@@ -39,7 +47,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
       try {
         const loaded = { ...DEFAULTS, ...JSON.parse(raw) } as Prefs;
         setPrefs(loaded);
-        setVoiceLanguage(loaded.voiceLang);
+        setVoiceAccent(loaded.voiceAccent);
       } catch {
         // ignore corrupt prefs
       }
@@ -50,7 +58,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
     setPrefs((prev) => {
       const next = { ...prev, ...patch };
       SecureStore.setItemAsync(KEY, JSON.stringify(next)).catch(() => undefined);
-      if (patch.voiceLang) setVoiceLanguage(patch.voiceLang);
+      if (patch.voiceAccent) setVoiceAccent(patch.voiceAccent);
       return next;
     });
   }, []);

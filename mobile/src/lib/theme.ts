@@ -1,25 +1,25 @@
-// Classic executive palette: ivory, deep navy, muted gold. Calm, not flashy.
+// Light, calm and premium: whitish background, near-black text, one warm accent used sparingly.
 export const colors = {
-  bg: '#F6F3EC',
+  bg: '#FAFAF8',
   surface: '#FFFFFF',
-  surfaceAlt: '#EFEAE0',
-  ink: '#13233A',
-  inkSoft: '#2C3E57',
-  text: '#1E2633',
-  muted: '#6B7280',
-  faint: '#9AA1AC',
-  line: '#E3DDD0',
-  gold: '#A8834A',
-  goldSoft: '#F3EADB',
-  success: '#2F6B4F',
-  successSoft: '#E4EFE8',
-  danger: '#9B2C2C',
-  dangerSoft: '#F6E5E2',
-  warn: '#A8691A',
-  warnSoft: '#F8EEDC',
-  info: '#2F5D8A',
-  infoSoft: '#E5EDF5',
-  overlay: 'rgba(19,35,58,0.48)',
+  surfaceAlt: '#F2F2EF',
+  ink: '#1C2333', // primary: buttons, mic, headings
+  inkSoft: '#3D4556',
+  text: '#1C1F26',
+  muted: '#6B6F78',
+  faint: '#A0A3AA',
+  line: '#E6E5E0',
+  gold: '#B5854B', // the one accent colour
+  goldSoft: '#F6EEE2',
+  success: '#2E7D5B',
+  successSoft: '#E6F2EC',
+  danger: '#B4372F',
+  dangerSoft: '#FBEAE8',
+  warn: '#B7791F',
+  warnSoft: '#FBF1DF',
+  info: '#2F6FB0',
+  infoSoft: '#E8F0F9',
+  overlay: 'rgba(20,24,33,0.35)',
   white: '#FFFFFF',
 };
 
@@ -39,7 +39,7 @@ export const prioritySoft: Record<string, string> = {
 
 export const priorityLabel: Record<string, string> = {
   URGENT: 'Urgent',
-  HIGH: 'High',
+  HIGH: 'Important',
   NORMAL: 'Normal',
   LOW: 'Low',
 };
@@ -48,7 +48,7 @@ export const kindLabel: Record<string, string> = {
   TASK: 'Task',
   MEETING: 'Meeting',
   CALL: 'Call',
-  PAYMENT: 'Payment',
+  PAYMENT: 'Payment reminder',
   FOLLOW_UP: 'Follow-up',
 };
 
@@ -67,9 +67,9 @@ export const fonts = {
 export const radius = { sm: 8, md: 12, lg: 18, xl: 28 };
 
 export const shadow = {
-  shadowColor: '#13233A',
-  shadowOpacity: 0.08,
-  shadowRadius: 12,
+  shadowColor: '#1C2333',
+  shadowOpacity: 0.06,
+  shadowRadius: 14,
   shadowOffset: { width: 0, height: 4 },
-  elevation: 3,
+  elevation: 2,
 };

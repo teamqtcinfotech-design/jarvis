@@ -7,24 +7,27 @@ import type { TaskItem } from '@/lib/types';
 
 import { Icon, PriorityTag, Tag, Txt } from './ui';
 
-// TaskPanel labels (todo / working / waiting / done) plus delivery states.
-const STATUS_STYLE: Record<string, { color: string; bg: string }> = {
-  'Not started': { color: colors.info, bg: colors.infoSoft },
-  Working: { color: colors.warn, bg: colors.warnSoft },
-  Hold: { color: colors.danger, bg: colors.dangerSoft },
-  Completed: { color: colors.success, bg: colors.successSoft },
-  'Pending confirmation': { color: colors.warn, bg: colors.warnSoft },
-  'Not assigned': { color: colors.danger, bg: colors.dangerSoft },
-  Assigned: { color: colors.info, bg: colors.infoSoft },
+// Server status labels (staff app: todo / working / waiting / done, plus sending states) in everyday words.
+const STATUS_STYLE: Record<string, { label: string; color: string; bg: string }> = {
+  'Not started': { label: 'Not started', color: colors.info, bg: colors.infoSoft },
+  Working: { label: 'In progress', color: colors.warn, bg: colors.warnSoft },
+  Hold: { label: 'On hold', color: colors.danger, bg: colors.dangerSoft },
+  Completed: { label: 'Done', color: colors.success, bg: colors.successSoft },
+  'Pending confirmation': { label: 'Being sent', color: colors.warn, bg: colors.warnSoft },
+  'Not assigned': { label: "Couldn't send", color: colors.danger, bg: colors.dangerSoft },
+  Assigned: { label: 'Given', color: colors.info, bg: colors.infoSoft },
 };
+
+export function plainStatus(label: string) {
+  return STATUS_STYLE[label] ?? { label, color: colors.info, bg: colors.infoSoft };
+}
 
 export function TaskRow({ item, onPress, showStaffStatus }: { item: TaskItem; onPress?: () => void; showStaffStatus?: boolean }) {
   const when = item.scheduled_start
     ? `${timeOf(item.scheduled_start)}${item.scheduled_end ? ` – ${timeOf(item.scheduled_end)}` : ''}`
     : item.due_label;
   const staff = item.assignee?.type === 'STAFF' || item.assignee?.type === 'PA' ? item.assignee.staff_name : null;
-  const statusLabel = item.status_label || '';
-  const status = statusLabel ? { label: statusLabel, ...(STATUS_STYLE[statusLabel] ?? STATUS_STYLE.Assigned) } : null;
+  const status = item.status_label ? plainStatus(item.status_label) : null;
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [s.row, pressed && { opacity: 0.8 }]}>
       <View style={[s.bar, { backgroundColor: priorityColor[item.priority] }]} />
@@ -36,7 +39,7 @@ export function TaskRow({ item, onPress, showStaffStatus }: { item: TaskItem; on
           {item.title}
         </Txt>
         <View style={s.meta}>
-          {item.overdue ? <Tag label="Overdue" color={colors.danger} bg={colors.dangerSoft} /> : null}
+          {item.overdue ? <Tag label="Late" color={colors.danger} bg={colors.dangerSoft} /> : null}
           {item.priority === 'URGENT' || item.priority === 'HIGH' ? <PriorityTag priority={item.priority} /> : null}
           {item.scope === 'private' ? <Tag label="Private" icon="lock-closed" color={colors.inkSoft} /> : null}
           {item.scope === 'shared' && item.assignee?.type === 'MD' && item.created_by ? (
@@ -44,7 +47,6 @@ export function TaskRow({ item, onPress, showStaffStatus }: { item: TaskItem; on
           ) : null}
           {staff ? <Tag label={staff} icon="person-outline" /> : null}
           {showStaffStatus && status ? <Tag label={status.label} color={status.color} bg={status.bg} /> : null}
-          {showStaffStatus && item.remote_task_id ? <Tag label={item.remote_task_id} color={colors.faint} /> : null}
         </View>
       </View>
       {when ? <Txt variant="small" style={s.when}>{when}</Txt> : null}
@@ -58,7 +60,7 @@ const s = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.surface,
     borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.line,
     paddingVertical: 12,
     paddingRight: 12,

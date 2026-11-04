@@ -510,3 +510,131 @@ class TaskPanelRulesTests(BaseCase):
         self.assertEqual(headers["X-Integration-Signature"], "v1=" + expected)
         self.assertEqual(headers["Idempotency-Key"], "abc")
         self.assertEqual(headers["X-Content-SHA256"], hashlib.sha256(body).hexdigest())
+
+
+def _cmd(**fields) -> dict:
+    """A complete model command (COMMAND_SCHEMA shape) with defaults."""
+    base = {
+        "intent": "unknown", "title": "", "notes": "", "kind": "TASK", "priority": "NORMAL", "due_date": "",
+        "due_time": "", "duration_minutes": 0, "remind_before_minutes": 0, "staff_name": "", "team_name": "",
+        "category_key": "", "target_ref": "", "needs_clarification": False, "clarification_question": "",
+        "spoken_reply": "", "spoken_reply_hi": "", "reply_language": "en", "question": "", "memory_text": "",
+        "reminder_line": "", "confidence": 0.9, "engine": "ai",
+    }
+    base.update(fields)
+    return base
+
+
+def _fake_answer_response(text: str, searches: int = 1):
+    from types import SimpleNamespace as NS
+    return NS(
+        content=[NS(type="text", text=text, citations=[NS(url="https://weather.example/indore", title="Weather")])],
+        stop_reason="end_turn",
+        usage=NS(input_tokens=120, output_tokens=40, cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                 server_tool_use=NS(web_search_requests=searches)),
+    )
+
+
+class SmartAssistantTests(BaseCase):
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd) as fake:
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200)
+        return r.json(), fake
+
+    def test_general_question_goes_to_ask_with_hindi_voice(self):
+        draft, _ = self.interpret(self.md_client, "aaj Indore ka temperature kya hai", _cmd(
+            intent="general_question", question="What is the weather in Indore today?",
+            spoken_reply="Ek second Sir, dekh raha hoon.", reply_language="hi", spoken_reply_hi="एक सेकंड सर, देख रहा हूँ।"))
+        self.assertEqual(draft["action"], "ask")
+        self.assertEqual(draft["ask_text"], "What is the weather in Indore today?")
+        self.assertEqual(draft["speak_lang"], "hi")
+        self.assertIn("सर", draft["speak_text"])
+        self.assertFalse(draft["needs_clarification"])
+
+    def test_server_built_confirmation_is_spoken_as_written(self):
+        draft, _ = self.interpret(self.md_client, "Ramesh ko bolo kal GST file bheje", _cmd(
+            intent="assign_to_staff", title="GST file bhejna", staff_name="Ramesh Kumar",
+            spoken_reply="Sir, Ramesh ko GST file ka task de doon?", reply_language="hi",
+            spoken_reply_hi="सर, रमेश को जीएसटी फाइल का टास्क दे दूँ?", engine="rules"))
+        self.assertEqual(draft["action"], "delegation")
+        self.assertEqual(draft["speak_lang"], "en")  # the server rewrote the reply, so no stale Hindi version
+        self.assertEqual(draft["speak_text"], draft["spoken_reply"])
+
+    def test_conversation_and_own_memories_reach_the_model(self):
+        services.add_memory(self.md, "City is Indore.")
+        services.add_memory(self.pa, "Prefers WhatsApp for updates.")
+        history = [{"role": "user", "text": "Ramesh ko bolo report bheje"}, {"role": "jarvis", "text": "Saved, Sir."}]
+        _, fake = self.interpret(self.md_client, "aur Neha ko bhi", _cmd(intent="small_talk", spoken_reply="Hello Sir"),
+                                 history=history)
+        ctx = fake.call_args.args[1]
+        self.assertEqual(ctx["conversation"][0]["text"], "Ramesh ko bolo report bheje")
+        self.assertEqual(ctx["memories"], ["City is Indore."])
+        _, fake = self.interpret(self.pa_client, "hello", _cmd(intent="small_talk", spoken_reply="Hi Priya"))
+        pa_ctx = json.dumps(fake.call_args.args[1], default=str)
+        self.assertNotIn("Indore", pa_ctx)  # the MD's memory never reaches a PA context
+        self.assertNotIn(SECRET, pa_ctx)
+
+    def test_remember_and_end_drafts(self):
+        draft, _ = self.interpret(self.md_client, "yaad rakhna main 7 baje gym jaata hoon", _cmd(
+            intent="remember", memory_text="Goes to the gym at 7 AM.", spoken_reply="Sir, I'll remember that. Okay?"))
+        self.assertEqual(draft["action"], "remember")
+        self.assertEqual(draft["memory_text"], "Goes to the gym at 7 AM.")
+        draft, _ = self.interpret(self.md_client, "bas thank you", _cmd(intent="end_conversation", spoken_reply=""))
+        self.assertEqual(draft["action"], "end")
+        self.assertTrue(draft["spoken_reply"])
+
+    def test_memories_are_owner_only_and_encrypted(self):
+        r = self.md_client.post("/api/v1/memories/", {"text": SECRET}, format="json", HTTP_IDEMPOTENCY_KEY="mem-1")
+        self.assertEqual(r.status_code, 201)
+        memory_id = r.json()["id"]
+        self.assertEqual(self.md_client.get("/api/v1/memories/").json()["results"][0]["text"], SECRET)
+        self.assert_no_secret(self.pa_client.get("/api/v1/memories/"))
+        self.assertEqual(self.pa_client.get("/api/v1/memories/").json()["results"], [])
+        self.assertEqual(self.pa_client.delete(f"/api/v1/memories/{memory_id}/").status_code, 404)
+        with connection.cursor() as cur:
+            cur.execute("SELECT text FROM core_memory")
+            self.assertTrue(all(row[0].startswith("enc1:") for row in cur.fetchall()))
+        self.assertEqual(self.md_client.delete(f"/api/v1/memories/{memory_id}/").status_code, 204)
+        self.assertEqual(self.md_client.get("/api/v1/memories/").json()["results"], [])
+
+    def test_retry_receipts_do_not_store_private_text_in_clear(self):
+        body = {"title": SECRET, "kind": "TASK"}
+        first = self.md_client.post("/api/v1/private-tasks/", body, format="json", HTTP_IDEMPOTENCY_KEY="pt-enc")
+        again = self.md_client.post("/api/v1/private-tasks/", body, format="json", HTTP_IDEMPOTENCY_KEY="pt-enc")
+        self.assertEqual(first.json(), again.json())
+        with connection.cursor() as cur:
+            cur.execute("SELECT response FROM core_commandreceipt")
+            self.assertNotIn(SECRET, json.dumps([row[0] for row in cur.fetchall()], default=str))
+
+    @override_settings(JARVIS_AI_ENABLED=True, ANTHROPIC_API_KEY="test-key")
+    def test_ask_uses_web_search_and_sends_no_private_data(self):
+        services.add_memory(self.md, SECRET + " memory")
+        client = mock.Mock()
+        client.messages.create.return_value = _fake_answer_response(
+            "SHOW: Sir, Indore mein abhi 29 degree hai.\nSPEAK_HI: सर, इंदौर में अभी उनतीस डिग्री है।")
+        with mock.patch("core.ai_brain._get_answer_client", return_value=client):
+            r = self.md_client.post("/api/v1/assistant/ask/", {
+                "question": "What is the weather in Indore today?", "lang": "hi",
+                "history": [{"role": "user", "text": "aaj ka mausam?"}]}, format="json")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["text"], "Sir, Indore mein abhi 29 degree hai.")
+        self.assertEqual(data["speak_lang"], "hi")
+        self.assertEqual(data["sources"][0]["url"], "https://weather.example/indore")
+        sent = json.dumps(client.messages.create.call_args.kwargs, default=str)
+        self.assertNotIn(SECRET, sent)  # no tasks or memories go to the general-question call
+        self.assertIn("web_search", sent)
+        usage = self.md.ai_usage.get(kind="ANSWER")
+        self.assertEqual((usage.requests, usage.web_searches), (1, 1))
+
+    @override_settings(JARVIS_AI_ENABLED=True, ANTHROPIC_API_KEY="test-key", JARVIS_AI_DAILY_ANSWER_LIMIT=1)
+    def test_daily_question_limit(self):
+        from core.models import AiUsage
+        AiUsage.objects.create(user=self.md, day=tu.today_local(), kind="ANSWER", requests=1)
+        client = mock.Mock()
+        with mock.patch("core.ai_brain._get_answer_client", return_value=client):
+            data = self.md_client.post("/api/v1/assistant/ask/", {"question": "Gold price today?"}, format="json").json()
+        self.assertEqual(data["engine"], "limit")
+        client.messages.create.assert_not_called()
+        self.assertEqual(self.md_client.get("/api/v1/assistant/usage/").json()["questions_today"], 1)

@@ -142,7 +142,7 @@ def _mock_directory():
         ("staff_108", "QTC Developer2", "IT", "Developer", None),
         ("staff_109", "Nikki", "Accounts", "Accounts Executive", today + timedelta(days=3)),
         ("staff_110", "Pooja Mehra", "Customer Care", "Customer Care Executive", None),
-        ("staff_002", "Priya", "Admin", "Personal Assistant", None),
+        ("staff_002", "Mansi", "Admin", "Personal Assistant", None),
     ]
     categories = [
         ("general", "General", ""),

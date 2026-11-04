@@ -26,6 +26,7 @@ from .models import (
     DueKind,
     IntegrationCommand,
     Kind,
+    Memory,
     Priority,
     PrivateTask,
     SharedTask,
@@ -915,7 +916,38 @@ def ai_context(user: User) -> dict:
     else:
         ctx["md_busy_today"] = [w["label"] for w in dash.get("md_busy_today", [])]
         ctx["my_requests"] = [{"title": r["title"], "state": r["state"]} for r in dash["requests"][:10]]
+    # Only the speaker's own remembered facts (the MD's never reach a PA context and vice versa).
+    ctx["memories"] = [m.text for m in Memory.objects.filter(owner=user)[:MEMORY_LIMIT]]
     return ctx
+
+
+# ------------------------------------------------------------------ memory (explicit "remember this")
+MEMORY_LIMIT = 50
+
+
+def memory_item(m: Memory) -> dict:
+    return {"id": str(m.id), "text": m.text, "created_at": m.created_at.isoformat()}
+
+
+def list_memories(user: User) -> list[dict]:
+    return [memory_item(m) for m in Memory.objects.filter(owner=user)[:MEMORY_LIMIT]]
+
+
+def add_memory(user: User, text: str) -> dict:
+    text = " ".join((text or "").split())[:300]
+    if not text:
+        raise ServiceError("invalid", "Tell me what to remember.", 422)
+    if Memory.objects.filter(owner=user).count() >= MEMORY_LIMIT:
+        raise ServiceError("memory_full", "My notes are full. Please delete an old one in Settings first.", 409)
+    m = Memory.objects.create(owner=user, text=text)
+    audit(user, "memory.add", "memory", m.id)
+    return memory_item(m)
+
+
+def delete_memory(user: User, memory_id) -> None:
+    m = Memory.objects.get(id=memory_id, owner=user)  # someone else's note -> not found
+    m.delete()
+    audit(user, "memory.delete", "memory", memory_id)
 
 
 def briefing_facts(user: User, kind: str) -> tuple[dict, str]:

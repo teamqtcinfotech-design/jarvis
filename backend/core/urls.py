@@ -35,7 +35,12 @@ urlpatterns = [
     path("requests/<uuid:request_id>/withdraw/", views.RequestWithdrawView.as_view()),
     # Assistant
     path("assistant/interpret/", views.InterpretView.as_view()),
+    path("assistant/ask/", views.AskView.as_view()),
     path("assistant/briefing/", views.BriefingView.as_view()),
+    path("assistant/usage/", views.AiUsageView.as_view()),
+    # Things the user asked JARVIS to remember (owner-only)
+    path("memories/", views.MemoryListView.as_view()),
+    path("memories/<uuid:memory_id>/", views.MemoryDetailView.as_view()),
     # Reminders + alerts
     path("reminders/", views.ReminderListView.as_view()),
     path("reminders/ack/", views.ReminderAckView.as_view()),

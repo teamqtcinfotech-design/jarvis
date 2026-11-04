@@ -139,7 +139,7 @@ async function refreshAccess(): Promise<boolean> {
 }
 
 export interface ApiOptions {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
   idempotencyKey?: string;
   timeoutMs?: number;

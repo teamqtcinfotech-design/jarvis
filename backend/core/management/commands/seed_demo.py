@@ -32,7 +32,7 @@ class Command(BaseCommand):
         parser.add_argument("--reset-tasks", action="store_true", help="Delete all tasks/requests/alerts first.")
         parser.add_argument("--accounts-only", action="store_true",
                             help="Create the MD and PA accounts only (no demo tasks). Use on the live server.")
-        parser.add_argument("--pa-name", default="Priya")
+        parser.add_argument("--pa-name", default="Mansi")
         parser.add_argument("--md-password", default="")
         parser.add_argument("--pa-password", default="")
 

@@ -8,17 +8,17 @@ import { RequestCard } from '@/components/RequestCard';
 import { TaskRow } from '@/components/TaskRow';
 import { TaskSheet } from '@/components/TaskSheet';
 import { Empty, Icon, IconButton, SectionHeader, Tag, Txt } from '@/components/ui';
-import { VoiceSheet } from '@/components/VoiceSheet';
 import { greeting, relativeAgo } from '@/lib/format';
 import { useSession } from '@/lib/session';
-import { colors, radius, shadow } from '@/lib/theme';
+import { colors, fonts, radius, shadow } from '@/lib/theme';
 import type { Dashboard, SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 
-function Stat({ label, value, tone }: { label: string; value: number; tone?: string }) {
+function Tile({ label, value, tone, icon }: { label: string; value: number; tone?: string; icon: string }) {
   return (
-    <View style={s.stat}>
-      <Txt style={[s.statValue, tone ? { color: tone } : null]}>{value}</Txt>
+    <View style={s.tile}>
+      <Icon name={icon} size={16} color={tone ?? colors.muted} />
+      <Txt style={[s.tileValue, tone && value ? { color: tone } : null]}>{value}</Txt>
       <Txt variant="caption" style={{ color: colors.muted }}>{label}</Txt>
     </View>
   );
@@ -34,30 +34,35 @@ function TaskSection({ title, items, onOpen, empty, showStaffStatus }: { title: 
   );
 }
 
+const openOnly = (items: TaskItem[]) => items.filter((d) => d.status !== 'COMPLETED' && d.status !== 'CANCELLED');
+
 function MdBody({ data, onOpen }: { data: Dashboard; onOpen: (t: TaskItem) => void }) {
   const pending = data.requests.filter((r) => r.state === 'PENDING');
-  const delegatedOpen = data.delegated.filter((d) => d.status !== 'COMPLETED' && d.status !== 'CANCELLED');
-  const delegatedDone = data.delegated.filter((d) => d.status === 'COMPLETED').slice(0, 3);
+  const staffOpen = openOnly(data.delegated);
+  const staffDone = data.delegated.filter((d) => d.status === 'COMPLETED').slice(0, 3);
+  const paTasks = data.pa_tasks ?? [];
   return (
     <>
       {pending.length ? (
         <>
-          <SectionHeader title="Awaiting your decision" count={pending.length} />
+          <SectionHeader title="Need your OK" count={pending.length} />
           {pending.map((r) => <RequestCard key={r.id} request={r} mode="md" />)}
         </>
       ) : null}
-      <TaskSection title="Overdue" items={data.overdue} onOpen={onOpen} />
-      <TaskSection title="Today" items={data.today} onOpen={onOpen} empty="Nothing scheduled for today." />
-      <TaskSection title="This week" items={data.upcoming} onOpen={onOpen} />
-      <TaskSection title="Anytime" items={data.anytime.slice(0, 8)} onOpen={onOpen} />
-      <SectionHeader title="Given to your PA" count={(data.pa_tasks ?? []).filter((t) => t.status !== 'COMPLETED').length} />
-      {(data.pa_tasks ?? []).length
-        ? (data.pa_tasks ?? []).map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />)
-        : <Empty text="Say “PA ko bolo…” or “Priya ko bolo…” to give your PA a task." />}
-      <SectionHeader title="Delegated to staff" count={delegatedOpen.length} action={<Tag label={data.taskpanel.label} icon="git-network-outline" />} />
-      {!data.taskpanel.linked ? <Empty text="Your account is not linked to TaskPanel yet, so staff tasks cannot be sent." /> : null}
-      {delegatedOpen.length ? delegatedOpen.map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />) : <Empty text="Say “Ramesh Kumar ko bolo…” to assign work to staff through TaskPanel." />}
-      {delegatedDone.map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />)}
+      <TaskSection title="Late" items={data.overdue} onOpen={onOpen} />
+      <TaskSection title="Today" items={data.today} onOpen={onOpen} empty="Nothing planned for today." />
+      <TaskSection title="Coming up" items={data.upcoming} onOpen={onOpen} />
+      <TaskSection title="No date" items={data.anytime.slice(0, 8)} onOpen={onOpen} />
+      <SectionHeader title="Given to your PA" count={openOnly(paTasks).length} />
+      {paTasks.length
+        ? paTasks.map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />)
+        : <Empty text="Say “PA ko bolo…” to give your PA a task." />}
+      <SectionHeader title="Given to staff" count={staffOpen.length} action={<Tag label={data.taskpanel.label} icon="briefcase-outline" />} />
+      {!data.taskpanel.linked ? <Empty text="Your account is not connected to the staff task app yet, so staff tasks can't be sent." /> : null}
+      {staffOpen.length
+        ? staffOpen.map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />)
+        : <Empty text="Say “Ramesh ko bolo…” to give work to someone in the team." />}
+      {staffDone.map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />)}
     </>
   );
 }
@@ -65,30 +70,30 @@ function MdBody({ data, onOpen }: { data: Dashboard; onOpen: (t: TaskItem) => vo
 function PaBody({ data, onOpen }: { data: Dashboard; onOpen: (t: TaskItem) => void }) {
   const busy = data.md_busy_today ?? [];
   const mdTasks = data.md_tasks ?? [];
-  const delegatedOpen = data.delegated.filter((d) => d.status !== 'COMPLETED' && d.status !== 'CANCELLED');
+  const staffOpen = openOnly(data.delegated);
   const fromSir = data.overdue.length + data.today.length + data.upcoming.length + data.anytime.length;
   return (
     <>
       <SectionHeader title="From Sir" count={fromSir} />
       {!fromSir ? <Empty text="No tasks from Sir right now." /> : null}
-      <TaskSection title="Overdue" items={data.overdue} onOpen={onOpen} />
+      <TaskSection title="Late" items={data.overdue} onOpen={onOpen} />
       <TaskSection title="Today" items={data.today} onOpen={onOpen} />
-      <TaskSection title="This week" items={data.upcoming} onOpen={onOpen} />
-      <TaskSection title="Anytime" items={data.anytime} onOpen={onOpen} />
-      <SectionHeader title="MD availability today" />
+      <TaskSection title="Coming up" items={data.upcoming} onOpen={onOpen} />
+      <TaskSection title="No date" items={data.anytime} onOpen={onOpen} />
+      <SectionHeader title="When Sir is busy today" />
       <View style={s.busyCard}>
         {busy.length ? (
           busy.map((w) => <Tag key={w.start} label={w.label} icon="time-outline" color={colors.ink} bg={colors.goldSoft} />)
         ) : (
-          <Txt variant="small">No busy blocks recorded for today.</Txt>
+          <Txt variant="small">No busy times today.</Txt>
         )}
-        <Txt variant="caption" style={{ marginTop: 8, width: '100%' }}>Details of MD’s personal schedule are private.</Txt>
+        <Txt variant="caption" style={{ marginTop: 8, width: '100%' }}>Sir’s personal plans are private. You only see when he is busy.</Txt>
       </View>
-      <SectionHeader title="Your requests to MD" count={data.requests.filter((r) => r.state === 'PENDING').length} />
-      {data.requests.length ? data.requests.slice(0, 8).map((r) => <RequestCard key={r.id} request={r} mode="pa" />) : <Empty text="Say “Sir ke liye kal 3 baje…” to send MD a task." />}
-      <TaskSection title="MD tasks from your requests" items={mdTasks} onOpen={onOpen} />
-      <SectionHeader title="Delegated to staff" count={delegatedOpen.length} action={<Tag label={data.taskpanel.label} icon="git-network-outline" />} />
-      {data.delegated.length ? data.delegated.slice(0, 20).map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />) : <Empty text="Assign work to staff by voice or text." />}
+      <SectionHeader title="Your requests to Sir" count={data.requests.filter((r) => r.state === 'PENDING').length} />
+      {data.requests.length ? data.requests.slice(0, 8).map((r) => <RequestCard key={r.id} request={r} mode="pa" />) : <Empty text="Say “Sir ke liye kal 3 baje…” to send Sir a task." />}
+      <TaskSection title="Sir’s tasks from your requests" items={mdTasks} onOpen={onOpen} />
+      <SectionHeader title="Given to staff" count={staffOpen.length} action={<Tag label={data.taskpanel.label} icon="briefcase-outline" />} />
+      {data.delegated.length ? data.delegated.slice(0, 20).map((t) => <TaskRow key={t.id} item={t} onPress={() => onOpen(t)} showStaffStatus />) : <Empty text="Give work to the team by voice or text." />}
     </>
   );
 }
@@ -104,7 +109,6 @@ function HomeScreen({ user }: { user: SessionUser }) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { data, loading, error, updatedAt, reload } = useDashboard();
-  const [voiceMode, setVoiceMode] = useState<'voice' | 'type' | null>(null);
   const [openTask, setOpenTask] = useState<TaskItem | null>(null);
 
   const isMD = user.role === 'MD';
@@ -118,10 +122,8 @@ function HomeScreen({ user }: { user: SessionUser }) {
       >
         <View style={s.header}>
           <View style={{ flex: 1 }}>
-            <Txt variant="label">{data?.date_label ?? ' '}</Txt>
-            <Txt variant="display" style={{ marginTop: 4 }}>
-              {greeting()}, {isMD ? 'Sir' : user.name}
-            </Txt>
+            <Txt variant="caption" style={{ color: colors.muted }}>{data?.date_label ?? ' '}</Txt>
+            <Txt style={s.greeting}>{greeting()}, {isMD ? 'Sir' : user.name}</Txt>
           </View>
           <IconButton icon="settings-outline" label="Settings" onPress={() => router.push('/settings')} />
         </View>
@@ -138,33 +140,35 @@ function HomeScreen({ user }: { user: SessionUser }) {
 
         {data ? (
           <>
-            <View style={s.stats}>
-              <Stat label="Today" value={data.today.length} />
-              <Stat label="Overdue" value={data.overdue.length} tone={data.overdue.length ? colors.danger : undefined} />
-              <Stat label={isMD ? 'To decide' : 'Pending'} value={pendingCount} tone={pendingCount ? colors.gold : undefined} />
-              <Stat label="Delegated" value={data.delegated.filter((d) => d.status !== 'COMPLETED' && d.status !== 'CANCELLED').length} />
+            <View style={s.tiles}>
+              <Tile icon="today-outline" label="Today" value={data.today.length} />
+              <Tile icon="alert-circle-outline" label="Late" value={data.overdue.length} tone={colors.danger} />
+              <Tile icon="hand-left-outline" label={isMD ? 'Need your OK' : 'Waiting for Sir'} value={pendingCount} tone={colors.gold} />
+              <Tile icon="briefcase-outline" label="With staff" value={openOnly(data.delegated).length} />
             </View>
             {isMD ? <MdBody data={data} onOpen={setOpenTask} /> : <PaBody data={data} onOpen={setOpenTask} />}
-            <Txt variant="caption" style={{ textAlign: 'center', marginTop: 20 }}>Updated {relativeAgo(updatedAt)}</Txt>
+            <Txt variant="caption" style={{ textAlign: 'center', marginTop: 20 }}>Updated {relativeAgo(updatedAt)} · pull down to refresh</Txt>
           </>
         ) : null}
       </ScrollView>
 
       <View style={[s.dock, { paddingBottom: insets.bottom + 14 }]}>
-        <Pressable style={s.dockSide} onPress={() => setVoiceMode('type')} accessibilityLabel="Type a command">
-          <Icon name="create-outline" size={22} color={colors.ink} />
-          <Txt variant="caption" style={s.dockLabel}>Type</Txt>
+        <Pressable style={s.round} onPress={() => router.push({ pathname: '/talk', params: { mode: 'type' } })} accessibilityLabel="Type to JARVIS">
+          <Icon name="create-outline" size={21} color={colors.ink} />
         </Pressable>
-        <Pressable style={({ pressed }) => [s.mic, pressed && { transform: [{ scale: 0.96 }] }]} onPress={() => setVoiceMode('voice')} accessibilityLabel="Speak to JARVIS">
-          <Icon name="mic" size={30} color={colors.white} />
+        <Pressable
+          style={({ pressed }) => [s.talk, pressed && { transform: [{ scale: 0.97 }] }]}
+          onPress={() => router.push('/talk')}
+          accessibilityLabel="Talk to JARVIS"
+        >
+          <Icon name="mic" size={22} color={colors.white} />
+          <Txt style={s.talkText}>Talk to JARVIS</Txt>
         </Pressable>
-        <Pressable style={s.dockSide} onPress={() => router.push('/briefing')} accessibilityLabel="Briefing">
-          <Icon name="sunny-outline" size={22} color={colors.ink} />
-          <Txt variant="caption" style={s.dockLabel}>Briefing</Txt>
+        <Pressable style={s.round} onPress={() => router.push('/briefing')} accessibilityLabel="Briefing">
+          <Icon name="sunny-outline" size={21} color={colors.ink} />
         </Pressable>
       </View>
 
-      {voiceMode ? <VoiceSheet startMode={voiceMode} onClose={() => setVoiceMode(null)} /> : null}
       {openTask ? <TaskSheet item={openTask} onClose={() => setOpenTask(null)} /> : null}
     </SafeAreaView>
   );
@@ -172,16 +176,18 @@ function HomeScreen({ user }: { user: SessionUser }) {
 
 const s = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'flex-start' },
-  stats: {
-    flexDirection: 'row',
-    backgroundColor: colors.ink,
-    borderRadius: radius.lg,
-    paddingVertical: 16,
-    marginTop: 16,
-    ...shadow,
+  greeting: { fontFamily: fonts.serif, fontSize: 28, lineHeight: 38, color: colors.ink, marginTop: 2 },
+  tiles: { flexDirection: 'row', columnGap: 8, marginTop: 16 },
+  tile: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+    paddingVertical: 12,
+    alignItems: 'center',
   },
-  stat: { flex: 1, alignItems: 'center' },
-  statValue: { fontFamily: 'serif', fontSize: 26, color: colors.white },
+  tileValue: { fontFamily: fonts.serif, fontSize: 24, lineHeight: 32, color: colors.ink, marginTop: 2 },
   error: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.dangerSoft, borderRadius: radius.md, padding: 12, marginTop: 12 },
   busyCard: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 6, backgroundColor: colors.surface, borderRadius: radius.md, padding: 12, borderWidth: 1, borderColor: colors.line },
   dock: {
@@ -191,25 +197,32 @@ const s = StyleSheet.create({
     bottom: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-around',
+    justifyContent: 'center',
+    columnGap: 14,
     paddingTop: 12,
-    backgroundColor: 'rgba(246,243,236,0.97)',
+    backgroundColor: colors.bg,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.line,
   },
-  dockSide: { alignItems: 'center', width: 80 },
-  dockLabel: { color: colors.ink, marginTop: 2 },
-  mic: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: colors.ink,
+  round: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 3,
-    borderColor: colors.gold,
-    marginTop: -28,
-    ...shadow,
-    shadowOpacity: 0.25,
   },
+  talk: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.ink,
+    borderRadius: 999,
+    height: 56,
+    paddingHorizontal: 26,
+    ...shadow,
+    shadowOpacity: 0.18,
+  },
+  talkText: { color: colors.white, fontSize: 16, fontWeight: '600', marginLeft: 10 },
 });

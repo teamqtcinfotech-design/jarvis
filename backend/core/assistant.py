@@ -99,7 +99,7 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
     if user.is_md and cmd.get("kind") in {Kind.MEETING, Kind.CALL} and _WITH.search(text) and _mentions_pa(text) \
             and intent in {"assign_to_pa", "assign_to_staff", "create_task", "needs_destination"}:
         intent = "meet_with_pa"
-    # "Priya ko bolo…" / "PA ko bolo…" from the MD = a direct PA task (inside JARVIS), not TaskPanel.
+    # "Mansi ko bolo…" / "PA ko bolo…" from the MD = a direct PA task (inside JARVIS), not TaskPanel.
     if user.is_md and intent == "assign_to_staff" and _is_pa_name(staff_name):
         intent = "assign_to_pa"
     # Offline parser cannot judge ownership: unless it is plainly the MD's own, ask.
@@ -212,12 +212,17 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str):
             draft["warnings"].append("Could not pre-check with TaskPanel; it will check again when you assign.")
 
 
-def build_draft(user: User, text: str, previous: str = "") -> dict:
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+def build_draft(user: User, text: str, previous: str = "", history: list | None = None) -> dict:
     full_text = f"{previous}. {text}".strip(". ") if previous else text
     ctx = services.ai_context(user)
+    # The last few turns of THIS conversation, so follow-ups like "aur Neha ko bhi" make sense.
+    ctx["conversation"] = ai_brain.history_text(history)
     staff_names = [s["name"] for s in ctx["staff"]]
     pending = ctx.get("pending_requests", [])
-    cmd = ai_brain.interpret(full_text, ctx, staff_names, has_pending_requests=bool(pending))
+    cmd = ai_brain.interpret(full_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
 
     address = "Sir" if user.is_md else user.spoken_name
     intent = _route_intent(user, cmd, full_text)
@@ -256,6 +261,11 @@ def build_draft(user: User, text: str, previous: str = "") -> dict:
         "needs_clarification": bool(cmd.get("needs_clarification")),
         "question": (cmd.get("clarification_question") or "").strip(),
         "spoken_reply": (cmd.get("spoken_reply") or "").strip(),
+        "ask_text": "",       # general question for /assistant/ask/
+        "memory_text": "",    # fact to remember (after the user confirms)
+        "reply_language": cmd.get("reply_language") if cmd.get("reply_language") in {"en", "hi"} else "en",
+        "speak_text": "",     # what the voice says (Devanagari when the reply is Hindi)
+        "speak_lang": "en",
     }
 
     if intent == "create_task":
@@ -321,6 +331,26 @@ def build_draft(user: User, text: str, previous: str = "") -> dict:
     elif intent == "briefing":
         draft["action"] = "briefing"
         draft["spoken_reply"] = draft["spoken_reply"] or f"Here is your briefing, {address}."
+    elif intent == "general_question":
+        # Answered by /assistant/ask/ (web search). The answering step asks for missing details itself.
+        draft["action"] = "ask"
+        draft["ask_text"] = ((cmd.get("question") or "").strip() or full_text)[:1000]
+        draft["needs_clarification"] = False
+        draft["question"] = ""
+        draft["spoken_reply"] = draft["spoken_reply"] or f"One moment, {address}."
+    elif intent == "remember":
+        draft["action"] = "remember"
+        draft["memory_text"] = " ".join((cmd.get("memory_text") or "").split())[:300]
+        if not draft["memory_text"]:
+            draft["needs_clarification"] = True
+            draft["question"] = f"{address}, what should I remember?"
+        elif not draft["spoken_reply"]:
+            draft["spoken_reply"] = f"{address}, I'll remember this: {draft['memory_text']} Okay?"
+    elif intent == "end_conversation":
+        draft["action"] = "end"
+        draft["needs_clarification"] = False
+        draft["question"] = ""
+        draft["spoken_reply"] = draft["spoken_reply"] or f"Okay {address}. Just say Hello JARVIS whenever you need me."
     else:
         draft["action"] = "answer"
         if not draft["spoken_reply"]:
@@ -366,4 +396,20 @@ def build_draft(user: User, text: str, previous: str = "") -> dict:
 
     if draft["needs_clarification"] and draft["question"]:
         draft["spoken_reply"] = draft["question"]
+
+    # Voice text: the model's Devanagari version is used only when the final reply is still the model's own
+    # sentence (server-built confirmations are English and are spoken as written).
+    hindi = (cmd.get("spoken_reply_hi") or "").strip()
+    if (draft["reply_language"] == "hi" and hindi and _DEVANAGARI.search(hindi)
+            and draft["spoken_reply"] == (cmd.get("spoken_reply") or "").strip()):
+        draft["speak_text"], draft["speak_lang"] = hindi, "hi"
+    else:
+        draft["speak_text"], draft["speak_lang"] = draft["spoken_reply"], "en"
+    # Fixed Hindi lines for the two short replies the model sometimes leaves without a Devanagari version.
+    if draft["reply_language"] == "hi" and draft["speak_lang"] != "hi":
+        sir = " सर" if user.is_md else ""
+        if draft["action"] == "ask":
+            draft["speak_text"], draft["speak_lang"] = f"एक सेकंड{sir}, देख रहा हूँ।", "hi"
+        elif draft["action"] == "end":
+            draft["speak_text"], draft["speak_lang"] = f"ठीक है{sir}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।", "hi"
     return draft

@@ -373,3 +373,39 @@ class AuditLog(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class Memory(models.Model):
+    """Something the user explicitly asked JARVIS to remember ("I go to the gym at 7").
+
+    Owner-only and encrypted: the MD's memories never reach the PA, and the PA's never reach the MD.
+    Only explicit, user-confirmed facts are stored here — JARVIS never saves its own guesses.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="memories")
+    text = EncryptedTextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class AiUsage(models.Model):
+    """Daily AI counters per user, so spending stays visible and capped."""
+
+    class Kind(models.TextChoices):
+        COMMAND = "COMMAND", "Understanding a command"
+        ANSWER = "ANSWER", "Answering a question"
+        BRIEFING = "BRIEFING", "Briefing"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ai_usage")
+    day = models.DateField()
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    requests = models.PositiveIntegerField(default=0)
+    input_tokens = models.PositiveBigIntegerField(default=0)
+    output_tokens = models.PositiveBigIntegerField(default=0)
+    web_searches = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "day", "kind"], name="unique_ai_usage_day")]

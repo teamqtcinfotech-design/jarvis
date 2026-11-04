@@ -88,9 +88,32 @@ class VersionSerializer(serializers.Serializer):
     expected_version = serializers.IntegerField(min_value=1)
 
 
+class ConversationTurnSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=[("user", "user"), ("jarvis", "jarvis")])
+    text = serializers.CharField(max_length=2000, allow_blank=True, trim_whitespace=True)
+
+
 class InterpretSerializer(serializers.Serializer):
     text = serializers.CharField(max_length=1000, trim_whitespace=True)
     previous = serializers.CharField(max_length=1000, required=False, allow_blank=True, default="")
+    # Last turns of the current conversation (kept on the phone only; never stored on the server).
+    history = ConversationTurnSerializer(many=True, required=False, default=list)
+
+    def validate_history(self, value):
+        return value[-8:]
+
+
+class AskSerializer(serializers.Serializer):
+    question = serializers.CharField(max_length=1000, trim_whitespace=True)
+    lang = serializers.ChoiceField(choices=[("en", "en"), ("hi", "hi")], required=False, default="en")
+    history = ConversationTurnSerializer(many=True, required=False, default=list)
+
+    def validate_history(self, value):
+        return value[-8:]
+
+
+class MemoryInputSerializer(serializers.Serializer):
+    text = serializers.CharField(max_length=300, trim_whitespace=True)
 
 
 class DecisionSerializer(serializers.Serializer):

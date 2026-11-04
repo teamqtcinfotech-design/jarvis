@@ -12,7 +12,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from . import ai_brain, assistant, services
+from . import ai_brain, ai_usage, assistant, services
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
@@ -23,6 +23,8 @@ from .permissions import IsMD, IsMDOrPA, IsPA
 from .reminders import reminders_for
 from .serializers import (
     AckSerializer,
+    AskSerializer,
+    MemoryInputSerializer,
     DecisionSerializer,
     DelegationInputSerializer,
     InterpretSerializer,
@@ -415,8 +417,60 @@ class InterpretView(APIView):
     def post(self, request):
         s = InterpretSerializer(data=request.data)
         s.is_valid(raise_exception=True)
-        draft = assistant.build_draft(request.user, s.validated_data["text"], s.validated_data["previous"])
+        draft = assistant.build_draft(request.user, s.validated_data["text"], s.validated_data["previous"],
+                                      s.validated_data["history"])
         return Response(draft)
+
+
+class AskView(APIView):
+    """General questions (weather, prices, news…) answered by Claude with web search.
+
+    Receives only the question and the last turns of the conversation — no tasks, memories or staff data.
+    """
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ask"
+
+    def post(self, request):
+        s = AskSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        user = request.user
+        result = ai_brain.answer(
+            s.validated_data["question"], s.validated_data["history"], user=user,
+            address="Sir" if user.is_md else user.spoken_name,
+            reader="the Managing Director" if user.is_md else f"{user.spoken_name}, the MD's personal assistant,",
+            lang=s.validated_data["lang"],
+        )
+        return Response(result)
+
+
+class AiUsageView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        return Response(ai_usage.month_summary(request.user))
+
+
+class MemoryListView(APIView):
+    """The speaker's own remembered facts. The MD's and the PA's lists are completely separate."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        return Response({"results": services.list_memories(request.user)})
+
+    @idempotent("memories.create")
+    def post(self, request):
+        s = MemoryInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        return Response(services.add_memory(request.user, s.validated_data["text"]), status=status.HTTP_201_CREATED)
+
+
+class MemoryDetailView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def delete(self, request, memory_id):
+        services.delete_memory(request.user, memory_id)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class BriefingView(APIView):
@@ -429,7 +483,7 @@ class BriefingView(APIView):
         if kind not in {"morning", "evening", "now"}:
             kind = "now"
         facts, fallback = services.briefing_facts(request.user, kind)
-        text, engine = ai_brain.briefing(facts, fallback)
+        text, engine = ai_brain.briefing(facts, fallback, user=request.user)
         return Response({"kind": kind, "text": text, "engine": engine, "generated_at": tu.now_local().isoformat()})
 
 

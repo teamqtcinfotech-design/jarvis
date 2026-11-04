@@ -5,14 +5,30 @@ The same key with a different body is rejected (409). The key is claimed
 before work starts, so two concurrent retries cannot both execute.
 """
 import functools
+import json
 
 from django.db import IntegrityError
 from rest_framework.response import Response
 
+from .crypto import decrypt, encrypt
 from .models import CommandReceipt
 from .services import canonical_hash, jsonable
 
 PENDING = 0
+
+
+def _seal(data) -> dict:
+    """Receipts keep a copy of the response (it can contain a private task title), so it is encrypted at rest."""
+    return {"enc": encrypt(json.dumps(jsonable(data), ensure_ascii=False))}
+
+
+def _unseal(stored):
+    if isinstance(stored, dict) and set(stored) == {"enc"}:
+        try:
+            return json.loads(decrypt(stored["enc"]))
+        except ValueError:
+            return {}
+    return stored  # receipts written before encryption was added
 
 
 def error(code: str, message: str, status: int, **extra) -> Response:
@@ -36,7 +52,7 @@ def idempotent(endpoint: str):
                 if existing.status_code == PENDING:
                     return error("in_progress", "This request is still being processed. Retry shortly.", 409,
                                  retryable=True)
-                resp = Response(existing.response, status=existing.status_code)
+                resp = Response(_unseal(existing.response), status=existing.status_code)
                 resp["Idempotent-Replay"] = "true"
                 return resp
             try:
@@ -52,7 +68,7 @@ def idempotent(endpoint: str):
                 raise
             if 200 <= response.status_code < 300:
                 receipt.status_code = response.status_code
-                receipt.response = jsonable(response.data)
+                receipt.response = _seal(response.data)
                 receipt.save(update_fields=["status_code", "response"])
             else:
                 # Failed attempts can be retried with the same key.
