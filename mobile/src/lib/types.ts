@@ -81,7 +81,7 @@ export interface Dashboard {
 
 export interface ServerAlert {
   id: string;
-  kind: 'NEW_REQUEST' | 'REQUEST_DECIDED' | 'STAFF_UPDATE' | 'INFO';
+  kind: 'NEW_REQUEST' | 'TASK_ASSIGNED' | 'REQUEST_DECIDED' | 'STAFF_UPDATE' | 'INFO';
   priority: Priority;
   title: string;
   body: string;

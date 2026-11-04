@@ -1,0 +1,78 @@
+-- Merging decision tree log ---
+manifest
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:1:1-29:12
+INJECTED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:1:1-29:12
+	package
+		INJECTED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml
+	xmlns:android
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:1:11-69
+uses-permission#android.permission.RECORD_AUDIO
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:2:3-69
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:2:20-66
+uses-permission#android.permission.FOREGROUND_SERVICE
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:3:3-75
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:3:20-72
+uses-permission#android.permission.FOREGROUND_SERVICE_MICROPHONE
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:4:3-86
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:4:20-83
+uses-permission#android.permission.POST_NOTIFICATIONS
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:5:3-75
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:5:20-72
+uses-permission#android.permission.RECEIVE_BOOT_COMPLETED
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:6:3-79
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:6:20-76
+uses-permission#android.permission.SYSTEM_ALERT_WINDOW
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:7:3-76
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:7:20-73
+uses-permission#android.permission.WAKE_LOCK
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:8:3-66
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:8:20-63
+uses-permission#android.permission.VIBRATE
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:9:3-64
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:9:20-61
+uses-permission#android.permission.INTERNET
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:10:3-65
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:10:20-62
+application
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:12:3-28:17
+service#com.qtcinfotech.jarvis.wake.WakeService
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:14:5-17:52
+	android:exported
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:16:7-31
+	android:foregroundServiceType
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:17:7-49
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:15:7-61
+receiver#com.qtcinfotech.jarvis.wake.BootReceiver
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:20:5-27:16
+	android:exported
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:22:7-30
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:21:7-62
+intent-filter#action:name:android.intent.action.BOOT_COMPLETED+action:name:android.intent.action.MY_PACKAGE_REPLACED
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:23:7-26:23
+action#android.intent.action.BOOT_COMPLETED
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:24:9-71
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:24:17-68
+action#android.intent.action.MY_PACKAGE_REPLACED
+ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:25:9-76
+	android:name
+		ADDED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:25:17-73
+uses-sdk
+INJECTED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml
+INJECTED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml
+	android:targetSdkVersion
+		INJECTED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml

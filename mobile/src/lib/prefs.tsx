@@ -17,6 +17,8 @@ export interface Prefs {
   quietHoursEnabled: boolean;
   quietStartHour: number;
   quietEndHour: number;
+  /** "Hey JARVIS" listening in the background (needs the one-time setup in Settings). */
+  wakeWordEnabled: boolean;
 }
 
 const DEFAULTS: Prefs = {
@@ -28,6 +30,7 @@ const DEFAULTS: Prefs = {
   quietHoursEnabled: true,
   quietStartHour: 22,
   quietEndHour: 7,
+  wakeWordEnabled: false,
 };
 
 const KEY = 'jarvis.prefs';

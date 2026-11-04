@@ -27,6 +27,11 @@ interface Handlers {
   hints?: string[];
 }
 
+interface Probe {
+  resolve: (voices: boolean) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 /** Android's built-in recogniser ('auto' = Hindi + English, or 'hi-IN'). Audio never reaches our server. */
 export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const [state, setState] = useState<CaptureState>('idle');
@@ -34,19 +39,50 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const latest = useRef('');
   const finalText = useRef('');
   const errored = useRef(false);
+  const stateRef = useRef<CaptureState>('idle');
+  const probing = useRef<Probe | null>(null);
   const handlersRef = useRef(handlers);
   useEffect(() => {
     handlersRef.current = handlers;
   });
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
-  useSpeechRecognitionEvent('start', () => setState('listening'));
+  const finishProbe = (voices: boolean) => {
+    const p = probing.current;
+    if (!p) return;
+    probing.current = null;
+    clearTimeout(p.timer);
+    try {
+      ExpoSpeechRecognitionModule.abort();
+    } catch {
+      // nothing to abort
+    }
+    p.resolve(voices);
+  };
+
+  useSpeechRecognitionEvent('start', () => {
+    if (!probing.current) setState('listening');
+  });
+  useSpeechRecognitionEvent('speechstart', () => {
+    if (probing.current) finishProbe(true); // someone is talking in the room
+  });
   useSpeechRecognitionEvent('result', (event) => {
     const text = event.results[0]?.transcript ?? '';
+    if (probing.current) {
+      if (text.trim()) finishProbe(true);
+      return;
+    }
     latest.current = text;
     if (event.isFinal) finalText.current = text;
     setPartial(text);
   });
   useSpeechRecognitionEvent('end', () => {
+    if (probing.current) {
+      finishProbe(false);
+      return;
+    }
     if (errored.current) return;
     setState('done');
     const text = (finalText.current || latest.current).trim();
@@ -54,6 +90,10 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     else handlersRef.current.onError?.(ERROR_TEXT['no-speech'], 'no-speech');
   });
   useSpeechRecognitionEvent('error', (event) => {
+    if (probing.current) {
+      finishProbe(false);
+      return;
+    }
     if (event.error === 'aborted') {
       setState('idle');
       return;
@@ -64,6 +104,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   });
 
   const start = useCallback(async () => {
+    if (probing.current) finishProbe(false); // the user comes first
     stopSpeaking();
     setPartial('');
     latest.current = '';
@@ -104,10 +145,39 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
 
   const stop = useCallback(() => ExpoSpeechRecognitionModule.stop(), []);
   const cancel = useCallback(() => {
+    if (probing.current) {
+      finishProbe(false);
+      return;
+    }
     errored.current = true; // suppress the "end" callback after an abort
     ExpoSpeechRecognitionModule.abort();
     setState('idle');
   }, []);
 
-  return { state, partial, start, stop, cancel };
+  /**
+   * "Is anyone talking in the room?" — listens for about two seconds using the phone's ON-DEVICE recogniser
+   * (nothing is sent anywhere) and resolves true if speech starts. Used before JARVIS speaks a reminder.
+   * Resolves false when the mic is already in use, permission is missing, or the on-device model is absent.
+   */
+  const probe = useCallback(
+    (ms = 2200) =>
+      new Promise<boolean>((resolve) => {
+        if (stateRef.current === 'listening' || probing.current) return resolve(false);
+        probing.current = { resolve, timer: setTimeout(() => finishProbe(false), ms) };
+        try {
+          ExpoSpeechRecognitionModule.start({
+            lang: 'en-IN',
+            interimResults: true,
+            continuous: false,
+            requiresOnDeviceRecognition: true,
+            androidIntentOptions: { EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1500 },
+          });
+        } catch {
+          finishProbe(false);
+        }
+      }),
+    [],
+  );
+
+  return { state, partial, start, stop, cancel, probe };
 }

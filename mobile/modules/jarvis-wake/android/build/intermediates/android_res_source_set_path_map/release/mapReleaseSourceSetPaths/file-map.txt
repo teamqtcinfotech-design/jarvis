@@ -1,0 +1,9 @@
+com.qtcinfotech.jarvis.wake.jarvis-wake-pngs-0 D:\Friday\mobile\modules\jarvis-wake\android\build\generated\res\pngs\release
+com.qtcinfotech.jarvis.wake.jarvis-wake-updated_navigation_xml-1 D:\Friday\mobile\modules\jarvis-wake\android\build\generated\updated_navigation_xml\release
+com.qtcinfotech.jarvis.wake.jarvis-wake-mergeReleaseResources-2 D:\Friday\mobile\modules\jarvis-wake\android\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.qtcinfotech.jarvis.wake.jarvis-wake-mergeReleaseResources-3 D:\Friday\mobile\modules\jarvis-wake\android\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.qtcinfotech.jarvis.wake.jarvis-wake-release-4 D:\Friday\mobile\modules\jarvis-wake\android\build\intermediates\merged_res\release\mergeReleaseResources
+com.qtcinfotech.jarvis.wake.jarvis-wake-release-5 D:\Friday\mobile\modules\jarvis-wake\android\build\intermediates\packaged_res\release\packageReleaseResources
+com.qtcinfotech.jarvis.wake.jarvis-wake-main-6 D:\Friday\mobile\modules\jarvis-wake\android\src\main\res
+com.qtcinfotech.jarvis.wake.jarvis-wake-release-7 D:\Friday\mobile\modules\jarvis-wake\android\src\release\res
+gradleHome-0 C:\Users\HP\.gradle

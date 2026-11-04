@@ -1,11 +1,12 @@
 import { useRouter } from 'expo-router';
+import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 import React, { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { AppState, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui';
 import { useAlertEngine } from '@/lib/alertEngine';
-import { api } from '@/lib/api';
+import { api, currentServer, deviceTokens } from '@/lib/api';
 import { relativeAgo } from '@/lib/format';
 import { usePrefs } from '@/lib/prefs';
 import { presenceLabel } from '@/lib/presence';
@@ -13,6 +14,7 @@ import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
 import type { AiUsageSummary, MemoryItem } from '@/lib/types';
+import { type WakeStatus, wakeSettings, wakeStart, wakeStatus, wakeStop, wakeSupported } from '@/lib/wake';
 
 function Row({ title, detail, right }: { title: string; detail?: string; right: React.ReactNode }) {
   return (
@@ -40,16 +42,69 @@ export default function Settings() {
   const [health, setHealth] = useState<Health | null>(null);
   const [memories, setMemories] = useState<MemoryItem[] | null>(null);
   const [usage, setUsage] = useState<AiUsageSummary | null>(null);
+  const [wake, setWake] = useState<WakeStatus | null>(null);
+  const [wakeBusy, setWakeBusy] = useState(false);
+  const [wakeNote, setWakeNote] = useState('');
 
   useEffect(() => {
+    const refresh = () => wakeStatus().then(setWake).catch(() => undefined);
     const kick = setTimeout(() => {
       api<Health>('/health/').then((r) => setHealth(r.data)).catch(() => setHealth(null));
       api<{ results: MemoryItem[] }>('/memories/').then((r) => setMemories(r.data.results)).catch(() => setMemories([]));
       api<AiUsageSummary>('/assistant/usage/').then((r) => setUsage(r.data)).catch(() => setUsage(null));
+      refresh();
     }, 0);
-    return () => clearTimeout(kick);
+    const sub = AppState.addEventListener('change', (s) => s === 'active' && refresh()); // back from Android settings
+    return () => {
+      clearTimeout(kick);
+      sub.remove();
+    };
   }, []);
   const tp = health?.taskpanel;
+  const xiaomi = /xiaomi|redmi|poco/i.test(wake?.manufacturer ?? '');
+
+  const toggleWake = async (on: boolean) => {
+    setWakeNote('');
+    if (!on) {
+      await wakeStop();
+      update({ wakeWordEnabled: false });
+      setWake(await wakeStatus());
+      return;
+    }
+    setWakeBusy(true);
+    try {
+      const mic = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!mic.granted) {
+        setWakeNote('Microphone permission is needed.');
+        return;
+      }
+      const st = await wakeStatus();
+      if (!st.supported) {
+        setWakeNote('This build has no background listener.');
+        return;
+      }
+      if (!st.overlayAllowed) {
+        setWakeNote('Allow “Display over other apps” for JARVIS, then come back and switch this on.');
+        wakeSettings.overlay();
+        return;
+      }
+      const tokens = await deviceTokens();
+      const ok = await wakeStart({
+        serverUrl: currentServer(),
+        accessToken: tokens.access,
+        refreshToken: tokens.refresh,
+        address: isMD ? 'Sir' : user?.name ?? '',
+        speakWhenLocked: prefs.privateAloudWhenLocked,
+      });
+      update({ wakeWordEnabled: ok });
+      if (!ok) setWakeNote('Could not start the listener. Check the microphone permission and try again.');
+      setWake(await wakeStatus());
+    } catch {
+      setWakeNote('Could not reach the server to set this up. Try again in a moment.');
+    } finally {
+      setWakeBusy(false);
+    }
+  };
 
   const forget = async (id: string) => {
     setMemories((list) => (list ?? []).filter((m) => m.id !== id));
@@ -97,6 +152,31 @@ export default function Settings() {
           <Button title="Test voice" kind="secondary" icon="volume-high-outline" compact onPress={testVoice} style={{ alignSelf: 'flex-start', marginTop: 10 }} />
           <Txt variant="caption" style={{ marginTop: 8 }}>
             No Hindi voice? Android Settings → Text-to-speech → Google → Install voice data → Hindi (India).
+          </Txt>
+        </Card>
+
+        <Txt variant="label" style={{ marginTop: 22 }}>“Hey JARVIS” when the app is closed</Txt>
+        <Card style={s.card}>
+          <Row
+            title="Listen for “Hey JARVIS”"
+            detail={
+              !wakeSupported ? 'Not included in this build.'
+                : wake?.running ? 'On. Say “Hey JARVIS” any time, even with the app closed.'
+                : 'Off. Switch on to wake JARVIS by voice from anywhere.'
+            }
+            right={<Switch value={prefs.wakeWordEnabled && !!wake?.running} disabled={!wakeSupported || wakeBusy} onValueChange={toggleWake} trackColor={{ true: colors.gold }} />}
+          />
+          {wakeNote ? <Txt variant="small" style={{ color: colors.warn, marginTop: 4 }}>{wakeNote}</Txt> : null}
+          {wakeSupported ? (
+            <View style={s.chips}>
+              {!wake?.overlayAllowed ? <Chip label="Allow display over other apps" icon="open-outline" onPress={() => wakeSettings.overlay()} /> : null}
+              {!wake?.batteryUnrestricted ? <Chip label="Battery: no restrictions" icon="battery-charging-outline" onPress={() => wakeSettings.battery()} /> : null}
+              {xiaomi ? <Chip label="Autostart (Xiaomi)" icon="power-outline" onPress={() => { if (!wakeSettings.autostart()) setWakeNote('Open Security app → Autostart and allow JARVIS.'); }} /> : null}
+            </View>
+          ) : null}
+          <Txt variant="caption" style={{ marginTop: 6 }}>
+            Listening happens on the phone; nothing is sent until you say the words. A small notification shows while it is on.
+            After a phone restart, open JARVIS once (or tap the notification) to switch it on again.
           </Txt>
         </Card>
 

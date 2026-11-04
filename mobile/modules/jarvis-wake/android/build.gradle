@@ -1,0 +1,24 @@
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'com.qtcinfotech.jarvis.wake'
+version = '1.0.0'
+
+android {
+  namespace "com.qtcinfotech.jarvis.wake"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+  // The wake-word models are ~3.5 MB; keep them uncompressed so they can be memory-mapped quickly.
+  androidResources {
+    noCompress "onnx"
+  }
+}
+
+dependencies {
+  implementation "com.microsoft.onnxruntime:onnxruntime-android:1.19.2"
+}

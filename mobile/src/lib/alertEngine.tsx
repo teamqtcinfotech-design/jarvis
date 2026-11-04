@@ -57,10 +57,23 @@ export interface EngineItem {
   mode?: 'loud' | 'silent';
 }
 
+/** "Sir, while you were away: … Shall I read them?" — built by the engine, asked by the conversation. */
+export interface HeldOffer {
+  id: number;
+  count: number;
+  text: string; // English, Roman letters (shown and spoken with the Indian voice)
+  textHi: string; // Devanagari, for the Hindi voice
+}
+
 interface EngineValue {
   presence: ReturnType<typeof usePresence>;
   meetingMode: boolean;
   setMeetingMode: (on: boolean) => void;
+  offer: HeldOffer | null;
+  acceptOffer: () => void;
+  declineOffer: () => void;
+  /** The conversation owns the microphone; it lends the engine a 2-second "is anyone talking?" check. */
+  setVoiceProbe: (probe: (() => Promise<boolean>) | null) => void;
   current: EngineItem | null;
   queued: number;
   held: EngineItem[];
@@ -150,6 +163,52 @@ function buzzSilently(urgent: boolean) {
   }
 }
 
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** "2 private reminders and 1 request from your PA" in English and Hindi. */
+function describeHeld(items: EngineItem[], isMD: boolean): { en: string; hi: string } {
+  const n = (f: (i: EngineItem) => boolean) => items.filter(f).length;
+  const privateRem = n((i) => i.source === 'reminder' && i.isPrivate);
+  const otherRem = n((i) => i.source === 'reminder' && !i.isPrivate);
+  const requests = n((i) => i.alertKind === 'NEW_REQUEST');
+  const assigned = n((i) => i.alertKind === 'TASK_ASSIGNED');
+  const decided = n((i) => i.alertKind === 'REQUEST_DECIDED');
+  const staff = n((i) => i.alertKind === 'STAFF_UPDATE');
+  const other = items.length - privateRem - otherRem - requests - assigned - decided - staff;
+  const en: string[] = [];
+  const hi: string[] = [];
+  if (privateRem) {
+    en.push(plural(privateRem, 'private reminder'));
+    hi.push(`${privateRem} प्राइवेट रिमाइंडर`);
+  }
+  if (otherRem) {
+    en.push(plural(otherRem, 'reminder'));
+    hi.push(`${otherRem} रिमाइंडर`);
+  }
+  if (requests) {
+    en.push(`${plural(requests, 'request')} from ${isMD ? 'your PA' : 'Sir'}`);
+    hi.push(`${isMD ? 'आपकी PA' : 'सर'} की ${requests} रिक्वेस्ट`);
+  }
+  if (assigned) {
+    en.push(`${plural(assigned, 'task')} from Sir`);
+    hi.push(`सर के ${assigned} टास्क`);
+  }
+  if (decided) {
+    en.push(`${plural(decided, 'answer')} from Sir`);
+    hi.push(`सर के ${decided} जवाब`);
+  }
+  if (staff) {
+    en.push(plural(staff, 'staff update'));
+    hi.push(`स्टाफ़ के ${staff} अपडेट`);
+  }
+  if (other > 0) {
+    en.push(plural(other, 'update'));
+    hi.push(`${other} अपडेट`);
+  }
+  const join = (parts: string[], and: string) => (parts.length > 1 ? `${parts.slice(0, -1).join(', ')} ${and} ${parts[parts.length - 1]}` : parts[0] ?? '');
+  return { en: join(en, 'and'), hi: join(hi, 'और') };
+}
+
 export function AlertEngineProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const { prefs } = usePrefs();
@@ -173,6 +232,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const [lastSync, setLastSync] = useState<number | null>(null);
   const [notificationsGranted, setNotificationsGranted] = useState<boolean | null>(null);
   const [upcomingCount, setUpcomingCount] = useState(0);
+  const [offer, setOffer] = useState<HeldOffer | null>(null);
+  const offerSeq = useRef(0);
+  const voiceProbe = useRef<(() => Promise<boolean>) | null>(null);
+  const isMD = user?.role === 'MD';
 
   const currentRef = useRef<EngineItem | null>(null);
   const queueRef = useRef<EngineItem[]>([]);
@@ -255,22 +318,39 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [setHeld],
   );
 
-  const announceHeldIfBack = useCallback(() => {
+  // He is back (picked the phone up, opened the app) and alerts were held: offer to read them.
+  // The engine only builds the offer; the conversation asks it aloud and listens for the answer.
+  const offerHeldIfBack = useCallback(() => {
     if (presenceRef.current !== 'present') return;
     const items = heldRef.current;
     if (items.length <= announcedHeld.current) return;
     announcedHeld.current = items.length;
-    const urgent = items.filter((i) => i.priority === 'URGENT').length;
-    const first = items[0];
-    const firstText = first.isPrivate && !privateAloud() ? '' : ` First: ${first.title}.`;
-    say(
-      `${address}, while you were away: ${items.length} alert${items.length > 1 ? 's' : ''}` +
-        (urgent ? `, ${urgent} urgent.` : '.') +
-        firstText,
-    );
+    const what = describeHeld(items, isMD);
+    const sir = isMD ? 'Sir' : address;
+    offerSeq.current += 1;
+    setOffer({
+      id: offerSeq.current,
+      count: items.length,
+      text: `${sir}, while you were away: ${what.en}. Shall I read them?`,
+      textHi: `${isMD ? 'सर' : address}, जब आप दूर थे: ${what.hi}। पढ़ कर सुनाऊँ?`,
+    });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
+  }, [address, isMD]);
+
+  const acceptOffer = useCallback(() => {
+    setOffer(null);
+    for (const item of heldRef.current) say(spokenFor(item)); // one after another
     setHeldVisible(true);
-  }, [address, privateAloud]);
+  }, [spokenFor]);
+
+  const declineOffer = useCallback(() => {
+    setOffer(null);
+    setHeldVisible(true); // "they're in your list"
+  }, []);
+
+  const setVoiceProbe = useCallback((probe: (() => Promise<boolean>) | null) => {
+    voiceProbe.current = probe;
+  }, []);
 
   const route = useCallback(
     (item: EngineItem, state: PresenceState, now: number) => {
@@ -280,7 +360,19 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (item.priority === 'LOW' && item.source === 'server') {
         return state === 'present' ? deliver(item, 'silent') : hold(item);
       }
-      if (state === 'present') return deliver(item, 'loud');
+      if (state === 'present') {
+        // With you — but is someone talking in the room? Then it is a meeting: vibrate, hold the words.
+        const probe = voiceProbe.current;
+        if (!probe) return deliver(item, 'loud');
+        probe()
+          .catch(() => false)
+          .then((voices) => {
+            if (!voices) return deliver(item, 'loud');
+            deliver(item, 'silent');
+            hold(item);
+          });
+        return;
+      }
       if (state === 'away') return hold(item);
       // meeting / face down / quiet hours: only urgent interrupts, and silently
       return item.priority === 'URGENT' ? deliver(item, 'silent') : hold(item);
@@ -317,8 +409,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (currentRef.current?.key === item.key) setCurrent(null);
       route(item, presenceRef.current, now);
     }
-    announceHeldIfBack();
-  }, [route, announceHeldIfBack, setCurrent]);
+    offerHeldIfBack();
+  }, [route, offerHeldIfBack, setCurrent]);
 
   const scheduleOs = useCallback(async (reminders: Reminder[]) => {
     const now = Date.now();
@@ -403,8 +495,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   useEffect(() => {
     const prev = presenceRef.current;
     presenceRef.current = presence.state;
-    if (prev !== 'present' && presence.state === 'present') announceHeldIfBack();
-  }, [presence.state, announceHeldIfBack]);
+    if (prev !== 'present' && presence.state === 'present') offerHeldIfBack();
+  }, [presence.state, offerHeldIfBack]);
 
   // Tapping an OS notification opens the app on that alert.
   const markActive = presence.markActive;
@@ -520,6 +612,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     presence,
     meetingMode,
     setMeetingMode,
+    offer,
+    acceptOffer,
+    declineOffer,
+    setVoiceProbe,
     current,
     queued,
     held,

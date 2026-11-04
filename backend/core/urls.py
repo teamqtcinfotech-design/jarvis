@@ -7,6 +7,7 @@ urlpatterns = [
     path("auth/login/", views.LoginView.as_view()),
     path("auth/refresh/", TokenRefreshView.as_view()),
     path("auth/logout/", views.LogoutView.as_view()),
+    path("auth/device-token/", views.DeviceTokenView.as_view()),
     path("me/", views.MeView.as_view()),
     path("health/", views.HealthView.as_view()),
     path("today/", views.TodayView.as_view()),

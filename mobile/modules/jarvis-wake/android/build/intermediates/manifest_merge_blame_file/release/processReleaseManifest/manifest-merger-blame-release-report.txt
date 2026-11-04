@@ -1,0 +1,69 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.qtcinfotech.jarvis.wake" >
+4
+5    <uses-sdk android:minSdkVersion="24" />
+5-->INJECTED
+5-->INJECTED
+6
+7    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+7-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:2:3-69
+7-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:2:20-66
+8    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+8-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:3:3-75
+8-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:3:20-72
+9    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+9-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:4:3-86
+9-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:4:20-83
+10    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+10-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:5:3-75
+10-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:5:20-72
+11    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+11-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:6:3-79
+11-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:6:20-76
+12    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+12-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:7:3-76
+12-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:7:20-73
+13    <uses-permission android:name="android.permission.WAKE_LOCK" />
+13-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:8:3-66
+13-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:8:20-63
+14    <uses-permission android:name="android.permission.VIBRATE" />
+14-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:9:3-64
+14-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:9:20-61
+15    <uses-permission android:name="android.permission.INTERNET" />
+15-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:10:3-65
+15-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:10:20-62
+16
+17    <application>
+17-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:12:3-28:17
+18
+19        <!-- Always-on "Hey JARVIS" listener. Microphone type: Android shows the mic indicator while it runs. -->
+20        <service
+20-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:14:5-17:52
+21            android:name="com.qtcinfotech.jarvis.wake.WakeService"
+21-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:15:7-61
+22            android:exported="false"
+22-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:16:7-31
+23            android:foregroundServiceType="microphone" />
+23-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:17:7-49
+24
+25        <!-- After a reboot Android does not let an app open the microphone by itself: this posts "Tap to switch JARVIS on". -->
+26        <receiver
+26-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:20:5-27:16
+27            android:name="com.qtcinfotech.jarvis.wake.BootReceiver"
+27-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:21:7-62
+28            android:exported="true" >
+28-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:22:7-30
+29            <intent-filter>
+29-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:23:7-26:23
+30                <action android:name="android.intent.action.BOOT_COMPLETED" />
+30-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:24:9-71
+30-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:24:17-68
+31                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+31-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:25:9-76
+31-->D:\Friday\mobile\modules\jarvis-wake\android\src\main\AndroidManifest.xml:25:17-73
+32            </intent-filter>
+33        </receiver>
+34    </application>
+35
+36</manifest>

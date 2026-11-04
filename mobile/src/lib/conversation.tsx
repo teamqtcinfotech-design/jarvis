@@ -10,10 +10,12 @@
  * - Audio never leaves the phone; only the recognised text goes to our server.
  */
 import * as Haptics from 'expo-haptics';
+import { router } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
-import { ApiError, api, newIdempotencyKey } from './api';
+import { type HeldOffer, useAlertEngine } from './alertEngine';
+import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
 import { CONFIRMABLE, TASK_DRAFTS, describeDraft } from './drafts';
 import { dayLabel } from './format';
@@ -22,6 +24,7 @@ import { useSession } from './session';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang } from './speech';
 import type { AskAnswer, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
+import { onWake, wakeConsumePending, wakePause, wakeResume, wakeStart, wakeStatus, wakeSupported } from './wake';
 
 export interface Msg {
   id: string;
@@ -69,6 +72,7 @@ const newId = () => `m${Date.now()}-${seq++}`;
 export function ConversationProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const { prefs } = usePrefs();
+  const { setVoiceProbe, offer, acceptOffer, declineOffer } = useAlertEngine();
   const isMD = user?.role === 'MD';
   const address = isMD ? 'Sir' : user?.name ?? '';
 
@@ -87,17 +91,27 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const previousRef = useRef(''); // the sentence a clarification answer belongs to
   const langRef = useRef<SpeakLang>('en');
   const idemKey = useRef('');
-  const engine = useRef<{ heard: (t: string) => void; voiceError: (m: string, c: string) => void }>({
-    heard: () => undefined,
-    voiceError: () => undefined,
-  });
+  const offerRef = useRef<HeldOffer | null>(null); // "shall I read them?" is waiting for an answer
+  const presentedOffer = useRef(0);
+  const fns = useRef<{
+    heard: (t: string) => void;
+    voiceError: (m: string, c: string) => void;
+    presentOffer: (o: HeldOffer) => void;
+    wake: () => void;
+  }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, wake: () => undefined });
 
   const voice = useVoiceCapture(prefs.listenLang, {
     hints,
-    onFinal: (text) => engine.current.heard(text),
-    onError: (message, code) => engine.current.voiceError(message, code),
+    onFinal: (text) => fns.current.heard(text),
+    onError: (message, code) => fns.current.voiceError(message, code),
   });
-  const { start: startVoice, stop: stopVoice, cancel: cancelVoice } = voice;
+  const { start: startVoice, stop: stopVoice, cancel: cancelVoice, probe } = voice;
+
+  // The alert engine borrows the microphone for its 2-second "is anyone talking?" check.
+  useEffect(() => {
+    setVoiceProbe(probe);
+    return () => setVoiceProbe(null);
+  }, [setVoiceProbe, probe]);
 
   // Names the recogniser should expect, so "JARVIS" and "Mansi" are not turned into other words.
   useEffect(() => {
@@ -151,6 +165,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     silenceRef.current = 0;
     expectingRef.current = false;
     push('user', text);
+    const pendingOffer = offerRef.current;
+    if (pendingOffer) {
+      interpret(text, '', `JARVIS asked: "${pendingOffer.text}" (${pendingOffer.count} alerts kept while away)`);
+      return;
+    }
     const card = waitingCard();
     if (card) interpret(text, card.transcript, describeDraft(card));
     else interpret(text, previousRef.current, '');
@@ -167,11 +186,36 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       } else {
         silenceRef.current = 0;
         expectingRef.current = false;
+        if (offerRef.current) {
+          offerRef.current = null;
+          declineOffer(); // no answer: they stay in the list, quietly
+        }
       }
       return;
     }
     expectingRef.current = false;
     push('jarvis', message, { tone: 'error' });
+  };
+
+  // "Sir, while you were away: … Shall I read them?" — asked once JARVIS is idle.
+  const presentOffer = (o: HeldOffer) => {
+    offerRef.current = o;
+    push('jarvis', o.text);
+    expectingRef.current = true;
+    silenceRef.current = 0;
+    const hi = langRef.current === 'hi';
+    say(hi ? o.textHi : o.text, { interrupt: true, lang: hi ? 'hi' : 'en', onDone: listen });
+  };
+
+  // Woken by "Hey JARVIS": come to the orb screen, greet, listen.
+  const wake = () => {
+    if (!user) return;
+    try {
+      router.navigate('/');
+    } catch {
+      // not mounted yet; the greeting still works
+    }
+    greet();
   };
 
   const interpret = async (text: string, previous: string, awaiting: string) => {
@@ -196,6 +240,25 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     langRef.current = d.reply_language === 'hi' ? 'hi' : 'en';
     const speakText = d.speak_text || d.spoken_reply;
     const lang: SpeakLang = d.speak_lang === 'hi' ? 'hi' : 'en';
+
+    const pendingOffer = offerRef.current;
+    if (pendingOffer) {
+      offerRef.current = null;
+      if (d.action === 'confirm_pending') {
+        push('jarvis', 'Here they are.');
+        expectingRef.current = false;
+        acceptOffer(); // the engine reads each held alert aloud
+        return;
+      }
+      if (d.action === 'cancel_pending') {
+        declineOffer();
+        const hi = hiLine(`Okay ${address}, they're in your list.`, `ठीक है${isMD ? ' सर' : ''}, वो आपकी लिस्ट में हैं।`);
+        if (hi) reply(hi.show, hi.speak, 'hi', false);
+        else reply(`Okay ${address}, they're in your list.`, undefined, 'en', false);
+        return;
+      }
+      declineOffer(); // he asked for something else: leave them in the list and carry on
+    }
 
     if (d.action === 'ask') {
       push('jarvis', d.spoken_reply);
@@ -433,7 +496,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   useEffect(() => {
-    engine.current = { heard, voiceError };
+    fns.current = { heard, voiceError, presentOffer, wake };
   });
 
   // Speaking indicator; going to the background releases the mic and stops talking.
@@ -451,6 +514,62 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     };
   }, [cancelVoice]);
 
+  const listening = voice.state === 'listening';
+
+  // A held-alerts offer is asked as soon as JARVIS is idle (not mid-sentence, not mid-search).
+  useEffect(() => {
+    if (!offer || offer.id === presentedOffer.current || listening || busy || speaking) return;
+    presentedOffer.current = offer.id;
+    const kick = setTimeout(() => fns.current.presentOffer(offer), 0);
+    return () => clearTimeout(kick);
+  }, [offer, listening, busy, speaking]);
+
+  // "Hey JARVIS": the native listener either tells us directly (app open) or brings the app to the front
+  // with a pending flag (app was closed). One microphone user at a time: it pauses while JARVIS talks or listens.
+  useEffect(() => {
+    if (!wakeSupported) return;
+    const off = onWake(() => fns.current.wake());
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active' && wakeConsumePending()) fns.current.wake();
+    });
+    const kick = setTimeout(() => {
+      if (wakeConsumePending()) fns.current.wake();
+    }, 400);
+    return () => {
+      off();
+      sub.remove();
+      clearTimeout(kick);
+    };
+  }, []);
+  useEffect(() => {
+    if (!wakeSupported || !prefs.wakeWordEnabled) return;
+    if (listening || speaking || busy) wakePause();
+    else wakeResume();
+  }, [listening, speaking, busy, prefs.wakeWordEnabled]);
+
+  // After a reboot (or if Android stopped it), switch the listener back on when the app opens.
+  useEffect(() => {
+    if (!wakeSupported || !prefs.wakeWordEnabled || !user) return;
+    let cancelled = false;
+    wakeStatus()
+      .then(async (st) => {
+        if (cancelled || !st.supported || st.running || !st.micAllowed || !st.overlayAllowed) return;
+        const tokens = await deviceTokens();
+        if (cancelled) return;
+        await wakeStart({
+          serverUrl: currentServer(),
+          accessToken: tokens.access,
+          refreshToken: tokens.refresh,
+          address: user.role === 'MD' ? 'Sir' : user.name,
+          speakWhenLocked: prefs.privateAloudWhenLocked,
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, user]);
+
   // Signing out clears everything.
   const prevUser = useRef(user);
   useEffect(() => {
@@ -462,15 +581,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  const listening = voice.state === 'listening';
   const orb: OrbState = listening ? 'listening' : busy ? 'thinking' : speaking ? 'speaking' : 'idle';
   const status = listening ? 'Listening…'
     : busy === 'searching' ? 'Searching the internet…'
     : busy === 'thinking' ? 'Thinking…'
     : busy === 'saving' ? 'Saving…'
     : speaking ? 'Speaking… tap to interrupt'
+    : offer ? 'Shall I read them? · tap to answer'
     : draft && !draft.needs_clarification && draft.action !== 'choose_destination' ? 'Waiting for your answer · tap to speak'
     : draft ? 'Tap to answer'
+    : prefs.wakeWordEnabled ? 'Say “Hey JARVIS”, or tap and speak'
     : 'Tap and speak';
 
   const value: ConversationValue = {

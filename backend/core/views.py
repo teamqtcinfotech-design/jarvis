@@ -408,6 +408,22 @@ class RequestWithdrawView(APIView):
         return Response(services.request_item(services.withdraw_request(request.user, request_id)))
 
 
+class DeviceTokenView(APIView):
+    """A separate login for the phone's background "Hey JARVIS" service.
+
+    Refresh tokens rotate and the old one is blacklisted, so the app and the service must each have
+    their own chain; sharing one would log the other out.
+    """
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+    def post(self, request):
+        refresh = RefreshToken.for_user(request.user)
+        services.audit(request.user, "auth.device_token", "user", request.user.id)
+        return Response({"access": str(refresh.access_token), "refresh": str(refresh)})
+
+
 # ------------------------------------------------------------------ assistant
 class InterpretView(APIView):
     permission_classes = [IsMDOrPA]

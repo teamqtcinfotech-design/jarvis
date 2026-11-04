@@ -44,6 +44,12 @@ export function currentServer() {
   return serverUrl;
 }
 
+/** Asks the server for a separate login for the background "Hey JARVIS" service, so its refreshes never clash with the app's. */
+export async function deviceTokens(): Promise<{ access: string; refresh: string }> {
+  const res = await api<{ access: string; refresh: string }>('/auth/device-token/', { method: 'POST', body: {} });
+  return res.data;
+}
+
 export async function loadStoredSession(): Promise<{ server: string; user: SessionUser | null }> {
   serverUrl = (await SecureStore.getItemAsync(K_SERVER)) ?? '';
   accessToken = (await SecureStore.getItemAsync(K_ACCESS)) ?? '';

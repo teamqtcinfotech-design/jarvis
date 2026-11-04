@@ -621,6 +621,17 @@ class SmartAssistantTests(BaseCase):
         self.assertEqual(yes["action"], "confirm_pending")
         self.assertEqual(no["action"], "cancel_pending")
 
+    def test_device_token_is_a_separate_login_chain(self):
+        self.assertEqual(APIClient().post("/api/v1/auth/device-token/", {}, format="json").status_code, 401)
+        r = self.md_client.post("/api/v1/auth/device-token/", {}, format="json")
+        self.assertEqual(r.status_code, 200)
+        device = r.json()
+        # The service refreshes with its own token, and the app's own session is untouched.
+        r2 = APIClient().post("/api/v1/auth/refresh/", {"refresh": device["refresh"]}, format="json")
+        self.assertEqual(r2.status_code, 200)
+        self.assertIn("access", r2.json())
+        self.assertEqual(self.md_client.get("/api/v1/me/").status_code, 200)
+
     def test_memories_are_owner_only_and_encrypted(self):
         r = self.md_client.post("/api/v1/memories/", {"text": SECRET}, format="json", HTTP_IDEMPOTENCY_KEY="mem-1")
         self.assertEqual(r.status_code, 201)
