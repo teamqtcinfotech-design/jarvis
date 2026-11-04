@@ -157,8 +157,8 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       contextualStrings: handlersRef.current.hints?.length ? handlersRef.current.hints.slice(0, 60) : undefined,
       androidIntentOptions: {
         // A natural pause mid-sentence is not the end of it.
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1500,
-        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1500,
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
+        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
         EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 8000,
         ...(canSwitch
           ? {

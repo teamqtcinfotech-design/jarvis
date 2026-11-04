@@ -878,7 +878,7 @@ def ai_context(user: User) -> dict:
     now = tu.now_local()
     tp_sync.ensure_directory(user)
     staff = [{"id": s.external_id, "name": s.name, "department": s.department, "on_leave": s.on_leave}
-             for s in StaffMember.objects.filter(active=True)[:300]]
+             for s in StaffMember.objects.filter(active=True)[:80]]
     categories = [{"key": c.key, "name": c.name, "department": c.department}
                   for c in TaskCategory.objects.filter(active=True)[:100]]
     ctx = {

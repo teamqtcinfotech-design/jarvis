@@ -434,7 +434,8 @@ class InterpretView(APIView):
         s = InterpretSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         draft = assistant.build_draft(request.user, s.validated_data["text"], s.validated_data["previous"],
-                                      s.validated_data["history"], s.validated_data["awaiting"])
+                                      s.validated_data["history"], s.validated_data["awaiting"],
+                                      s.validated_data.get("choices"))
         return Response(draft)
 
 

@@ -160,6 +160,8 @@ export interface Draft {
   pa_name: string;
   team: { label: string; members: StaffOption[]; skipped: StaffOption[] } | null;
   target: { id: string; title: string; scope?: string; version?: number } | null;
+  /** Every item this applies to: "mark both as done", "accept all three". */
+  targets: { id: string; title: string; scope?: string; version?: number }[];
   target_candidates: { id: string; title: string; scope?: string; version?: number }[];
   needs_clarification: boolean;
   question: string;

@@ -59,6 +59,8 @@ COMMAND_SCHEMA = {
         "team_name": {"type": "string", "description": "'all' for the whole team, or a department name, else empty"},
         "category_key": {"type": "string", "description": "key from task_categories, or empty"},
         "target_ref": {"type": "string"},
+        "target_refs": {"type": "array", "items": {"type": "string"},
+                        "description": "ids of ALL the items meant (from open_items, pending_requests or choices); several when the user means more than one"},
         "needs_clarification": {"type": "boolean"},
         "clarification_question": {"type": "string"},
         "spoken_reply": {"type": "string"},
@@ -73,7 +75,7 @@ COMMAND_SCHEMA = {
     },
     "required": [
         "intent", "title", "notes", "kind", "priority", "due_date", "due_time", "duration_minutes",
-        "remind_before_minutes", "staff_name", "team_name", "category_key", "target_ref", "needs_clarification",
+        "remind_before_minutes", "staff_name", "team_name", "category_key", "target_ref", "target_refs", "needs_clarification",
         "clarification_question", "spoken_reply", "spoken_reply_hi", "reply_language", "question", "memory_text",
         "done_reply", "done_reply_hi", "reminder_line", "confidence",
     ],
@@ -116,7 +118,8 @@ Rules:
 - staff_name: when the work is for a staff member, copy the name exactly as said (e.g. "QTC Developer" and "QTC Developer2" are different people). Never invent people. If it could match more than one person, still return the name; the server will ask which one. For all staff / a whole team use assign_to_team with team_name instead.
 - category_key: for assign_to_staff only, pick the best matching key from task_categories (consider the person's department); use default_category when unsure. Never invent a key.
 - title vs notes: the title is short; the server keeps the user's full original sentence as the task description, so do not drop details from the instruction.
-- target_ref: only an id that appears in the context (a pending request id to accept/decline, or a task id to complete). Otherwise empty.
+- target_ref / target_refs: for complete_task, accept_request and decline_request, find the item(s) the speaker means BY MEANING in open_items (or pending_requests) and put their ids in target_refs (target_ref = the first). Match loosely: "Mehta wala call" matches "Call Mehta ji about the Pune franchise". "both", "dono", "sab", "all of them", "ye dono" = every matching item. Only ids that appear in the context; never invent one. Ask (needs_clarification) only when the words fit nothing or truly fit several and the speaker did not mean all of them.
+- When the context has choices, JARVIS has just asked "which one?" and the instruction is the ANSWER. Resolve it against choices.items only, by meaning: "the franchise one" -> that id; "pehla / first" -> the first; "both / dono / sab" -> all of them; "none / koi nahi" -> intent unknown with a short spoken_reply. Use intent = choices.intent and fill target_refs. Do not ask the same question again unless the answer fits none of them.
 - If something essential is missing or ambiguous (who, which task, which day), set needs_clarification true and ask ONE short question in clarification_question.
 - query: answer the question in spoken_reply using only facts in the context. Never reveal anything that is not in the context.
 - spoken_reply: one or two short sentences JARVIS says aloud now, shown on screen too. Polite and warm; address the MD as "Sir" and the PA by first name. Confirm what you understood, for example: "Sir, meeting with Sharma Franchise tomorrow at 11 AM, marked urgent. Shall I save it?" When needs_clarification is true, spoken_reply must be exactly the clarification_question.

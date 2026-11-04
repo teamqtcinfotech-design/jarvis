@@ -57,6 +57,19 @@ def _match_items(words: str, items: list[dict]) -> list[dict]:
     return [i for s, i in scored if s == best]
 
 
+def _chosen(cmd: dict, by_id: dict) -> list[dict]:
+    """The items the model picked (target_refs, or the single target_ref), kept only if they really exist."""
+    refs = [r for r in (cmd.get("target_refs") or []) if isinstance(r, str)]
+    if not refs and cmd.get("target_ref"):
+        refs = [cmd["target_ref"]]
+    seen, out = set(), []
+    for r in refs:
+        if r in by_id and r not in seen:
+            seen.add(r)
+            out.append(by_id[r])
+    return out
+
+
 _PA_WORDS = {"pa", "p.a.", "p a", "meri pa", "my pa", "mera pa", "assistant", "my assistant", "personal assistant"}
 
 
@@ -218,13 +231,17 @@ _TASK_INTENTS = {"create_task", "assign_to_staff", "assign_to_team", "assign_to_
 
 
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
-                awaiting: str = "") -> dict:
-    """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed."""
+                awaiting: str = "", choices: dict | None = None) -> dict:
+    """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed.
+    choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer."""
     full_text = f"{previous}. {text}".strip(". ") if previous else text
     ctx = services.ai_context(user)
     # The last few turns of THIS conversation, so follow-ups like "aur Neha ko bhi" make sense.
     ctx["conversation"] = ai_brain.history_text(history)
     model_text = full_text
+    if choices and choices.get("items"):
+        ctx["choices"] = {"intent": choices["intent"], "items": [{"id": i["id"], "title": i["title"]} for i in choices["items"][:10]]}
+        model_text = text  # the answer on its own; the choices carry the question
     if awaiting:
         # The reply goes to the model on its own (so a side question is not glued onto the draft);
         # the draft and its original sentence are background.
@@ -243,6 +260,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             cmd["intent"] = "confirm_pending" if answer == "yes" else "cancel_pending"
     if cmd.get("intent") in {"confirm_pending", "cancel_pending"} and not awaiting:
         cmd["intent"] = "unknown"  # nothing is waiting to be confirmed
+    if choices and choices.get("items") and cmd.get("target_refs") and cmd.get("intent") in {"unknown", "query", "small_talk"}:
+        cmd["intent"] = choices["intent"]  # the model picked items but forgot to carry the pending intent
 
     # While a draft waits, a change keeps the original sentence (it becomes the task description);
     # a side question or a brand-new topic stands on its own.
@@ -281,6 +300,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "pa_name": "",
         "team": None,
         "target": None,
+        "targets": [],          # every item this applies to (complete / accept / decline can take several)
         "target_candidates": [],
         "needs_clarification": bool(cmd.get("needs_clarification")),
         "question": (cmd.get("clarification_question") or "").strip(),
@@ -326,35 +346,45 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     elif intent in {"accept_request", "decline_request"}:
         draft["action"] = intent
         ids = {r["id"]: r for r in pending}
-        ref = cmd.get("target_ref", "")
-        if ref in ids:
-            draft["target"] = ids[ref]
+        chosen = _chosen(cmd, ids)
+        verb = "accept" if intent == "accept_request" else "decline"
+        if chosen:
+            draft["targets"] = chosen
         elif len(pending) == 1:
-            draft["target"] = pending[0]
+            draft["targets"] = [pending[0]]
         elif pending:
             draft["needs_clarification"] = True
             draft["target_candidates"] = pending[:5]
-            draft["question"] = f"{address}, which request? " + "; ".join(r["title"] for r in pending[:3]) + "."
+            draft["question"] = f"{address}, which request? " + "; ".join(r["title"] for r in pending[:3]) + ". Or all of them?"
         else:
             draft["action"] = "answer"
             draft["spoken_reply"] = f"{address}, there are no pending requests right now."
-        if draft["target"] and not draft["spoken_reply"]:
-            verb = "accept" if intent == "accept_request" else "decline"
-            draft["spoken_reply"] = f"{address}, {verb} the request: {draft['target']['title']}?"
+        if draft["targets"]:
+            draft["target"] = draft["targets"][0]
+            if len(draft["targets"]) == 1:
+                draft["spoken_reply"] = f"{address}, {verb} the request: {draft['target']['title']}?"
+            else:
+                draft["spoken_reply"] = (f"{address}, {verb} these {len(draft['targets'])} requests: "
+                                         + "; ".join(t["title"] for t in draft["targets"]) + "?")
     elif intent == "complete_task":
         draft["action"] = "complete"
         open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
         by_id = {i["id"]: i for i in open_items}
-        ref = cmd.get("target_ref", "")
-        matches = [by_id[ref]] if ref in by_id else _match_items(draft["title"] or full_text, open_items)
-        if len(matches) == 1:
+        chosen = _chosen(cmd, by_id)
+        matches = chosen or _match_items(draft["title"] or full_text, open_items)
+        if chosen or len(matches) == 1:
+            draft["targets"] = matches
             draft["target"] = matches[0]
-            if not draft["spoken_reply"]:
+            if len(matches) == 1:
                 draft["spoken_reply"] = f"{address}, mark '{matches[0]['title']}' as done?"
+            else:
+                draft["spoken_reply"] = (f"{address}, mark these {len(matches)} as done: "
+                                         + "; ".join(m["title"] for m in matches) + "?")
         else:
             draft["needs_clarification"] = True
             draft["target_candidates"] = matches[:5]
-            draft["question"] = f"{address}, which task did you finish?"
+            draft["question"] = (f"{address}, which one did you finish: " + "; ".join(m["title"] for m in matches[:3])
+                                 + ". Or both?" if matches else f"{address}, which task did you finish?")
     elif intent == "briefing":
         draft["action"] = "briefing"
         draft["spoken_reply"] = draft["spoken_reply"] or f"Here is your briefing, {address}."

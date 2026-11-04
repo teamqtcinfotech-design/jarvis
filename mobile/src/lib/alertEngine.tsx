@@ -337,15 +337,15 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
   }, [address, isMD]);
 
+  // Reading them aloud (or not) never pops a sheet over the conversation: the list is under ☰ → Held alerts,
+  // and the conversation shows what was read.
   const acceptOffer = useCallback(() => {
     setOffer(null);
     for (const item of heldRef.current) say(spokenFor(item)); // one after another
-    setHeldVisible(true);
   }, [spokenFor]);
 
   const declineOffer = useCallback(() => {
     setOffer(null);
-    setHeldVisible(true); // "they're in your list"
   }, []);
 
   const setVoiceProbe = useCallback((probe: (() => Promise<boolean>) | null) => {

@@ -63,7 +63,7 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
   const staffOptions = allStaff ?? draft.staff_candidates ?? [];
   const when = draft.due_date ? `${dayLabel(draft.due_date)}${draft.due_time ? ` · ${draft.due_time}` : ''}` : 'No date';
   const saveLabel = draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}` : SAVE_LABEL[draft.action] ?? 'Confirm';
-  const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text : !!draft.target)
+  const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text : !!(draft.target || draft.targets?.length))
     && (draft.action !== 'delegation' || !!draft.staff);
 
   return (
@@ -96,6 +96,12 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
           ) : null}
           {draft.kind === 'PAYMENT' ? <Txt variant="caption" style={{ marginTop: 6 }}>Reminder only. JARVIS never makes payments.</Txt> : null}
         </>
+      ) : draft.targets?.length > 1 ? (
+        <View style={{ marginTop: 10 }}>
+          {draft.targets.map((t) => (
+            <Txt key={t.id} variant="heading" style={{ marginTop: 4 }}>• {t.title}</Txt>
+          ))}
+        </View>
       ) : draft.target ? (
         <Txt variant="title" style={s.main}>{draft.target.title}</Txt>
       ) : draft.target_candidates.length ? (

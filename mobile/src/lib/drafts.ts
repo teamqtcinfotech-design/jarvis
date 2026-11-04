@@ -45,7 +45,9 @@ export function draftHeading(d: Draft): { title: string; detail: string; icon: s
 
 /** Short description of a waiting card, so the AI can tell yes / no / a change / something else apart. */
 export function describeDraft(d: Draft): string {
-  const what = d.action === 'remember' ? d.memory_text : d.target ? d.target.title : d.title;
+  const what = d.action === 'remember' ? d.memory_text
+    : d.targets?.length ? d.targets.map((t) => t.title).join(' + ')
+    : d.target ? d.target.title : d.title;
   const when = d.due_date ? `, ${dayLabel(d.due_date)}${d.due_time ? ` ${d.due_time}` : ''}` : '';
   const who = d.action === 'delegation' && d.staff ? `, for ${d.staff.name}` : '';
   return `${draftHeading(d).title}: ${what}${when}${who}`.slice(0, 400);

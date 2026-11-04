@@ -517,7 +517,7 @@ def _cmd(**fields) -> dict:
     base = {
         "intent": "unknown", "title": "", "notes": "", "kind": "TASK", "priority": "NORMAL", "due_date": "",
         "due_time": "", "duration_minutes": 0, "remind_before_minutes": 0, "staff_name": "", "team_name": "",
-        "category_key": "", "target_ref": "", "needs_clarification": False, "clarification_question": "",
+        "category_key": "", "target_ref": "", "target_refs": [], "needs_clarification": False, "clarification_question": "",
         "spoken_reply": "", "spoken_reply_hi": "", "reply_language": "en", "question": "", "memory_text": "",
         "reminder_line": "", "confidence": 0.9, "engine": "ai",
     }
@@ -620,6 +620,31 @@ class SmartAssistantTests(BaseCase):
                                      format="json").json()
         self.assertEqual(yes["action"], "confirm_pending")
         self.assertEqual(no["action"], "cancel_pending")
+
+    def test_mark_several_done_by_voice(self):
+        now = tu.now_local() + timedelta(hours=2)
+        a = services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                   "due_date": now.date(), "due_time": now.time().replace(second=0, microsecond=0)})
+        b = services.create_private_task(self.md, {"title": "Call Mehta ji about the Pune franchise", "kind": Kind.CALL,
+                                                   "priority": Priority.NORMAL, "due_date": now.date(),
+                                                   "due_time": now.time().replace(second=0, microsecond=0)})
+        # "which one?" -> "dono": the answer is sent with the choices, and the model names both ids.
+        choices = {"intent": "complete_task", "items": [{"id": str(a.id), "title": "Call Mehta ji"},
+                                                        {"id": str(b.id), "title": "Call Mehta ji about the Pune franchise"}]}
+        draft, fake = self.interpret(self.md_client, "dono", _cmd(intent="complete_task", target_refs=[str(a.id), str(b.id)]),
+                                     previous="Mehta wala call ho gaya", choices=choices)
+        self.assertEqual(draft["action"], "complete")
+        self.assertEqual([t["id"] for t in draft["targets"]], [str(a.id), str(b.id)])
+        self.assertIn("2", draft["spoken_reply"])
+        self.assertEqual(fake.call_args.args[0], "dono")
+        self.assertEqual(fake.call_args.args[1]["choices"]["intent"], "complete_task")
+        # The model picked the items but dropped the intent: the pending intent is restored.
+        draft, _ = self.interpret(self.md_client, "the franchise one", _cmd(intent="unknown", target_refs=[str(b.id)]), choices=choices)
+        self.assertEqual(draft["action"], "complete")
+        self.assertEqual([t["id"] for t in draft["targets"]], [str(b.id)])
+        # An id that is not in the context is ignored, never acted on.
+        draft, _ = self.interpret(self.md_client, "done", _cmd(intent="complete_task", target_refs=["not-a-real-id"], title="xyz"))
+        self.assertNotEqual(draft["action"], "complete") if draft["targets"] else self.assertTrue(draft["needs_clarification"])
 
     def test_device_token_is_a_separate_login_chain(self):
         self.assertEqual(APIClient().post("/api/v1/auth/device-token/", {}, format="json").status_code, 401)

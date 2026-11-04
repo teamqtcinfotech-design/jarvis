@@ -93,6 +93,17 @@ class ConversationTurnSerializer(serializers.Serializer):
     text = serializers.CharField(max_length=2000, allow_blank=True, trim_whitespace=True)
 
 
+class ChoiceItemSerializer(serializers.Serializer):
+    id = serializers.CharField(max_length=64)
+    title = serializers.CharField(max_length=200, allow_blank=True)
+
+
+class ChoicesSerializer(serializers.Serializer):
+    """JARVIS just asked "which one?" — these are the options; the new text is the answer."""
+    intent = serializers.ChoiceField(choices=[(i, i) for i in ("complete_task", "accept_request", "decline_request")])
+    items = ChoiceItemSerializer(many=True, max_length=10)
+
+
 class InterpretSerializer(serializers.Serializer):
     text = serializers.CharField(max_length=1000, trim_whitespace=True)
     previous = serializers.CharField(max_length=1000, required=False, allow_blank=True, default="")
@@ -100,6 +111,7 @@ class InterpretSerializer(serializers.Serializer):
     history = ConversationTurnSerializer(many=True, required=False, default=list)
     # A draft JARVIS has just read back and is waiting to have confirmed (e.g. "Personal task: Call Mehta, tomorrow 11 AM").
     awaiting = serializers.CharField(max_length=400, required=False, allow_blank=True, default="")
+    choices = ChoicesSerializer(required=False, allow_null=True, default=None)
 
     def validate_history(self, value):
         return value[-8:]
