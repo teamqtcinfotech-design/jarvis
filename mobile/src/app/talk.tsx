@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { DraftCard, TASK_DRAFTS } from '@/components/DraftCard';
+import { DraftCard, TASK_DRAFTS, draftHeading } from '@/components/DraftCard';
 import { Icon, IconButton, Txt } from '@/components/ui';
 import { ApiError, api, newIdempotencyKey } from '@/lib/api';
 import { dataChanged } from '@/lib/bus';
@@ -28,8 +28,6 @@ import { colors, fonts, radius } from '@/lib/theme';
 import type { AskAnswer, Draft, DraftAction, SessionUser } from '@/lib/types';
 import { SILENCE_CODES, useVoiceCapture } from '@/lib/voice';
 
-type ListenMode = 'command' | 'confirm' | 'answer';
-
 interface Msg {
   id: string;
   role: 'user' | 'jarvis';
@@ -40,21 +38,20 @@ interface Msg {
 
 const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'accept_request', 'decline_request', 'complete', 'remember'];
 const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+// Done replies written by the AI are used only where "saved" really means done (a staff task waiting for
+// the staff app, or a team split, gets an exact status line instead).
+const AI_DONE_OK: DraftAction[] = ['private_task', 'pa_task', 'pa_meeting', 'md_request', 'remember', 'accept_request',
+  'decline_request', 'complete'];
 
-// After "Shall I save it?": a short reply is yes / no; anything longer is a correction.
-const YES_WORDS = new Set(['haan', 'han', 'ha', 'haanji', 'ji', 'yes', 'yeah', 'yep', 'yup', 'ok', 'okay', 'theek', 'thik',
-  'hai', 'sahi', 'save', 'karo', 'kar', 'do', 'assign', 'confirm', 'bilkul', 'done', 'go', 'ahead', 'chalo', 'send',
-  'bhej', 'please', 'sir', 'hmm', 'sure', 'right', 'हाँ', 'हां', 'जी', 'ठीक', 'है', 'करो', 'कर', 'दो']);
-const NO_WORDS = new Set(['nahi', 'nahin', 'nai', 'na', 'no', 'cancel', 'mat', 'karo', 'rehne', 'do', 'ruko', 'stop',
-  'chhodo', 'chodo', 'nope', 'ji', 'please', 'kar', 'नहीं', 'मत', 'रहने', 'दो']);
-
-function classifyReply(text: string): 'yes' | 'no' | 'correction' {
-  const words = text.toLowerCase().replace(/[.,!?।]/g, ' ').split(/\s+/).filter(Boolean);
-  if (!words.length || words.length > 5) return 'correction';
-  if (words.every((w) => YES_WORDS.has(w))) return 'yes';
-  if (words.every((w) => NO_WORDS.has(w))) return 'no';
-  return 'correction';
+/** Short description of the waiting card, so the AI can tell yes / no / a change / something else apart. */
+function describe(d: Draft): string {
+  const what = d.action === 'remember' ? d.memory_text : d.target ? d.target.title : d.title;
+  const when = d.due_date ? `, ${dayLabel(d.due_date)}${d.due_time ? ` ${d.due_time}` : ''}` : '';
+  const who = d.action === 'delegation' && d.staff ? `, for ${d.staff.name}` : '';
+  return `${draftHeading(d).title}: ${what}${when}${who}`.slice(0, 400);
 }
+
+const pick = <T,>(items: T[]) => items[Math.floor(Math.random() * items.length)];
 
 let seq = 0;
 const newId = () => `m${Date.now()}-${seq++}`;
@@ -101,7 +98,7 @@ function TalkScreen({ user }: { user: SessionUser }) {
 
   const messagesRef = useRef<Msg[]>([]);
   const draftRef = useRef<Draft | null>(null);
-  const modeRef = useRef<ListenMode>('command');
+  const editedRef = useRef(false); // the user changed the card by hand, so the AI's "done" line may be stale
   const silenceRef = useRef(0);
   const previousRef = useRef(''); // the sentence a clarification answer belongs to
   const langRef = useRef<SpeakLang>('en');
@@ -114,7 +111,7 @@ function TalkScreen({ user }: { user: SessionUser }) {
     open: () => undefined,
   });
 
-  const voice = useVoiceCapture(prefs.voiceLang, {
+  const voice = useVoiceCapture(prefs.listenLang, {
     onFinal: (text) => engine.current.heard(text),
     onError: (message, code) => engine.current.voiceError(message, code),
   });
@@ -130,16 +127,19 @@ function TalkScreen({ user }: { user: SessionUser }) {
   };
   const history = () =>
     messagesRef.current.filter((m) => m.tone !== 'error').slice(-8).map((m) => ({ role: m.role, text: m.text }));
-  const listen = (mode: ListenMode) => {
+  const listen = () => {
     if (closedRef.current) return;
-    modeRef.current = mode;
     voice.start();
   };
-  const nextMode = (): ListenMode => (draftRef.current ? 'confirm' : 'command');
   /** Show a JARVIS line, speak it, then (optionally) listen again. */
-  const reply = (show: string, speakText: string | undefined, lang: SpeakLang, then: ListenMode | null, extra: Partial<Msg> = {}) => {
+  const reply = (show: string, speakText: string | undefined, lang: SpeakLang, listenAfter: boolean, extra: Partial<Msg> = {}) => {
     push('jarvis', show, extra);
-    say(speakText || show, { interrupt: true, lang, onDone: then ? () => listen(then) : undefined });
+    say(speakText || show, { interrupt: true, lang, onDone: listenAfter ? listen : undefined });
+  };
+  /** The card waiting for a yes / no / change (a card that is still asking a question is not "waiting"). */
+  const waitingCard = () => {
+    const d = draftRef.current;
+    return d && !d.needs_clarification && d.action !== 'choose_destination' ? d : null;
   };
   const hiLine = (roman: string, devanagari: string) =>
     langRef.current === 'hi' ? { show: roman, speak: devanagari, lang: 'hi' as SpeakLang } : null;
@@ -152,50 +152,48 @@ function TalkScreen({ user }: { user: SessionUser }) {
   };
 
   // ---------------------------------------------------------------- conversation
+  // Everything the user says goes to the AI with what is on screen: it decides whether it is a yes, a no,
+  // a change to the waiting card, an answer to JARVIS's question, or something new. No fixed words.
   const heard = (text: string) => {
     silenceRef.current = 0;
-    const mode = modeRef.current;
-    modeRef.current = 'command';
     push('user', text);
-    if (mode === 'confirm' && draftRef.current && !draftRef.current.needs_clarification) {
-      confirmReply(text);
-      return;
-    }
-    interpret(text, mode === 'answer' ? previousRef.current : '');
+    const card = waitingCard();
+    if (card) interpret(text, card.transcript, describe(card));
+    else interpret(text, previousRef.current, '');
   };
 
   const voiceError = (message: string, code: string) => {
-    const mode = modeRef.current;
-    modeRef.current = 'command';
     if (SILENCE_CODES.has(code)) {
-      silence(mode);
+      silence();
       return;
     }
     push('jarvis', message, { tone: 'error' });
   };
 
   // Nobody spoke: ask once, then step back politely (never just switch off mid-conversation).
-  const silence = (mode: ListenMode) => {
+  const silence = () => {
     silenceRef.current += 1;
+    const sir = isMD ? 'सर, ' : '';
     if (silenceRef.current === 1) {
-      const hi = hiLine(`${address}, aap wahan hain?`, isMD ? 'सर, आप वहाँ हैं?' : 'आप वहाँ हैं?');
-      if (hi) reply(hi.show, hi.speak, 'hi', mode);
-      else reply(`Are you there, ${address}?`, undefined, 'en', mode);
+      const hi = hiLine(pick([`${address}, aap wahan hain?`, `${address}, kya aap sun rahe hain?`]),
+        pick([`${sir}आप वहाँ हैं?`, `${sir}क्या आप सुन रहे हैं?`]));
+      if (hi) reply(hi.show, hi.speak, 'hi', true);
+      else reply(pick([`Are you there, ${address}?`, `${address}, are you still there?`]), undefined, 'en', true);
       return;
     }
     silenceRef.current = 0;
-    const hi = hiLine(`Theek hai ${address}, main yahin hoon. Jab zarurat ho, mic dabaiye.`,
-      `ठीक है${isMD ? ' सर' : ''}, मैं यहीं हूँ। जब ज़रूरत हो, माइक दबाइए।`);
-    if (hi) reply(hi.show, hi.speak, 'hi', null);
-    else reply(`Okay ${address}, I'm right here. Tap the mic whenever you need me.`, undefined, 'en', null);
+    const hi = hiLine(`Theek hai ${address}, main yahin hoon. Jab zarurat ho, bas mic dabaiye.`,
+      `ठीक है${isMD ? ' सर' : ''}, मैं यहीं हूँ। जब ज़रूरत हो, बस माइक दबाइए।`);
+    if (hi) reply(hi.show, hi.speak, 'hi', false);
+    else reply(`Okay ${address}, I'm right here whenever you need me.`, undefined, 'en', false);
   };
 
-  const interpret = async (text: string, previous: string) => {
+  const interpret = async (text: string, previous: string, awaiting = '') => {
     setBusy('thinking');
     try {
       const res = await api<Draft>('/assistant/interpret/', {
         method: 'POST',
-        body: { text, previous, history: history().slice(0, -1) },
+        body: { text, previous, awaiting, history: history().slice(0, -1) },
         timeoutMs: 30000,
       });
       setBusy('');
@@ -231,21 +229,33 @@ function TalkScreen({ user }: { user: SessionUser }) {
       briefing();
       return;
     }
+    if (d.action === 'confirm_pending') {
+      save(); // the AI understood a "yes" in whatever words were used
+      return;
+    }
+    if (d.action === 'cancel_pending') {
+      setDraft(null);
+      previousRef.current = '';
+      reply(d.spoken_reply || `Okay ${address}, cancelled.`, speakText, lang, true);
+      return;
+    }
     if (d.needs_clarification || d.action === 'choose_destination') {
       previousRef.current = d.transcript;
       if (CONFIRMABLE.includes(d.action) || d.action === 'choose_destination') setDraft(d);
-      reply(d.spoken_reply, speakText, lang, 'answer');
+      reply(d.spoken_reply, speakText, lang, true);
       return;
     }
     previousRef.current = '';
     if (CONFIRMABLE.includes(d.action)) {
       idemKey.current = newIdempotencyKey();
+      editedRef.current = false;
       setDraftError('');
-      setDraft(d);
-      reply(d.spoken_reply, speakText, lang, 'confirm');
+      setDraft(d); // a new card, or the corrected version of the waiting one
+      reply(d.spoken_reply, speakText, lang, true);
       return;
     }
-    reply(d.spoken_reply, speakText, lang, nextMode());
+    // Anything else (an answer, small talk): a waiting card simply stays on screen.
+    reply(d.spoken_reply, speakText, lang, true);
   };
 
   const ask = async (question: string, lang: string) => {
@@ -261,7 +271,7 @@ function TalkScreen({ user }: { user: SessionUser }) {
       const a = res.data;
       push('jarvis', a.text, { sources: a.sources });
       // Queued after the holding line, then JARVIS listens for the next thing.
-      say(a.speak_text || a.text, { lang: a.speak_lang === 'hi' ? 'hi' : 'en', onDone: () => listen(nextMode()) });
+      say(a.speak_text || a.text, { lang: a.speak_lang === 'hi' ? 'hi' : 'en', onDone: listen });
     } catch (e) {
       setBusy('');
       const msg = e instanceof ApiError && e.code === 'timeout' ? 'That search took too long.' : "I couldn't get the answer.";
@@ -277,27 +287,11 @@ function TalkScreen({ user }: { user: SessionUser }) {
       setBusy('');
       if (closedRef.current) return;
       push('jarvis', res.data.text);
-      say(res.data.text, { onDone: () => listen(nextMode()) });
+      say(res.data.text, { onDone: listen });
     } catch {
       setBusy('');
       push('jarvis', "I couldn't prepare the briefing right now.", { tone: 'error' });
     }
-  };
-
-  const confirmReply = (text: string) => {
-    const r = classifyReply(text);
-    if (r === 'yes') {
-      save();
-      return;
-    }
-    if (r === 'no') {
-      setDraft(null);
-      const hi = hiLine(`Theek hai ${address}, cancel kar diya.`, `ठीक है${isMD ? ' सर' : ''}, कैंसल कर दिया।`);
-      if (hi) reply(hi.show, hi.speak, 'hi', 'command');
-      else reply(`Okay ${address}, cancelled. Nothing was saved.`, undefined, 'en', 'command');
-      return;
-    }
-    interpret(text, draftRef.current?.transcript ?? ''); // e.g. "nahi, personal mein daalo" / "time 5 baje kar do"
   };
 
   const save = async () => {
@@ -389,7 +383,12 @@ function TalkScreen({ user }: { user: SessionUser }) {
       setBusy('');
       setDraft(null);
       dataChanged.emit();
-      reply(spoken, undefined, 'en', 'command', { tone: 'saved' });
+      // The AI's own "done" line (in the user's language) when it still matches what was saved.
+      if (d.done_reply && !editedRef.current && AI_DONE_OK.includes(d.action)) {
+        reply(d.done_reply, d.done_speak || d.done_reply, d.done_lang === 'hi' ? 'hi' : 'en', true, { tone: 'saved' });
+      } else {
+        reply(spoken, undefined, 'en', true, { tone: 'saved' });
+      }
     } catch (e) {
       setBusy('');
       const msg = e instanceof ApiError ? e.message : 'Could not save.';
@@ -413,8 +412,7 @@ function TalkScreen({ user }: { user: SessionUser }) {
     }
     stopSpeaking();
     silenceRef.current = 0;
-    const d = draftRef.current;
-    listen(d && !d.needs_clarification && d.action !== 'choose_destination' ? 'confirm' : previousRef.current ? 'answer' : 'command');
+    listen();
   };
 
   const send = (text?: string) => {
@@ -430,9 +428,9 @@ function TalkScreen({ user }: { user: SessionUser }) {
     if (params.mode === 'type') return;
     if (params.wake === '1') {
       push('jarvis', isMD ? 'Ji Sir?' : `Ji ${user.name}?`);
-      say(isMD ? 'जी सर?' : 'जी?', { lang: 'hi', interrupt: true, onDone: () => listen('command') });
+      say(isMD ? 'जी सर?' : 'जी?', { lang: 'hi', interrupt: true, onDone: listen });
     } else {
-      listen('command');
+      listen();
     }
   };
 
@@ -563,7 +561,10 @@ function TalkScreen({ user }: { user: SessionUser }) {
               saving={busy === 'saving'}
               listening={listening}
               error={draftError}
-              onChange={(patch) => setDraft({ ...draft, ...patch })}
+              onChange={(patch) => {
+                editedRef.current = true;
+                setDraft({ ...draft, ...patch });
+              }}
               onSave={save}
               onCancel={cancelDraft}
             />

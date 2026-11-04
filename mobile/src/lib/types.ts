@@ -132,6 +132,8 @@ export type DraftAction =
   | 'briefing'
   | 'ask'
   | 'remember'
+  | 'confirm_pending'
+  | 'cancel_pending'
   | 'end'
   | 'answer';
 
@@ -167,6 +169,10 @@ export interface Draft {
   reply_language: 'en' | 'hi';
   speak_text: string;
   speak_lang: 'en' | 'hi';
+  /** What JARVIS says once this is saved (written by the AI in the speaker's own style). */
+  done_reply: string;
+  done_speak: string;
+  done_lang: 'en' | 'hi';
 }
 
 export interface AskAnswer {

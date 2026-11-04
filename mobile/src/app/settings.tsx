@@ -70,14 +70,14 @@ export default function Settings() {
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 60 }}>
         <Txt variant="label">Voice</Txt>
         <Card style={s.card}>
-          <Row title="I speak in" detail="English (India) also understands Hinglish." right={null} />
+          <Row title="Listening" detail="Speak Hindi, English or Hinglish — no need to choose. JARVIS replies in the language you use." right={null} />
           <View style={s.chips}>
-            <Chip label="English / Hinglish" selected={prefs.voiceLang === 'en-IN'} onPress={() => update({ voiceLang: 'en-IN' })} />
-            <Chip label="हिन्दी" selected={prefs.voiceLang === 'hi-IN'} onPress={() => update({ voiceLang: 'hi-IN' })} />
+            <Chip label="Automatic (Hindi + English)" selected={prefs.listenLang === 'auto'} onPress={() => update({ listenLang: 'auto' })} />
+            <Chip label="Mostly pure Hindi" selected={prefs.listenLang === 'hi-IN'} onPress={() => update({ listenLang: 'hi-IN' })} />
           </View>
-          <Row title="JARVIS voice" detail="Hindi replies always use the Hindi voice." right={null} />
+          <Row title="JARVIS voice" detail="Always an Indian voice. Hindi replies use the Hindi voice." right={null} />
           <View style={s.chips}>
-            <Chip label="Hindi accent" selected={prefs.voiceAccent === 'hi-IN'} onPress={() => update({ voiceAccent: 'hi-IN' })} />
+            <Chip label="Indian · Hindi accent" selected={prefs.voiceAccent === 'hi-IN'} onPress={() => update({ voiceAccent: 'hi-IN' })} />
             <Chip label="Indian English" selected={prefs.voiceAccent === 'en-IN'} onPress={() => update({ voiceAccent: 'en-IN' })} />
           </View>
           {isMD ? (

@@ -295,3 +295,23 @@ def parse(text: str, staff_names: list[str] | None = None, has_pending_requests:
     if result["kind"] == "MEETING":
         result["duration_minutes"] = 60
     return result
+
+
+# Offline fallback only (the AI decides yes / no / change from meaning when it is reachable).
+_YES = {"haan", "han", "ha", "haanji", "ji", "yes", "yeah", "yep", "ok", "okay", "theek", "thik", "hai", "sahi", "save",
+        "karo", "kar", "do", "confirm", "bilkul", "done", "go", "ahead", "chalo", "bhej", "please", "sir", "sure",
+        "हाँ", "हां", "जी", "ठीक", "है", "करो", "कर", "दो"}
+_NO = {"nahi", "nahin", "nai", "na", "no", "cancel", "mat", "karo", "rehne", "do", "ruko", "stop", "chhodo", "chodo",
+       "nope", "ji", "please", "kar", "नहीं", "मत", "रहने", "दो"}
+
+
+def yes_no(text: str) -> str | None:
+    """'yes' / 'no' for a short reply to "shall I save it?", else None (treat it as a change)."""
+    words = [w for w in re.sub(r"[.,!?।]", " ", (text or "").lower()).split() if w]
+    if not words or len(words) > 5:
+        return None
+    if all(w in _YES for w in words):
+        return "yes"
+    if all(w in _NO for w in words):
+        return "no"
+    return None

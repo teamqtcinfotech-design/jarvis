@@ -24,7 +24,7 @@ interface Handlers {
   onError?: (message: string, code: string) => void;
 }
 
-/** Android's built-in recogniser (hi-IN / en-IN). Audio never reaches our server. */
+/** Android's built-in recogniser ('auto' = Hindi + English, or 'hi-IN'). Audio never reaches our server. */
 export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const [state, setState] = useState<CaptureState>('idle');
   const [partial, setPartial] = useState('');
@@ -74,12 +74,24 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       return;
     }
     setState('listening');
+    const auto = lang === 'auto';
     ExpoSpeechRecognitionModule.start({
-      lang,
+      // 'auto': start in Indian English (understands Hinglish too) and let the phone switch to Hindi by itself
+      // where Android supports it (Android 14+); older phones simply ignore the switch options.
+      lang: auto ? 'en-IN' : lang,
       interimResults: true,
       continuous: false,
       addsPunctuation: true,
-      androidIntentOptions: { EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1600 },
+      androidIntentOptions: {
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1600,
+        ...(auto
+          ? {
+              EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced' as const,
+              EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ['en-IN', 'hi-IN'],
+              EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES: ['en-IN', 'hi-IN'],
+            }
+          : {}),
+      },
     });
   }, [lang]);
 

@@ -98,6 +98,8 @@ class InterpretSerializer(serializers.Serializer):
     previous = serializers.CharField(max_length=1000, required=False, allow_blank=True, default="")
     # Last turns of the current conversation (kept on the phone only; never stored on the server).
     history = ConversationTurnSerializer(many=True, required=False, default=list)
+    # A draft JARVIS has just read back and is waiting to have confirmed (e.g. "Personal task: Call Mehta, tomorrow 11 AM").
+    awaiting = serializers.CharField(max_length=400, required=False, allow_blank=True, default="")
 
     def validate_history(self, value):
         return value[-8:]

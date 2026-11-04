@@ -4,8 +4,9 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import { setVoiceAccent } from './speech';
 
 export interface Prefs {
-  /** Language the phone listens in. English (India) also understands Hinglish and writes it in Roman letters. */
-  voiceLang: 'en-IN' | 'hi-IN';
+  /** How the phone listens. 'auto' = Hindi and English together (switches by itself on Android 14+;
+   *  on older phones the Indian-English listener, which also understands Hinglish). */
+  listenLang: 'auto' | 'hi-IN';
   /** Voice for English replies: Hindi accent (default) or Indian English. Hindi replies always use the Hindi voice. */
   voiceAccent: 'hi-IN' | 'en-IN';
   /** Speak private task details aloud while the app is open on screen. */
@@ -19,7 +20,7 @@ export interface Prefs {
 }
 
 const DEFAULTS: Prefs = {
-  voiceLang: 'en-IN',
+  listenLang: 'auto',
   voiceAccent: 'hi-IN',
   speakPrivateDetails: true,
   privateAloudWhenLocked: false,

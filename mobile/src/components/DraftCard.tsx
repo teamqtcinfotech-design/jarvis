@@ -228,7 +228,7 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
             <Button title={saveLabel} icon="checkmark" compact loading={saving} disabled={!canSave} onPress={onSave} />
           </View>
           <Txt variant="caption" style={{ marginTop: 8 }}>
-            {listening ? 'Listening… say “haan” to save, “nahi” to cancel, or say what to change.' : 'Nothing is saved until you say yes.'}
+            {listening ? 'Listening… tell me in your own words: save it, leave it, or what to change.' : 'Nothing is saved until you say so.'}
           </Txt>
         </>
       )}

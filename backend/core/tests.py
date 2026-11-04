@@ -584,6 +584,43 @@ class SmartAssistantTests(BaseCase):
         self.assertEqual(draft["action"], "end")
         self.assertTrue(draft["spoken_reply"])
 
+    def test_confirmation_is_understood_from_meaning(self):
+        awaiting = "Personal task: Call Mehta ji, tomorrow 11 AM"
+        draft, fake = self.interpret(self.md_client, "bilkul kar do yaar", _cmd(intent="confirm_pending"),
+                                     previous="Kal 11 baje Mehta ji ko call", awaiting=awaiting)
+        self.assertEqual(draft["action"], "confirm_pending")
+        self.assertEqual(fake.call_args.args[1]["awaiting_confirmation"],
+                         {"draft": awaiting, "original_sentence": "Kal 11 baje Mehta ji ko call"})
+        self.assertEqual(fake.call_args.args[0], "bilkul kar do yaar")  # the reply alone, not glued to the draft
+        draft, _ = self.interpret(self.md_client, "abhi rehne do", _cmd(intent="cancel_pending", spoken_reply="Theek hai Sir."),
+                                  awaiting=awaiting)
+        self.assertEqual(draft["action"], "cancel_pending")
+        # "yes" with nothing waiting is not a confirmation of anything.
+        draft, _ = self.interpret(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertNotIn(draft["action"], {"confirm_pending", "cancel_pending"})
+
+    def test_done_reply_follows_the_speakers_language(self):
+        draft, _ = self.interpret(self.md_client, "kal 4 baje Sharma ji ke saath meeting", _cmd(
+            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", reply_language="hi",
+            due_date=(tu.today_local() + timedelta(days=1)).isoformat(), due_time="16:00",
+            spoken_reply="Sir, kal 4 baje Sharma ji ke saath meeting. Save kar doon?",
+            spoken_reply_hi="सर, कल चार बजे शर्मा जी के साथ मीटिंग। सेव कर दूँ?",
+            done_reply="Ho gaya Sir, kal 4 baje yaad dila dunga.", done_reply_hi="हो गया सर, कल चार बजे याद दिला दूँगा।"))
+        self.assertEqual(draft["action"], "private_task")
+        self.assertEqual(draft["done_lang"], "hi")
+        self.assertIn("याद", draft["done_speak"])
+
+    def test_offline_confirmation_fallback(self):
+        awaiting = "Personal task: Call Mehta ji"
+        with mock.patch("core.ai_brain.interpret", side_effect=lambda text, *a, **k: {
+                **hinglish_parser.parse(text), "engine": "rules"}):
+            yes = self.md_client.post("/api/v1/assistant/interpret/", {"text": "haan ji", "awaiting": awaiting},
+                                      format="json").json()
+            no = self.md_client.post("/api/v1/assistant/interpret/", {"text": "nahi", "awaiting": awaiting},
+                                     format="json").json()
+        self.assertEqual(yes["action"], "confirm_pending")
+        self.assertEqual(no["action"], "cancel_pending")
+
     def test_memories_are_owner_only_and_encrypted(self):
         r = self.md_client.post("/api/v1/memories/", {"text": SECRET}, format="json", HTTP_IDEMPOTENCY_KEY="mem-1")
         self.assertEqual(r.status_code, 201)

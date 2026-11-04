@@ -8,7 +8,7 @@ from datetime import date, time
 
 from django.conf import settings
 
-from . import ai_brain, services
+from . import ai_brain, hinglish_parser, services
 from . import timeutils as tu
 from .models import Kind, Priority, TaskCategory, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
@@ -213,17 +213,41 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str):
 
 
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+_TASK_INTENTS = {"create_task", "assign_to_staff", "assign_to_team", "assign_to_pa", "meet_with_pa",
+                 "request_for_md", "needs_destination"}
 
 
-def build_draft(user: User, text: str, previous: str = "", history: list | None = None) -> dict:
+def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
+                awaiting: str = "") -> dict:
+    """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed."""
     full_text = f"{previous}. {text}".strip(". ") if previous else text
     ctx = services.ai_context(user)
     # The last few turns of THIS conversation, so follow-ups like "aur Neha ko bhi" make sense.
     ctx["conversation"] = ai_brain.history_text(history)
+    model_text = full_text
+    if awaiting:
+        # The reply goes to the model on its own (so a side question is not glued onto the draft);
+        # the draft and its original sentence are background.
+        ctx["awaiting_confirmation"] = {"draft": awaiting[:400], "original_sentence": previous[:1000]}
+        model_text = text
     staff_names = [s["name"] for s in ctx["staff"]]
     pending = ctx.get("pending_requests", [])
-    cmd = ai_brain.interpret(full_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
+    cmd = ai_brain.interpret(model_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
+    if awaiting and cmd.get("engine") == "rules" and not hinglish_parser.yes_no(text):
+        # Offline parser has no context: re-read the change together with the original sentence.
+        cmd = ai_brain.interpret(full_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
+    if awaiting and cmd.get("engine") == "rules":
+        # Offline: only a plain short yes / no is understood; anything else is treated as a change.
+        answer = hinglish_parser.yes_no(text)
+        if answer:
+            cmd["intent"] = "confirm_pending" if answer == "yes" else "cancel_pending"
+    if cmd.get("intent") in {"confirm_pending", "cancel_pending"} and not awaiting:
+        cmd["intent"] = "unknown"  # nothing is waiting to be confirmed
 
+    # While a draft waits, a change keeps the original sentence (it becomes the task description);
+    # a side question or a brand-new topic stands on its own.
+    if awaiting and cmd.get("intent") not in _TASK_INTENTS:
+        full_text = text
     address = "Sir" if user.is_md else user.spoken_name
     intent = _route_intent(user, cmd, full_text)
 
@@ -266,6 +290,9 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "reply_language": cmd.get("reply_language") if cmd.get("reply_language") in {"en", "hi"} else "en",
         "speak_text": "",     # what the voice says (Devanagari when the reply is Hindi)
         "speak_lang": "en",
+        "done_reply": (cmd.get("done_reply") or "").strip()[:300],  # said after a successful save
+        "done_speak": "",
+        "done_lang": "en",
     }
 
     if intent == "create_task":
@@ -346,6 +373,15 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             draft["question"] = f"{address}, what should I remember?"
         elif not draft["spoken_reply"]:
             draft["spoken_reply"] = f"{address}, I'll remember this: {draft['memory_text']} Okay?"
+    elif intent == "confirm_pending":
+        draft["action"] = "confirm_pending"  # the phone saves the draft it is holding
+        draft["needs_clarification"] = False
+        draft["question"] = ""
+    elif intent == "cancel_pending":
+        draft["action"] = "cancel_pending"
+        draft["needs_clarification"] = False
+        draft["question"] = ""
+        draft["spoken_reply"] = draft["spoken_reply"] or f"Okay {address}, cancelled. Nothing was saved."
     elif intent == "end_conversation":
         draft["action"] = "end"
         draft["needs_clarification"] = False
@@ -405,6 +441,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["speak_text"], draft["speak_lang"] = hindi, "hi"
     else:
         draft["speak_text"], draft["speak_lang"] = draft["spoken_reply"], "en"
+    done_hi = (cmd.get("done_reply_hi") or "").strip()
+    if draft["done_reply"]:
+        use_hi = draft["reply_language"] == "hi" and bool(_DEVANAGARI.search(done_hi))
+        draft["done_speak"], draft["done_lang"] = (done_hi, "hi") if use_hi else (draft["done_reply"], "en")
     # Fixed Hindi lines for the two short replies the model sometimes leaves without a Devanagari version.
     if draft["reply_language"] == "hi" and draft["speak_lang"] != "hi":
         sir = " सर" if user.is_md else ""
