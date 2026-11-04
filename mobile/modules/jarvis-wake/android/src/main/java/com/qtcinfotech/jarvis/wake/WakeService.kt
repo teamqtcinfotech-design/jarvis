@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 
@@ -179,6 +180,18 @@ class WakeService : Service() {
         } catch (e: Throwable) {
             Log.w(TAG, "Could not open the app from the background: ${e.message}")
         }
+        // Xiaomi (MIUI) silently aborts pop-ups from the background unless its own switch is on.
+        // If the app is still not in front after a moment: answer by voice and offer one tap to continue.
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!WakeBus.appInForeground && WakeBus.pendingWake) {
+                Log.w(TAG, "App did not come to the front (MIUI background pop-up blocked?)")
+                val address = WakeBus.prefs(this).getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
+                val sir = if (address == "Sir") "सर" else address
+                TtsEngine.speak(TtsEngine.Request("wake-" + System.nanoTime(),
+                    "जी $sir? जार्विस खोलने के लिए नोटिफ़िकेशन दबाइए।", "Ji $address? Tap the notification to open JARVIS.", "hi-IN", 0.95f))
+                notifier.showWakeFallback(address)
+            }
+        }, 1500)
     }
 
     private fun startWatcher() {

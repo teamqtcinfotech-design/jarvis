@@ -49,6 +49,12 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     stateRef.current = state;
   }, [state]);
 
+  const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearWatchdog = () => {
+    if (watchdog.current) clearTimeout(watchdog.current);
+    watchdog.current = null;
+  };
+
   const finishProbe = (voices: boolean) => {
     const p = probing.current;
     if (!p) return;
@@ -83,6 +89,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       finishProbe(false);
       return;
     }
+    clearWatchdog();
     if (errored.current) return;
     setState('done');
     const text = (finalText.current || latest.current).trim();
@@ -94,6 +101,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       finishProbe(false);
       return;
     }
+    clearWatchdog();
     if (event.error === 'aborted') {
       setState('idle');
       return;
@@ -110,7 +118,10 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     latest.current = '';
     finalText.current = '';
     errored.current = false;
-    const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    // Ask only when the microphone is not already allowed: the request itself opens a system screen,
+    // which would push JARVIS to the background and cut the conversation.
+    let perm = await ExpoSpeechRecognitionModule.getMicrophonePermissionsAsync();
+    if (!perm.granted) perm = await ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync();
     if (!perm.granted) {
       errored.current = true;
       setState('error');
@@ -118,6 +129,20 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       return;
     }
     setState('listening');
+    // If the recogniser ever stops reporting, give up cleanly instead of sitting on "Listening…".
+    clearWatchdog();
+    watchdog.current = setTimeout(() => {
+      watchdog.current = null;
+      if (stateRef.current !== 'listening') return;
+      errored.current = true;
+      try {
+        ExpoSpeechRecognitionModule.abort();
+      } catch {
+        // ignore
+      }
+      setState('idle');
+      handlersRef.current.onError?.(ERROR_TEXT['speech-timeout'], 'speech-timeout');
+    }, 30000);
     const auto = lang === 'auto';
     // The automatic Hindi/English switch exists only on Android 14+ (API 34). Older phones fail to start the
     // recogniser if these options are even passed, so they are added only where Android has them.
@@ -131,7 +156,10 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       addsPunctuation: true,
       contextualStrings: handlersRef.current.hints?.length ? handlersRef.current.hints.slice(0, 60) : undefined,
       androidIntentOptions: {
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1000,
+        // A natural pause mid-sentence is not the end of it.
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1500,
+        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1500,
+        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 8000,
         ...(canSwitch
           ? {
               EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced' as const,
@@ -149,6 +177,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       finishProbe(false);
       return;
     }
+    clearWatchdog();
     errored.current = true; // suppress the "end" callback after an abort
     ExpoSpeechRecognitionModule.abort();
     setState('idle');

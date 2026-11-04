@@ -37,6 +37,7 @@ type Native = {
   openOverlaySettings: () => void;
   openBatterySettings: () => void;
   openAutostartSettings: () => boolean;
+  openMiuiPermissions: () => boolean;
   speak: (id: string, text: string, lang: string, fallback: string | null, rate: number) => void;
   stopSpeaking: () => void;
   addListener: ((event: 'wake', listener: () => void) => { remove: () => void }) &
@@ -158,6 +159,14 @@ export const wakeSettings = {
   autostart: (): boolean => {
     try {
       return native?.openAutostartSettings() ?? false;
+    } catch {
+      return false;
+    }
+  },
+  /** Xiaomi app-permission page ("Display pop-up windows while running in the background"). */
+  miuiPermissions: (): boolean => {
+    try {
+      return native?.openMiuiPermissions() ?? false;
     } catch {
       return false;
     }

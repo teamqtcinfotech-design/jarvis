@@ -112,6 +112,16 @@ class JarvisWakeModule : Module() {
             }
         }
 
+        Function("openMiuiPermissions") {
+            // Xiaomi / Redmi / POCO: the app's own permission page, where "Display pop-up windows while running
+            // in the background" lives. Without it MIUI silently aborts JARVIS popping up on "Hey JARVIS".
+            val intent = Intent("miui.intent.action.APP_PERM_EDITOR").apply {
+                setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.PermissionsEditorActivity")
+                putExtra("extra_pkgname", context.packageName)
+            }
+            open(intent) || open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+        }
+
         Function("openAutostartSettings") {
             // Xiaomi / Redmi / POCO: Security app -> Autostart. Other brands have no such page.
             val candidates = listOf(

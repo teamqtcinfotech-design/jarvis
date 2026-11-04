@@ -2,9 +2,10 @@
  * The JARVIS conversation, shared by the main screen (orb) and the full-transcript view.
  *
  * Rules:
- * - JARVIS listens when the user taps the orb, and again by itself only after it asked a question
- *   ("shall I save it?", "which Ramesh?"). Never after a plain answer.
- * - Silence after a question: one gentle "Sir?", then it waits quietly. Silence never means "he's gone".
+ * - Two-way, like a phone call: once the user taps the orb or says "Hey JARVIS", JARVIS listens, replies,
+ *   and listens again after every reply, until the user says "bas" / "thank you" or goes quiet.
+ * - Quiet handling: a couple of silent re-listens (he may be thinking), then one gentle "Sir?", then a couple
+ *   more, then JARVIS rests (tap or "Hey JARVIS" wakes it again). Silence never means "he's gone".
  * - While a card waits, everything said goes to the AI with a description of the card; the AI decides
  *   whether it was a yes, a no, a change, or something unrelated. No fixed words.
  * - Audio never leaves the phone; only the recognised text goes to our server.
@@ -65,6 +66,9 @@ const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 const AI_DONE_OK: DraftAction[] = ['private_task', 'pa_task', 'pa_meeting', 'md_request', 'remember', 'accept_request',
   'decline_request', 'complete'];
 const BASE_HINTS = ['JARVIS', 'Jarvis', 'Hey JARVIS'];
+// Quiet rounds (each about 6 s of the recogniser hearing nothing): re-listen silently, nudge once, re-listen, rest.
+const NUDGE_AFTER_ROUNDS = 2;
+const REST_AFTER_ROUNDS = 5;
 
 let seq = 0;
 const newId = () => `m${Date.now()}-${seq++}`;
@@ -159,12 +163,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       startVoice();
     }
   };
-  /** Show a JARVIS line, speak it, and listen again only when it is a question. */
-  const reply = (show: string, speakText: string | undefined, lang: SpeakLang, expectAnswer: boolean, extra: Partial<Msg> = {}) => {
+  /** Show a JARVIS line, speak it, and (unless the conversation is over) listen again. */
+  const reply = (show: string, speakText: string | undefined, lang: SpeakLang, keepOpen: boolean, extra: Partial<Msg> = {}) => {
     push('jarvis', show, extra);
-    expectingRef.current = expectAnswer;
+    expectingRef.current = keepOpen;
     silenceRef.current = 0;
-    say(speakText || show, { interrupt: true, lang, fallback: show, onDone: expectAnswer ? listen : undefined });
+    say(speakText || show, { interrupt: true, lang, fallback: show, onDone: keepOpen ? listen : undefined });
   };
   /** The card waiting for a yes / no / change (a card still asking a question is not "waiting"). */
   const waitingCard = () => {
@@ -192,13 +196,18 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   const voiceError = (message: string, code: string) => {
     if (SILENCE_CODES.has(code)) {
-      if (expectingRef.current && silenceRef.current === 0) {
-        // One gentle nudge after a question, then wait quietly.
-        silenceRef.current = 1;
+      if (!expectingRef.current) return; // the user tapped once and said nothing: just rest
+      silenceRef.current += 1;
+      if (silenceRef.current < NUDGE_AFTER_ROUNDS) {
+        listen(); // he may be thinking: keep listening quietly
+      } else if (silenceRef.current === NUDGE_AFTER_ROUNDS) {
         const hi = hiLine(`${address}?`, isMD ? 'सर?' : `${address}?`);
         if (hi) say(hi.speak, { interrupt: true, lang: 'hi', fallback: hi.show, onDone: listen });
         else say(`${address}?`, { interrupt: true, onDone: listen });
+      } else if (silenceRef.current < REST_AFTER_ROUNDS) {
+        listen();
       } else {
+        // Rest. A tap or "Hey JARVIS" starts the conversation again; nothing is lost.
         silenceRef.current = 0;
         expectingRef.current = false;
         if (offerRef.current) {
@@ -284,7 +293,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (d.action === 'end') {
       setDraft(null);
       previousRef.current = '';
-      reply(d.spoken_reply, speakText, lang, false);
+      reply(d.spoken_reply, speakText, lang, false); // "bas / thank you": the conversation is over
       return;
     }
     if (d.action === 'briefing') {
@@ -300,7 +309,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (d.action === 'cancel_pending') {
       setDraft(null);
       previousRef.current = '';
-      reply(d.spoken_reply || `Okay ${address}, cancelled.`, speakText, lang, false);
+      reply(d.spoken_reply || `Okay ${address}, cancelled.`, speakText, lang, true);
       return;
     }
     if (d.needs_clarification || d.action === 'choose_destination') {
@@ -315,11 +324,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       editedRef.current = false;
       setDraftError('');
       setDraft(d); // a new card, or the corrected version of the waiting one
-      reply(d.spoken_reply, speakText, lang, true); // "shall I save it?" is a question
+      reply(d.spoken_reply, speakText, lang, true); // "shall I save it?"
       return;
     }
-    // Anything else (an answer, small talk): say it and stop. A waiting card simply stays on screen.
-    reply(d.spoken_reply, speakText, lang, false);
+    // Anything else (an answer, small talk): say it and keep listening. A waiting card simply stays on screen.
+    reply(d.spoken_reply, speakText, lang, true);
   };
 
   const ask = async (question: string, lang: string) => {
@@ -333,8 +342,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       setBusy('');
       const a = res.data;
       push('jarvis', a.text, { sources: a.sources });
-      expectingRef.current = false;
-      say(a.speak_text || a.text, { lang: a.speak_lang === 'hi' ? 'hi' : 'en', fallback: a.text }); // queued after the holding line
+      expectingRef.current = true;
+      silenceRef.current = 0;
+      say(a.speak_text || a.text, { lang: a.speak_lang === 'hi' ? 'hi' : 'en', fallback: a.text, onDone: listen }); // queued after the holding line
     } catch (e) {
       setBusy('');
       const msg = e instanceof ApiError && e.code === 'timeout' ? 'That search took too long.' : "I couldn't get the answer.";
@@ -349,8 +359,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const res = await api<{ text: string }>('/assistant/briefing/?kind=now', { timeoutMs: 45000 });
       setBusy('');
       push('jarvis', res.data.text);
-      expectingRef.current = false;
-      say(res.data.text);
+      expectingRef.current = true;
+      silenceRef.current = 0;
+      say(res.data.text, { onDone: listen });
     } catch {
       setBusy('');
       push('jarvis', "I couldn't prepare the briefing right now.", { tone: 'error' });
@@ -449,9 +460,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       dataChanged.emit();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
       if (d.done_reply && !editedRef.current && AI_DONE_OK.includes(d.action)) {
-        reply(d.done_reply, d.done_speak || d.done_reply, d.done_lang === 'hi' ? 'hi' : 'en', false, { tone: 'saved' });
+        reply(d.done_reply, d.done_speak || d.done_reply, d.done_lang === 'hi' ? 'hi' : 'en', true, { tone: 'saved' });
       } else {
-        reply(spoken, undefined, 'en', false, { tone: 'saved' });
+        reply(spoken, undefined, 'en', true, { tone: 'saved' });
       }
     } catch (e) {
       setBusy('');
@@ -483,6 +494,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
     stopSpeaking();
     silenceRef.current = 0;
+    expectingRef.current = true; // a tap opens the conversation: JARVIS keeps listening after each reply
     listen();
   };
 
@@ -563,26 +575,33 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     else wakeResume();
   }, [listening, speaking, busy, prefs.wakeWordEnabled]);
 
-  // After a reboot (or if Android stopped it), switch the listener back on when the app opens.
+  // After a reboot, a reinstall, or Xiaomi stopping it: switch the listener back on whenever the app comes
+  // to the front (it is a background service, so Android needs the app itself to restart it).
   useEffect(() => {
     if (!wakeSupported || !prefs.wakeWordEnabled || !user) return;
     let cancelled = false;
-    wakeStatus()
-      .then(async (st) => {
-        if (cancelled || !st.supported || st.running || !st.micAllowed || !st.overlayAllowed) return;
-        const tokens = await deviceTokens();
-        if (cancelled) return;
-        await wakeStart({
-          serverUrl: currentServer(),
-          accessToken: tokens.access,
-          refreshToken: tokens.refresh,
-          address: user.role === 'MD' ? 'Sir' : user.name,
-          speakWhenLocked: prefs.privateAloudWhenLocked,
-        });
-      })
-      .catch(() => undefined);
+    const ensure = () => {
+      wakeStatus()
+        .then(async (st) => {
+          if (cancelled || !st.supported || st.running || !st.micAllowed) return;
+          const tokens = await deviceTokens();
+          if (cancelled) return;
+          await wakeStart({
+            serverUrl: currentServer(),
+            accessToken: tokens.access,
+            refreshToken: tokens.refresh,
+            address: user.role === 'MD' ? 'Sir' : user.name,
+            speakWhenLocked: prefs.privateAloudWhenLocked,
+          });
+        })
+        .catch(() => undefined);
+    };
+    const kick = setTimeout(ensure, 800);
+    const sub = AppState.addEventListener('change', (s) => s === 'active' && ensure());
     return () => {
       cancelled = true;
+      clearTimeout(kick);
+      sub.remove();
     };
   }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, user]);
 

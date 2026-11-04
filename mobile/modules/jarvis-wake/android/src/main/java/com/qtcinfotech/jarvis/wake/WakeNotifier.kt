@@ -90,10 +90,32 @@ class WakeNotifier(private val context: Context) {
 
     fun cancelSwitchOn() = manager.cancel(SWITCH_ON_ID)
 
+    /** "Ji Sir? Tap to talk" when the phone would not let JARVIS pop up by itself. */
+    fun showWakeFallback(address: String) {
+        val open = openApp(WakeService.EXTRA_WAKE)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, CHANNEL_REMINDERS)
+        else @Suppress("DEPRECATION") Notification.Builder(context)
+        manager.notify(
+            WAKE_ID,
+            builder.setSmallIcon(icon())
+                .setContentTitle("Ji $address?")
+                .setContentText("Tap to talk to JARVIS.")
+                .setContentIntent(open)
+                .setFullScreenIntent(open, true)
+                .setCategory(Notification.CATEGORY_CALL)
+                .setPriority(Notification.PRIORITY_MAX)
+                .setAutoCancel(true)
+                .setTimeoutAfter(30_000)
+                .setDefaults(Notification.DEFAULT_VIBRATE)
+                .build(),
+        )
+    }
+
     companion object {
         const val CHANNEL_SERVICE = "jarvis-wake-service"
         const val CHANNEL_REMINDERS = "jarvis-background"
         const val SERVICE_ID = 7001
         private const val SWITCH_ON_ID = 7002
+        private const val WAKE_ID = 7003
     }
 }

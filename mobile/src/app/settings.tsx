@@ -174,11 +174,22 @@ export default function Settings() {
               {!wake?.overlayAllowed ? <Chip label="Allow display over other apps" icon="open-outline" onPress={() => wakeSettings.overlay()} /> : null}
               {!wake?.batteryUnrestricted ? <Chip label="Battery: no restrictions" icon="battery-charging-outline" onPress={() => wakeSettings.battery()} /> : null}
               {xiaomi ? <Chip label="Autostart (Xiaomi)" icon="power-outline" onPress={() => { if (!wakeSettings.autostart()) setWakeNote('Open Security app → Autostart and allow JARVIS.'); }} /> : null}
+              {xiaomi ? (
+                <Chip
+                  label="Pop-ups from background (Xiaomi)"
+                  icon="albums-outline"
+                  onPress={() => {
+                    setWakeNote('On the page that opens, switch on “Display pop-up windows while running in the background”. Without it, Xiaomi stops JARVIS from appearing when you say “Hey JARVIS”.');
+                    wakeSettings.miuiPermissions();
+                  }}
+                />
+              ) : null}
             </View>
           ) : null}
           <Txt variant="caption" style={{ marginTop: 6 }}>
             Listening happens on the phone; nothing is sent until you say the words. A small notification shows while it is on.
             After a phone restart, open JARVIS once (or tap the notification) to switch it on again.
+            {xiaomi ? ' On Xiaomi, allow all three: Autostart, Battery, and Pop-ups from background.' : ''}
           </Txt>
         </Card>
 
