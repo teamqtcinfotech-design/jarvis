@@ -74,6 +74,10 @@ interface EngineValue {
   declineOffer: () => void;
   /** The conversation owns the microphone; it lends the engine a 2-second "is anyone talking?" check. */
   setVoiceProbe: (probe: (() => Promise<boolean>) | null) => void;
+  /** While he is talking with JARVIS, new alerts show quietly instead of speaking over him. */
+  setTalking: (talking: boolean) => void;
+  /** Clear every alert about one thing (e.g. a request he just accepted by voice). */
+  acknowledgeByRef: (refType: 'request' | 'shared_task', refId: string) => Promise<void>;
   current: EngineItem | null;
   queued: number;
   held: EngineItem[];
@@ -209,6 +213,13 @@ function describeHeld(items: EngineItem[], isMD: boolean): { en: string; hi: str
   return { en: join(en, 'and'), hi: join(hi, 'और') };
 }
 
+/** Where an alert points: the request or task it is about. */
+function refOf(item: EngineItem): { type: string; id: string } | null {
+  if (item.requestId) return { type: 'request', id: item.requestId };
+  if (item.ref) return { type: 'shared_task', id: item.ref.id };
+  return null;
+}
+
 export function AlertEngineProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const { prefs, update: updatePrefs } = usePrefs();
@@ -237,6 +248,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const [offer, setOffer] = useState<HeldOffer | null>(null);
   const offerSeq = useRef(0);
   const voiceProbe = useRef<(() => Promise<boolean>) | null>(null);
+  const talkingRef = useRef(false);
   const isMD = user?.role === 'MD';
 
   const currentRef = useRef<EngineItem | null>(null);
@@ -329,29 +341,23 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     announcedHeld.current = items.length;
     const what = describeHeld(items, isMD);
     const sir = isMD ? 'Sir' : address;
+    const them = items.length === 1 ? 'it' : 'them';
     offerSeq.current += 1;
     setOffer({
       id: offerSeq.current,
       count: items.length,
-      text: `${sir}, while you were away: ${what.en}. Shall I read them?`,
+      text: `${sir}, while you were away: ${what.en}. Shall I read ${them}?`,
       textHi: `${isMD ? 'सर' : address}, जब आप दूर थे: ${what.hi}। पढ़ कर सुनाऊँ?`,
     });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
   }, [address, isMD]);
 
-  // Reading them aloud (or not) never pops a sheet over the conversation: the list is under ☰ → Held alerts,
-  // and the conversation shows what was read.
-  const acceptOffer = useCallback(() => {
-    setOffer(null);
-    for (const item of heldRef.current) say(spokenFor(item)); // one after another
-  }, [spokenFor]);
-
-  const declineOffer = useCallback(() => {
-    setOffer(null);
-  }, []);
-
   const setVoiceProbe = useCallback((probe: (() => Promise<boolean>) | null) => {
     voiceProbe.current = probe;
+  }, []);
+
+  const setTalking = useCallback((talking: boolean) => {
+    talkingRef.current = talking;
   }, []);
 
   const route = useCallback(
@@ -363,6 +369,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         return state === 'present' ? deliver(item, 'silent') : hold(item);
       }
       if (state === 'present') {
+        // Mid-conversation with JARVIS: show it quietly, never speak over him (he can act on it by voice).
+        if (talkingRef.current) return deliver(item, 'silent');
         // With you — but is someone talking in the room? Then it is a meeting: vibrate, hold the words.
         const probe = voiceProbe.current;
         if (!probe) return deliver(item, 'loud');
@@ -553,6 +561,31 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     setHeldVisible(false);
   }, [acknowledge]);
 
+  // Offered once, then counted as seen: read aloud or not, they stay in his lists and are never offered again.
+  const acceptOffer = useCallback(() => {
+    setOffer(null);
+    const items = [...heldRef.current];
+    for (const item of items) say(spokenFor(item)); // one after another
+    acknowledgeAllHeld().catch(() => undefined);
+  }, [spokenFor, acknowledgeAllHeld]);
+
+  const declineOffer = useCallback(() => {
+    setOffer(null);
+    acknowledgeAllHeld().catch(() => undefined);
+  }, [acknowledgeAllHeld]);
+
+  const acknowledgeByRef = useCallback(
+    async (refType: 'request' | 'shared_task', refId: string) => {
+      const hit = (item: EngineItem) => {
+        const r = refOf(item);
+        return !!r && r.type === refType && r.id === refId;
+      };
+      const items = [currentRef.current, ...queueRef.current, ...heldRef.current].filter((i): i is EngineItem => !!i && hit(i));
+      for (const item of items) await acknowledge(item);
+    },
+    [acknowledge],
+  );
+
   const snooze = useCallback(
     (item: EngineItem, minutes = 10) => {
       followups.current.delete(item.key);
@@ -618,6 +651,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     acceptOffer,
     declineOffer,
     setVoiceProbe,
+    setTalking,
+    acknowledgeByRef,
     current,
     queued,
     held,

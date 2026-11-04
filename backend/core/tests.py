@@ -682,22 +682,22 @@ class SmartAssistantTests(BaseCase):
         self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
         self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before)  # the draft was forgotten
 
-    def test_wake_offers_missed_reminders_and_hides_private_when_locked(self):
+    def test_wake_only_greets_and_locked_phone_hides_private_items(self):
         past = tu.now_local() - timedelta(minutes=20)
         services.create_private_task(self.md, {"title": SECRET + " call", "kind": Kind.CALL, "priority": Priority.HIGH,
                                                "due_date": past.date(), "due_time": past.time().replace(second=0, microsecond=0)})
         r = self.turn(self.md_client, "", event="wake", locked=True, private_ok=False)
-        self.assertEqual(r["action"], "offer")
-        self.assertIn("Shall I read them?", r["show"])
+        self.assertEqual(r["action"], "greet")  # "Hey JARVIS" is listen-only: no reminders, no offers
+        self.assertEqual(r["show"], "Ji Sir?")
         self.assertNotIn(SECRET, json.dumps(r))
-        r = self.turn(self.md_client, "haan padho", _cmd(intent="confirm_pending"), locked=True, private_ok=False)
-        self.assertEqual(r["action"], "read_missed")
-        self.assertNotIn(SECRET, r["say"])  # locked phone: only "you have a private reminder"
-        self.assertIn("private reminder", r["say"])
-        # Unlocked: the real text is read.
-        r = self.turn(self.md_client, "", event="wake")
-        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
-        self.assertIn(SECRET, r["say"])
+        # Locked: the model never even sees the private item.
+        _, fake = None, None
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", spoken_reply="Nothing today.")) as fake:
+            self.md_client.post("/api/v1/assistant/turn/", {"text": "aaj kya hai", "locked": True, "private_ok": False}, format="json")
+        self.assertNotIn(SECRET, json.dumps(fake.call_args.args[1], default=str))
+        # "no, accept it" style replies are commands, not a plain no: a dismiss clears the banner.
+        r = self.turn(self.md_client, "ye hatao", _cmd(intent="dismiss_alert"))
+        self.assertEqual(r["action"], "dismiss")
 
     def test_background_turn_never_shows_private_items_to_pa(self):
         r = self.turn(self.pa_client, "Sir ke tasks batao", _cmd(intent="query", spoken_reply="Nothing from Sir today."))

@@ -137,6 +137,7 @@ export type DraftAction =
   | 'remember'
   | 'confirm_pending'
   | 'cancel_pending'
+  | 'dismiss'
   | 'end'
   | 'answer';
 

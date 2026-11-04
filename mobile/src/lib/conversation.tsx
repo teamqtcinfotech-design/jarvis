@@ -76,7 +76,8 @@ const newId = () => `m${Date.now()}-${seq++}`;
 export function ConversationProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const { prefs, applyServerPrefs } = usePrefs();
-  const { setVoiceProbe, offer, acceptOffer, declineOffer, setHeldVisible, held } = useAlertEngine();
+  const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
+    setHeldVisible, held } = useAlertEngine();
   const isMD = user?.role === 'MD';
   const address = isMD ? 'Sir' : user?.name ?? '';
 
@@ -315,6 +316,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       reply(d.spoken_reply, speakText, lang, false); // "bas / thank you": the conversation is over
       return;
     }
+    if (d.action === 'dismiss') {
+      if (currentAlert) acknowledge(currentAlert).catch(() => undefined); // "remove this banner"
+      setHeldVisible(false);
+      reply(d.spoken_reply || 'Done.', speakText, lang, true);
+      return;
+    }
     if (d.action === 'briefing') {
       push('jarvis', d.spoken_reply);
       say(speakText, { interrupt: true, lang, fallback: d.spoken_reply });
@@ -480,6 +487,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         const verb = d.action === 'accept_request' ? 'accept' : 'decline';
         for (const t of list) {
           await api(`/requests/${t.id}/${verb}/`, { method: 'POST', body: {}, idempotencyKey: `${key}-${t.id}` });
+          acknowledgeByRef('request', t.id).catch(() => undefined); // the banner about it goes away
         }
         spoken = list.length === 1
           ? (verb === 'accept' ? `Accepted, ${address}. It's on your list.` : `Declined, ${address}.`)
@@ -645,6 +653,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (listening || speaking || busy) wakePause();
     else wakeResume();
   }, [listening, speaking, busy, prefs.wakeWordEnabled]);
+
+  // Alerts that arrive mid-conversation show quietly instead of talking over him.
+  useEffect(() => {
+    setTalking(listening || speaking || busy !== '');
+  }, [listening, speaking, busy, setTalking]);
 
   // After a reboot, a reinstall, or Xiaomi stopping it: switch the listener back on whenever the app comes
   // to the front (it is a background service, so Android needs the app itself to restart it).

@@ -499,6 +499,11 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["needs_clarification"] = False
         draft["question"] = ""
         draft["spoken_reply"] = draft["spoken_reply"] or f"Okay {address}, cancelled. Nothing was saved."
+    elif intent == "dismiss_alert":
+        draft["action"] = "dismiss"  # the phone clears the alert on screen
+        draft["needs_clarification"] = False
+        draft["question"] = ""
+        draft["spoken_reply"] = draft["spoken_reply"] or "Done."
     elif intent == "end_conversation":
         draft["action"] = "end"
         draft["needs_clarification"] = False

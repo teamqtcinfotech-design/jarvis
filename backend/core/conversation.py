@@ -137,6 +137,8 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     elif action == "end":
         state = {**EMPTY, "history": []}
         resp = _resp(show, speak, lang, listen=False, action="end")
+    elif action == "dismiss":
+        resp = _resp(show or "Done.", listen=True, action="dismiss")
     elif action == "ask":
         reader = "the Managing Director" if user.is_md else f"{user.spoken_name}, the MD's personal assistant,"
         ans = ai_brain.answer(draft["ask_text"], state["history"], user=user, address=address, reader=reader,
@@ -168,10 +170,14 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     return resp
 
 
+OFFER_MISSED_ON_WAKE = False  # he asked for "Hey JARVIS" to be listen-only: no reminders, no offers
+
+
 def _wake(user: User, state: dict, address: str, private_ok: bool) -> dict:
-    """"Hey JARVIS": greet, and offer to read the reminders that came while he was away."""
+    """"Hey JARVIS": greet and listen. (Offering missed reminders here is switched off on request.)"""
     now = timezone.now()
-    missed = [r for r in reminders_for(user, hours=1)["reminders"] if datetime.fromisoformat(r["fire_at"]) <= now]
+    missed = ([r for r in reminders_for(user, hours=1)["reminders"] if datetime.fromisoformat(r["fire_at"]) <= now]
+              if OFFER_MISSED_ON_WAKE else [])
     greet_show = "Ji Sir?" if user.is_md else f"Ji {user.spoken_name}?"
     greet_hi = "जी सर?" if user.is_md else "जी?"
     if not missed:
