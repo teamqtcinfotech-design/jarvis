@@ -325,8 +325,8 @@ class Alert(models.Model):
     kind = models.CharField(max_length=16, choices=Kind.choices)
     priority = models.CharField(max_length=6, choices=Priority.choices, default=Priority.NORMAL)
     title = models.CharField(max_length=200)
-    body = models.CharField(max_length=400, blank=True, default="")
-    spoken_text = models.CharField(max_length=400, blank=True, default="")
+    body = models.TextField(blank=True, default="")          # a briefing can be a full paragraph
+    spoken_text = models.TextField(blank=True, default="")
     ref_type = models.CharField(max_length=20, blank=True, default="")
     ref_id = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -335,6 +335,17 @@ class Alert(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["recipient", "acknowledged_at"])]
+
+
+class PushDevice(models.Model):
+    """A phone that receives live push (Firebase Cloud Messaging) for one user. The token moves with the login."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="push_devices")
+    token = models.CharField(max_length=512, unique=True)
+    platform = models.CharField(max_length=16, default="android")
+    failures = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
 
 class ReminderAck(models.Model):

@@ -37,9 +37,18 @@ Needs Java 17 (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`), then a **new**
 ```powershell
 cd D:\Friday\mobile
 adb devices                                   # phone must show as "device"
+npx expo prebuild --platform android          # regenerates mobile\android from app.json (needed after app.json or plugin changes)
 npx expo run:android --variant release        # builds and installs a standalone APK on the phone
 ```
 The APK is written to `mobile\android\app\build\outputs\apk\release\app-release.apk` (shareable by USB/WhatsApp to sideload).
+
+## Live push (Firebase Cloud Messaging)
+
+Alerts (requests, tasks for Mansi, follow-ups, the morning briefing) are pushed to the phones the moment they are
+created, so a closed app shows and speaks them within seconds. `mobile/google-services.json` is the Android app's
+config inside the shared Firebase project. The server needs the project's service-account key:
+`FIREBASE_SERVICE_ACCOUNT_FILE=/srv/jarvis/firebase.json` on the VPS (copied there by hand, never committed).
+Without it push is off and the phones fall back to a half-minute check.
 
 ## Who sees what
 
@@ -73,5 +82,4 @@ until acknowledged · every reminder is also an exact OS alarm so nothing is los
   and Completed after ~5 min for the demo). Switch to live after installing `taskpanel-integration/`.
 - **Pending decisions:** "all staff" (each person / a department / an announcement), MD & PA TaskPanel logins,
   category policy (AI-suggested vs always General). JARVIS currently asks you to name one person.
-- **Not in this build:** always-on wake word (Android limit), Windows app, calendar sync, push from server when the app is closed
-  (incoming requests arrive while the app is open; reminders work closed), next-phase audit fixes.
+- **Not in this build:** Windows app, calendar sync, next-phase audit fixes.

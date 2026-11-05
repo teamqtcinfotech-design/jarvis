@@ -13,19 +13,19 @@
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { AppState } from 'react-native';
+import { Animated, AppState } from 'react-native';
 
 import { type HeldOffer, useAlertEngine } from './alertEngine';
 import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
 import { CONFIRMABLE, TASK_DRAFTS, describeDraft } from './drafts';
-import { dayLabel } from './format';
+import { dayLabel, timeLabel } from './format';
 import { usePrefs } from './prefs';
 import { useSession } from './session';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang } from './speech';
-import type { AskAnswer, Draft, DraftAction, StaffOption } from './types';
+import type { AskAnswer, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
-import { onWake, wakeConsumePending, wakePause, wakeResume, wakeStart, wakeStatus, wakeSupported } from './wake';
+import { onWake, pushToken, wakeConsumePending, wakePause, wakeResume, wakeStart, wakeStatus, wakeSupported } from './wake';
 
 export interface Msg {
   id: string;
@@ -38,6 +38,16 @@ export interface Msg {
 export type OrbState = 'idle' | 'listening' | 'thinking' | 'speaking';
 type Busy = '' | 'thinking' | 'searching' | 'saving';
 
+/** An answer drawn as data (timeline / chart / table), kept so it can be read, downloaded or removed. */
+export interface Answer {
+  id: string;
+  view: DataView;
+  question: string;
+  /** Spoken text that goes with it (a briefing). */
+  text?: string;
+  at: number;
+}
+
 interface ConversationValue {
   messages: Msg[];
   draft: Draft | null;
@@ -48,6 +58,17 @@ interface ConversationValue {
   partial: string;
   orb: OrbState;
   status: string;
+  /** 0..1 loudness while listening, for the orb. */
+  level: Animated.Value;
+  answers: Answer[];
+  removeAnswer: (id: string) => void;
+  clearAnswers: () => void;
+  /** Fetch one report / view and show it as an answer card (the Reports row on the phone). */
+  showView: (kind: string, label: string) => void;
+  /** Phone only: the full-screen talk sheet. Opened by the floating orb, "Hey JARVIS" and held-alert offers. */
+  talkOpen: boolean;
+  openTalk: () => void;
+  closeTalk: () => void;
   micPress: () => void;
   send: (text: string) => void;
   editDraft: (patch: Partial<Draft>) => void;
@@ -87,6 +108,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const [busy, setBusy] = useState<Busy>('');
   const [speaking, setSpeaking] = useState(false);
   const [hints, setHints] = useState<string[]>(BASE_HINTS);
+  const [answers, setAnswers] = useState<Answer[]>([]);
+  const [talkOpen, setTalkOpen] = useState(false);
+  const lastQuestion = useRef('');
 
   const messagesRef = useRef<Msg[]>([]);
   const draftRef = useRef<Draft | null>(null);
@@ -116,7 +140,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     onFinal: (text) => fns.current.heard(text),
     onError: (message, code) => fns.current.voiceError(message, code),
   });
-  const { start: startVoice, stop: stopVoice, cancel: cancelVoice, probe } = voice;
+  const { start: startVoice, cancel: cancelVoice, probe, level } = voice;
 
   // The alert engine borrows the microphone for its 2-second "is anyone talking?" check
   // (the background listener steps aside for it).
@@ -158,6 +182,24 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     draftRef.current = d;
     setDraftState(d);
   };
+  const addAnswer = (view: DataView, question: string, text?: string) => {
+    setAnswers((prev) => [{ id: newId(), view, question, text, at: Date.now() }, ...prev].slice(0, 20));
+  };
+  const removeAnswer = (id: string) => setAnswers((prev) => prev.filter((a) => a.id !== id));
+  const clearAnswers = () => setAnswers([]);
+  const showView = async (kind: string, label: string) => {
+    setBusy('thinking');
+    try {
+      const res = await api<DataView>(`/views/${kind}/`);
+      addAnswer(res.data, label);
+    } catch {
+      push('jarvis', `Couldn't load ${label.toLowerCase()} right now.`, { tone: 'error' });
+    } finally {
+      setBusy('');
+    }
+  };
+  const openTalk = () => setTalkOpen(true);
+  const closeTalk = () => setTalkOpen(false);
   const history = () =>
     messagesRef.current.filter((m) => m.tone !== 'error').slice(-8).map((m) => ({ role: m.role, text: m.text }));
   const listen = () => {
@@ -192,13 +234,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     silenceRef.current = 0;
     expectingRef.current = false;
     push('user', text);
+    lastQuestion.current = text;
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
       interpret(text, '', `JARVIS asked: "${pendingOffer.text}" (${pendingOffer.count} alerts kept while away)`);
       return;
     }
     const card = waitingCard();
-    if (card) interpret(text, card.transcript, describeDraft(card));
+    // The card itself goes along too, so a "yes" can take the time JARVIS offered, or a new time can be checked.
+    if (card) interpret(text, card.transcript, describeDraft(card), null, card);
     else interpret(text, previousRef.current, '', choicesRef.current);
   };
 
@@ -232,6 +276,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // "Sir, while you were away: … Shall I read them?" — asked once JARVIS is idle (or right after "Hey JARVIS").
   const presentOffer = (o: HeldOffer, greetFirst: boolean) => {
     offerRef.current = o;
+    setTalkOpen(true);
     const hi = langRef.current === 'hi';
     const show = (greetFirst ? (isMD ? 'Ji Sir? ' : 'Ji? ') : '') + o.text;
     const speak = (greetFirst ? (isMD ? 'जी सर? ' : 'जी? ') : '') + (hi ? o.textHi : o.text);
@@ -245,6 +290,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const wake = () => {
     if (!user) return;
     setHeldVisible(false);
+    setTalkOpen(true);
     try {
       router.navigate('/');
     } catch {
@@ -258,12 +304,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     greet();
   };
 
-  const interpret = async (text: string, previous: string, awaiting: string, choices: typeof choicesRef.current = null) => {
+  const interpret = async (text: string, previous: string, awaiting: string, choices: typeof choicesRef.current = null,
+    pending: Draft | null = null) => {
     setBusy('thinking');
     try {
+      // The waiting card without its long option lists (the server only needs what it says and when).
+      const slim = pending ? { ...pending, categories: [], staff_candidates: [], target_candidates: [] } : null;
       const res = await api<Draft>('/assistant/interpret/', {
         method: 'POST',
-        body: { text, previous, awaiting, choices, history: history().slice(0, -1) },
+        body: { text, previous, awaiting, choices, pending: slim, history: history().slice(0, -1) },
         timeoutMs: 30000,
       });
       setBusy('');
@@ -280,6 +329,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     langRef.current = d.reply_language === 'hi' ? 'hi' : 'en';
     const speakText = d.speak_text || d.spoken_reply;
     const lang: SpeakLang = d.speak_lang === 'hi' ? 'hi' : 'en';
+    // An answer with data: the screen gets a timeline / chart / table while the short reply is spoken.
+    if (d.view && d.action === 'answer') addAnswer(d.view, lastQuestion.current);
 
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
@@ -329,7 +380,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return;
     }
     if (d.action === 'confirm_pending') {
-      save(); // the AI understood a "yes" in whatever words were used
+      // The AI understood a "yes" in whatever words were used. If JARVIS had offered another time (a clash, a free
+      // slot) and he took it, or he named a time himself, the card moves there first.
+      const o = d.overrides;
+      const cur = draftRef.current;
+      if (cur && o && (o.due_date || o.due_time)) {
+        editedRef.current = true; // the AI's "done" line named the old time
+        if (cur.action === 'change_task') setDraft({ ...cur, changes: { ...cur.changes, ...o } });
+        else setDraft({ ...cur, due_date: o.due_date ?? cur.due_date, due_time: o.due_time ?? cur.due_time });
+      }
+      save();
       return;
     }
     if (d.action === 'set_setting' && !d.needs_clarification && d.setting_patch) {
@@ -398,8 +458,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const briefing = async () => {
     setBusy('thinking');
     try {
-      const res = await api<{ text: string }>('/assistant/briefing/?kind=now', { timeoutMs: 45000 });
+      const res = await api<{ text: string; view?: DataView | null }>('/assistant/briefing/?kind=now', { timeoutMs: 45000 });
       setBusy('');
+      if (res.data.view) addAnswer(res.data.view, 'Briefing', res.data.text);
       push('jarvis', res.data.text);
       expectingRef.current = true;
       silenceRef.current = 0;
@@ -441,7 +502,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       let spoken = '';
       if (d.action === 'private_task') {
         await api('/private-tasks/', { method: 'POST', body, idempotencyKey: key });
-        spoken = `Saved, ${address}.` + (d.due_date ? ` I'll remind you ${dayLabel(d.due_date).toLowerCase()}${d.due_time ? ` at ${d.due_time}` : ''}.` : '');
+        spoken = `Saved, ${address}.` + (d.due_date ? ` I'll remind you ${dayLabel(d.due_date).toLowerCase()}${d.due_time ? ` at ${timeLabel(d.due_time)}` : ''}.` : '');
       } else if (d.action === 'delegation') {
         const res = await api<any>('/delegations/', {
           method: 'POST',
@@ -557,7 +618,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   const micPress = () => {
     if (voice.state === 'listening') {
-      stopVoice();
+      // A tap while listening means "stop": drop whatever was half-heard and rest until the next tap or "Hey JARVIS".
+      expectingRef.current = false;
+      silenceRef.current = 0;
+      cancelVoice();
       return;
     }
     stopSpeaking();
@@ -659,24 +723,38 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     setTalking(listening || speaking || busy !== '');
   }, [listening, speaking, busy, setTalking]);
 
-  // After a reboot, a reinstall, or Xiaomi stopping it: switch the listener back on whenever the app comes
-  // to the front (it is a background service, so Android needs the app itself to restart it).
+  // The background service runs whenever someone is signed in: it is what brings reminders and messages to a
+  // closed app. After a reboot, a reinstall, or Xiaomi stopping it, the app switches it back on whenever it comes
+  // to the front, and matches the microphone part to the "Hey JARVIS" setting.
   useEffect(() => {
-    if (!wakeSupported || !prefs.wakeWordEnabled || !user) return;
+    if (!wakeSupported || !user) return;
     let cancelled = false;
+    let pushRegistered = false;
     const ensure = () => {
       wakeStatus()
         .then(async (st) => {
-          if (cancelled || !st.supported || st.running || !st.micAllowed) return;
-          const tokens = await deviceTokens();
-          if (cancelled) return;
-          await wakeStart({
-            serverUrl: currentServer(),
-            accessToken: tokens.access,
-            refreshToken: tokens.refresh,
-            address: user.role === 'MD' ? 'Sir' : user.name,
-            speakWhenLocked: prefs.privateAloudWhenLocked,
-          });
+          if (cancelled || !st.supported) return;
+          const wantListening = prefs.wakeWordEnabled && st.micAllowed;
+          if (!st.running || st.listening !== wantListening) {
+            const tokens = await deviceTokens();
+            if (cancelled) return;
+            await wakeStart({
+              serverUrl: currentServer(),
+              accessToken: tokens.access,
+              refreshToken: tokens.refresh,
+              address: user.role === 'MD' ? 'Sir' : user.name,
+              speakWhenLocked: prefs.privateAloudWhenLocked,
+              wakeWord: wantListening,
+            });
+          }
+          // Live push: the server learns this phone's token once per app session (Firebase rotations are
+          // re-registered natively).
+          if (!pushRegistered) {
+            const token = await pushToken();
+            if (cancelled || !token) return;
+            await api('/me/push-token/', { method: 'POST', body: { token, platform: 'android' } });
+            pushRegistered = true;
+          }
         })
         .catch(() => undefined);
     };
@@ -713,7 +791,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     : 'Tap and speak';
 
   const value: ConversationValue = {
-    messages, draft, draftError, busy, speaking, listening, partial: voice.partial, orb, status,
+    messages, draft, draftError, busy, speaking, listening, partial: voice.partial, orb, status, level,
+    answers, removeAnswer, clearAnswers, showView, talkOpen, openTalk, closeTalk,
     micPress, send, editDraft, cancelDraft, save, clear, greet,
   };
   return <ConversationContext.Provider value={value}>{children}</ConversationContext.Provider>;

@@ -47,6 +47,34 @@ def fmt_day(d: date) -> str:
     return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}"
 
 
+_HI_WEEKDAYS = ["सोमवार", "मंगलवार", "बुधवार", "गुरुवार", "शुक्रवार", "शनिवार", "रविवार"]
+_HI_MONTHS = ["जनवरी", "फ़रवरी", "मार्च", "अप्रैल", "मई", "जून", "जुलाई", "अगस्त", "सितंबर", "अक्टूबर", "नवंबर", "दिसंबर"]
+
+
+def fmt_time_hi(dt: datetime) -> str:
+    """For the Hindi voice: '4 बजे', 'साढ़े 4 बजे', '4:15 बजे' (12-hour, as people say it)."""
+    local = to_local(dt)
+    hour = local.hour % 12 or 12
+    if local.minute == 0:
+        return f"{hour} बजे"
+    if local.minute == 30:
+        return f"साढ़े {hour} बजे"
+    return f"{hour}:{local.minute:02d} बजे"
+
+
+def fmt_day_hi(d: date) -> str:
+    today = today_local()
+    if d == today:
+        return "आज"
+    if d == today + timedelta(days=1):
+        return "कल"
+    if d == today + timedelta(days=2):
+        return "परसों"
+    if d == today - timedelta(days=1):
+        return "कल (बीता हुआ)"
+    return f"{_HI_WEEKDAYS[d.weekday()]} {d.day} {_HI_MONTHS[d.month - 1]}"
+
+
 def due_phrase(due_kind: str, due_date: date | None, due_at: datetime | None) -> str:
     if due_kind == "TIMED" and due_at:
         local = to_local(due_at)

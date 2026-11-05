@@ -13,7 +13,8 @@ from django.utils import timezone
 from . import timeutils as tu
 from .models import Kind, Priority, PrivateTask, ReminderAck, SharedTask, Status, User
 from .services import (
-    DATE_ONLY_REMINDER_TIME, busy_windows, delegated_qs, get_pa, md_private_qs, pa_tasks_qs, shared_md_tasks_qs,
+    busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs, md_private_qs, pa_tasks_qs,
+    shared_md_tasks_qs,
 )
 
 LOOKBACK = timedelta(hours=12)
@@ -26,7 +27,14 @@ def _lead_phrase(minutes: int) -> str:
     return f"in {minutes} minutes"
 
 
-def _task_reminders(task, scope: str, is_private: bool, address: str) -> list[dict]:
+def lead_for(task, prefs: dict) -> int:
+    """How early to speak: the task's own lead if the user asked for one, else the reader's setting for that kind."""
+    if task.remind_before_minutes is not None:
+        return int(task.remind_before_minutes)
+    return default_remind_before(task.kind, task.priority, prefs)
+
+
+def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dict) -> list[dict]:
     out = []
     base = {
         "priority": task.priority,
@@ -38,7 +46,7 @@ def _task_reminders(task, scope: str, is_private: bool, address: str) -> list[di
     key_prefix = f"{scope}:{task.id}:v{task.version}"
     start = task.scheduled_start or task.due_at
     if start:
-        lead = task.remind_before_minutes or 0
+        lead = lead_for(task, prefs)
         if lead > 0:
             spoken = task.announcement or f"{address}, {task.title} {_lead_phrase(lead)}."
             if task.kind == Kind.MEETING and "minute" not in spoken and "hour" not in spoken:
@@ -54,7 +62,7 @@ def _task_reminders(task, scope: str, is_private: bool, address: str) -> list[di
         out.append({**base, "key": f"{key_prefix}:due", "label": "due", "fire_at": start.isoformat(),
                     "spoken": due_spoken})
     elif task.due_date:
-        fire = tu.combine_local(task.due_date, DATE_ONLY_REMINDER_TIME)
+        fire = tu.combine_local(task.due_date, day_reminder_time(prefs))
         out.append({**base, "key": f"{key_prefix}:day", "label": "day", "fire_at": fire.isoformat(),
                     "spoken": f"{address}, today's reminder: {task.title}."})
     return out
@@ -65,19 +73,20 @@ def reminders_for(user: User, hours: int = 48) -> dict:
     window_start, window_end = now - LOOKBACK, now + timedelta(hours=hours)
     items: list[dict] = []
     open_filter = {"status__in": [Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED]}
+    prefs = get_prefs(user)  # the reader's own lead times and day-reminder hour
 
     if user.is_md:
         for task in md_private_qs(user).filter(**open_filter):
-            items += _task_reminders(task, "private", True, "Sir")
+            items += _task_reminders(task, "private", True, "Sir", prefs)
         for task in shared_md_tasks_qs().filter(**open_filter):
-            items += _task_reminders(task, "shared", False, "Sir")
+            items += _task_reminders(task, "shared", False, "Sir", prefs)
         # Anything involving the PA is for both: the MD is reminded too.
         pa = get_pa()
         pa_name = pa.spoken_name if pa else "your PA"
         for task in pa_tasks_qs().filter(**open_filter):
             meeting = task.origin == SharedTask.Origin.MD_MEET_PA
-            for item in _task_reminders(task, "shared", False, "Sir"):
-                lead = _lead_phrase(task.remind_before_minutes or 0)
+            for item in _task_reminders(task, "shared", False, "Sir", prefs):
+                lead = _lead_phrase(lead_for(task, prefs))
                 if meeting:
                     item["title"] = f"Meeting with {pa_name}: {task.title}"
                     item["spoken"] = (f"Sir, your meeting with {pa_name} starts {lead}: {task.title}."
@@ -92,7 +101,7 @@ def reminders_for(user: User, hours: int = 48) -> dict:
     else:
         name = user.spoken_name
         for task in pa_tasks_qs().filter(**open_filter):  # her own tasks from Sir
-            items += _task_reminders(task, "shared", False, name)
+            items += _task_reminders(task, "shared", False, name, prefs)
         for task in delegated_qs().filter(created_by=user, **open_filter):
             start = task.due_at
             if not start:

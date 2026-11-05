@@ -11,16 +11,27 @@ export interface WakeConfig {
   /** What to say when woken, e.g. "Ji Sir?" (spoken by the app once it is in front). */
   address: string;
   speakWhenLocked: boolean;
+  /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
+  wakeWord: boolean;
 }
 
 export interface WakeStatus {
   supported: boolean;
+  /** The background service runs (reminders and messages reach a closed app). */
   running: boolean;
+  /** The microphone part ("Hey JARVIS") runs too. */
+  listening: boolean;
   overlayAllowed: boolean;
   micAllowed: boolean;
+  notificationsAllowed: boolean;
   batteryUnrestricted: boolean;
   manufacturer: string;
 }
+
+const NO_STATUS: WakeStatus = {
+  supported: false, running: false, listening: false, overlayAllowed: false, micAllowed: false,
+  notificationsAllowed: false, batteryUnrestricted: false, manufacturer: '',
+};
 
 export interface TtsEvent {
   id: string;
@@ -30,7 +41,10 @@ export interface TtsEvent {
 type Native = {
   getStatus: () => Promise<WakeStatus>;
   start: (config: WakeConfig) => Promise<boolean>;
+  setListening: (on: boolean) => Promise<boolean>;
   stop: () => Promise<void>;
+  getPushToken: () => Promise<string | null>;
+  deletePushToken: () => Promise<void>;
   pause: () => void;
   resume: () => void;
   consumePendingWake: () => boolean;
@@ -40,7 +54,7 @@ type Native = {
   openMiuiPermissions: () => boolean;
   speak: (id: string, text: string, lang: string, fallback: string | null, rate: number) => void;
   stopSpeaking: () => void;
-  addListener: ((event: 'wake', listener: () => void) => { remove: () => void }) &
+  addListener: ((event: 'wake' | 'push', listener: () => void) => { remove: () => void }) &
     ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void });
 };
 
@@ -57,16 +71,15 @@ if (Platform.OS === 'android') {
 export const wakeSupported = native !== null;
 
 export async function wakeStatus(): Promise<WakeStatus> {
-  if (!native) {
-    return { supported: false, running: false, overlayAllowed: false, micAllowed: false, batteryUnrestricted: false, manufacturer: '' };
-  }
+  if (!native) return NO_STATUS;
   try {
-    return await native.getStatus();
+    return { ...NO_STATUS, ...(await native.getStatus()) };
   } catch {
-    return { supported: false, running: false, overlayAllowed: false, micAllowed: false, batteryUnrestricted: false, manufacturer: '' };
+    return NO_STATUS;
   }
 }
 
+/** Start or re-apply the background service. Resolves to whether it now listens for "Hey JARVIS". */
 export async function wakeStart(config: WakeConfig): Promise<boolean> {
   if (!native) return false;
   try {
@@ -76,6 +89,17 @@ export async function wakeStart(config: WakeConfig): Promise<boolean> {
   }
 }
 
+/** Switch only the "Hey JARVIS" microphone part; reminders and messages keep arriving. */
+export async function wakeSetListening(on: boolean): Promise<boolean> {
+  if (!native) return false;
+  try {
+    return await native.setListening(on);
+  } catch {
+    return false;
+  }
+}
+
+/** Sign-out only: the service stops for good. */
 export async function wakeStop() {
   if (!native) return;
   try {
@@ -115,6 +139,38 @@ export function onWake(listener: () => void): () => void {
   if (!native) return () => undefined;
   try {
     const sub = native.addListener('wake', listener);
+    return () => sub.remove();
+  } catch {
+    return () => undefined;
+  }
+}
+
+// ---------------------------------------------------------------- live push (Firebase Cloud Messaging)
+/** This phone's push token, or null when push is not available on this build / phone. */
+export async function pushToken(): Promise<string | null> {
+  if (!native || typeof native.getPushToken !== 'function') return null;
+  try {
+    return await native.getPushToken();
+  } catch {
+    return null;
+  }
+}
+
+/** Sign-out: the phone stops receiving pushes for this login. */
+export async function pushForget() {
+  if (!native || typeof native.deletePushToken !== 'function') return;
+  try {
+    await native.deletePushToken();
+  } catch {
+    // ignore
+  }
+}
+
+/** A push arrived while the app is open: refresh alerts at once. */
+export function onPush(listener: () => void): () => void {
+  if (!native) return () => undefined;
+  try {
+    const sub = native.addListener('push', listener);
     return () => sub.remove();
   } catch {
     return () => undefined;

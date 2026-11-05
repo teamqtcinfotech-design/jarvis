@@ -114,7 +114,7 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         else:
             awaiting = _describe(pending)
     draft = assistant.build_draft(user, text, previous, state["history"][:-1], awaiting, choices,
-                                  include_private=private_ok)
+                                  include_private=private_ok, pending=pending if awaiting and not offer else None)
     action = draft["action"]
     lang = draft.get("speak_lang", "en")
     speak = draft.get("speak_text") or draft["spoken_reply"]
@@ -128,7 +128,7 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
             resp = _resp(" ".join(i["spoken"] for i in offer["items"]), listen=True, action="read_missed")
         elif pending:
             state["pending"], state["choices"] = None, None
-            resp = _execute(user, pending, address)
+            resp = _execute(user, _with_overrides(pending, draft.get("overrides") or {}), address)
         else:
             resp = _resp(f"{address}, there's nothing waiting to be confirmed.", listen=True, action="answer")
     elif action == "cancel_pending":
@@ -198,6 +198,20 @@ def _wake(user: User, state: dict, address: str, private_ok: bool) -> dict:
 
 
 # ------------------------------------------------------------------ doing the work
+def _with_overrides(p: dict, over: dict) -> dict:
+    """The waiting card with the day / time he settled on ("haan" to the offered slot, or "6 baje")."""
+    if not over:
+        return p
+    p = dict(p)
+    if p.get("action") == "change_task":
+        p["changes"] = {**(p.get("changes") or {}), **over}
+    else:
+        p.update(over)
+        p["due_label"] = assistant._due_label(p.get("due_date", ""), p.get("due_time", ""))
+    p["done_reply"] = ""  # the AI's line named the old time
+    return p
+
+
 def _task_data(p: dict) -> dict:
     return {
         "title": (p.get("title") or "").strip(),

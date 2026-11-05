@@ -884,3 +884,331 @@ class SmartAssistantTests(BaseCase):
         self.assertEqual(data["engine"], "limit")
         client.messages.create.assert_not_called()
         self.assertEqual(self.md_client.get("/api/v1/assistant/usage/").json()["questions_today"], 1)
+
+
+class DataViewTests(BaseCase):
+    """Answers as data: timeline / chart / table views, scoped exactly like everything else."""
+
+    def test_query_answers_carry_a_view_and_the_pa_never_sees_private_items(self):
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="today", spoken_reply="Sir, 1 meeting today.")):
+            draft = self.md_client.post("/api/v1/assistant/interpret/", {"text": "aaj ka plan kya hai"}, format="json").json()
+        self.assertEqual(draft["action"], "answer")
+        self.assertEqual(draft["view"]["layout"], "timeline")
+        self.assertTrue(any(t["title"] == SECRET for t in draft["view"]["timeline"]))  # Sir sees his own private meeting
+        self.assertEqual(draft["view"]["stats"][0]["label"], "Items")
+        # The model forgot view_kind: the words decide.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", spoken_reply="Nothing is late.")):
+            draft = self.md_client.post("/api/v1/assistant/interpret/", {"text": "kya kuch late hai?"}, format="json").json()
+        self.assertEqual(draft["view"]["kind"], "late")
+        # Mansi asks the same: her view has her items only, and Sir's private meeting is only "Busy".
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="busy", spoken_reply="Sir is busy at 1 PM.")):
+            r = self.pa_client.post("/api/v1/assistant/interpret/", {"text": "Sir aaj free kab hain"}, format="json")
+        self.assert_no_secret(r)
+        self.assertEqual(r.json()["view"]["layout"], "busy")
+        self.assertEqual(len(r.json()["view"]["timeline"]), 1)
+        # Locked phone: Sir's private items stay off the screen.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="today", spoken_reply="x")):
+            r = self.md_client.post("/api/v1/assistant/turn/", {"text": "aaj kya hai", "locked": True, "private_ok": False}, format="json")
+        self.assertNotIn(SECRET, json.dumps(r.json()))
+
+    def test_views_endpoint_week_stats_and_scope(self):
+        week = self.md_client.get("/api/v1/views/week/").json()
+        self.assertEqual(len(week["series"]), 7)
+        self.assertTrue(week["series"][0]["today"])
+        stats = self.md_client.get("/api/v1/views/stats/").json()
+        self.assertEqual([s["label"] for s in stats["stats"]][:3], ["Today", "Late", "Done today"])
+        self.assertEqual(self.pa_client.get("/api/v1/views/private/").status_code, 404)
+        for kind in ("today", "week", "stats", "pa", "staff", "requests", "busy", "late", "upcoming", "nodate"):
+            r = self.pa_client.get(f"/api/v1/views/{kind}/")
+            self.assertEqual(r.status_code, 200, kind)
+            self.assert_no_secret(r)
+        self.assertEqual(self.md_client.get("/api/v1/views/nonsense/").status_code, 404)
+        # Downloads are built from the rows on the phone; the share text is ready-made here.
+        self.assertIn("Late", self.md_client.get("/api/v1/views/late/").json()["text"])
+        self.assertIn("view", self.md_client.get("/api/v1/assistant/briefing/?kind=now").json())
+
+
+class PushTests(BaseCase):
+    """Live push: every new alert goes to the recipient's phones, and only theirs."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []  # (tokens, data)
+
+        def fake_deliver(tokens, data, urgent):
+            self.sent.append((list(tokens), dict(data)))
+            return [(t != "dead-token", "" if t != "dead-token" else "UNREGISTERED") for t in tokens]
+
+        patches = [
+            mock.patch("core.push._deliver", side_effect=fake_deliver),
+            mock.patch("core.push.configured", return_value=True),
+            mock.patch("core.push.SYNC", True),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_phone_registers_and_alert_is_pushed_to_the_right_person_only(self):
+        r = self.pa_client.post("/api/v1/me/push-token/", {"token": "pa-phone-1"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.md_client.post("/api/v1/me/push-token/", {"token": "md-phone-1"}, format="json")
+        with self.captureOnCommitCallbacks(execute=True):
+            services.create_pa_task(self.md, {"title": "Courier the contract", "kind": Kind.TASK, "priority": Priority.HIGH})
+        self.assertEqual(len(self.sent), 1)
+        tokens, data = self.sent[0]
+        self.assertEqual(tokens, ["pa-phone-1"])  # Mansi's phone, not Sir's
+        self.assertEqual((data["type"], data["kind"], data["priority"]), ("alert", "TASK_ASSIGNED", "HIGH"))
+        self.assertIn("Courier the contract", data["spoken"])
+        self.assertNotIn(SECRET, json.dumps(data))
+
+    def test_token_moves_with_the_login_and_dead_tokens_are_dropped(self):
+        from core.models import PushDevice
+        self.md_client.post("/api/v1/me/push-token/", {"token": "shared-phone"}, format="json")
+        self.pa_client.post("/api/v1/me/push-token/", {"token": "shared-phone"}, format="json")  # Mansi signs in on it
+        self.assertEqual(PushDevice.objects.get(token="shared-phone").user, self.pa)
+        self.md_client.post("/api/v1/me/push-token/", {"token": "dead-token"}, format="json")
+        with self.captureOnCommitCallbacks(execute=True):
+            services.create_md_request(self.pa, {"title": "Sign the vendor agreement", "kind": Kind.TASK, "priority": Priority.NORMAL})
+        self.assertEqual(self.sent[-1][0], ["dead-token"])  # Sir's only phone
+        self.assertFalse(PushDevice.objects.filter(token="dead-token").exists())  # FCM said it is gone for good
+        # Signing out forgets the phone, so nothing is spoken on a phone he no longer uses.
+        self.pa_client.post("/api/v1/me/push-token/", {"token": "pa-phone-2"}, format="json")
+        r = self.pa_client.delete("/api/v1/me/push-token/", {"token": "pa-phone-2"}, format="json")
+        self.assertEqual(r.json()["removed"], 1)
+        self.assertEqual(self.md_client.post("/api/v1/me/push-token/", {"token": ""}, format="json").status_code, 422)
+
+    def test_push_is_silent_when_not_configured(self):
+        with mock.patch("core.push.configured", return_value=False):
+            self.md_client.post("/api/v1/me/push-token/", {"token": "md-phone"}, format="json")
+            with self.captureOnCommitCallbacks(execute=True):
+                services.create_md_request(self.pa, {"title": "Book the Pune flights", "kind": Kind.TASK, "priority": Priority.NORMAL})
+            self.assertEqual(self.md_client.get("/api/v1/health/").json()["push"], "off")
+        self.assertEqual(self.sent, [])
+
+
+def _workday(min_offset: int = 1):
+    """A Monday-to-Friday date at least ``min_offset`` days ahead (so office hours and the Sunday off never interfere)."""
+    d = tu.today_local() + timedelta(days=min_offset)
+    while d.weekday() > 4:
+        d += timedelta(days=1)
+    return d
+
+
+class SchedulingTests(BaseCase):
+    """JARVIS looks at the diary before saving: clashes, free slots, full days, routine, reminder leads, briefing."""
+
+    def turn(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _new_private(self, exclude):
+        return PrivateTask.objects.filter(owner=self.md).exclude(id__in=[self.private.id, *exclude]).get()
+
+    def _meeting_cmd(self, day, due_time="16:00", **extra):
+        return _cmd(intent="create_task", title="Meeting with Sharma ji – Pune Franchise", kind="MEETING",
+                    due_date=day.isoformat(), due_time=due_time, reply_language="hi",
+                    spoken_reply="Sir, Sharma ji ke saath meeting 4 baje. Save kar doon?",
+                    spoken_reply_hi="सर, शर्मा जी के साथ मीटिंग चार बजे। सेव कर दूँ?",
+                    done_reply="Ho gaya Sir, 4 baje yaad dila dunga.", **extra)
+
+    def test_clash_offers_the_next_free_slot_and_yes_takes_it(self):
+        day = _workday()
+        call = services.create_private_task(self.md, {"title": "Call Mehta ji – GST Notice", "kind": Kind.CALL,
+                                                      "priority": Priority.NORMAL, "due_date": day, "due_time": time(16, 0),
+                                                      "duration_minutes": 60})
+        r = self.turn(self.md_client, "us din 4 baje Sharma ji ke saath meeting", self._meeting_cmd(day))
+        self.assertEqual(r["action"], "private_task")
+        self.assertIn("Call Mehta ji – GST Notice", r["show"])
+        self.assertIn("5 PM instead?", r["show"])
+        self.assertEqual(r["say_lang"], "hi")
+        self.assertIn("5 बजे रख दूँ?", r["say"])
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 2)  # nothing saved yet
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved")
+        task = self._new_private([call.id])
+        self.assertEqual(tu.to_local(task.due_at).hour, 17)
+        self.assertIn("5 PM", r["show"])  # the AI's "4 baje" done-line is dropped once the time moved
+
+    def test_keeping_the_original_time_is_respected(self):
+        day = _workday()
+        call = services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                      "due_date": day, "due_time": time(16, 0), "duration_minutes": 60})
+        self.turn(self.md_client, "4 baje Sharma meeting", self._meeting_cmd(day))
+        r = self.turn(self.md_client, "nahi 4 hi rakho", _cmd(intent="confirm_pending", keep_original=True))
+        self.assertEqual(r["action"], "saved")
+        self.assertEqual(tu.to_local(self._new_private([call.id]).due_at).hour, 16)
+
+    def test_a_new_time_that_also_clashes_is_questioned_once_more(self):
+        day = _workday()
+        a = services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                   "due_date": day, "due_time": time(16, 0), "duration_minutes": 60})
+        b = services.create_private_task(self.md, {"title": "Call Verma ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                   "due_date": day, "due_time": time(18, 0)})
+        self.turn(self.md_client, "4 baje Sharma meeting", self._meeting_cmd(day))
+        r = self.turn(self.md_client, "6 baje rakho", _cmd(intent="confirm_pending", due_time="18:00"))
+        self.assertEqual(r["action"], "private_task")  # asked again, same card
+        self.assertIn("Call Verma ji", r["show"])
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 3)
+        r = self.turn(self.md_client, "theek hai", _cmd(intent="confirm_pending"))  # takes the slot offered this time
+        self.assertEqual(r["action"], "saved")
+        task = self._new_private([a.id, b.id])
+        self.assertEqual(tu.to_local(task.due_at).hour, 10)  # no room left that day: first slot of the next working day
+        self.assertEqual(tu.to_local(task.due_at).date(), day + timedelta(days=1))
+
+    def test_meeting_without_a_time_is_offered_a_free_slot(self):
+        day = _workday()
+        early = services.create_private_task(self.md, {"title": "Meeting with Bank", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                       "due_date": day, "due_time": time(10, 0)})
+        r = self.turn(self.md_client, "us din Sharma ji ke saath meeting", self._meeting_cmd(day, due_time=""))
+        self.assertIn("free 11 AM", r["show"])
+        self.assertIn("Shall I put it at 11 AM?", r["show"])
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved")
+        self.assertEqual(tu.to_local(self._new_private([early.id]).due_at).hour, 11)
+        # "No time needed": kept exactly as said.
+        self.turn(self.md_client, "parso Sharma meeting", self._meeting_cmd(day + timedelta(days=1), due_time=""))
+        r = self.turn(self.md_client, "bina time ke rakho", _cmd(intent="confirm_pending", keep_original=True))
+        self.assertEqual(r["action"], "saved")
+        latest = PrivateTask.objects.filter(owner=self.md).order_by("-created_at").first()
+        self.assertIsNone(latest.due_at)
+
+    def test_full_day_is_mentioned_but_not_blocked(self):
+        day = _workday()
+        for i in range(7):
+            services.create_private_task(self.md, {"title": f"Errand {i}", "kind": Kind.TASK, "priority": Priority.NORMAL,
+                                                   "due_date": day})
+        draft = self.interpret(self.md_client, "us din 3 baje GST file", _cmd(
+            intent="create_task", title="File GST Return", kind="TASK", due_date=day.isoformat(), due_time="15:00",
+            spoken_reply="Sir, personal task: File GST Return at 3 PM. Shall I save it?"))
+        self.assertEqual(draft["action"], "private_task")
+        self.assertFalse(draft["needs_clarification"])
+        self.assertTrue(draft["schedule"]["load"]["heavy"])
+        self.assertIn("already has 7 items. Shall I save it?", draft["spoken_reply"])
+        self.assertTrue(any("7 items" in w for w in draft["warnings"]))
+
+    def test_routine_is_set_by_voice_and_keeps_time_free(self):
+        r = self.turn(self.md_client, "office 10 se 7", _cmd(intent="set_setting", setting_key="officeHours", setting_value="10-19"))
+        self.assertEqual(r["action"], "setting_applied")
+        prefs = self.md_client.get("/api/v1/me/prefs/").json()
+        self.assertEqual((prefs["officeStart"], prefs["officeEnd"]), ("10:00", "19:00"))
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"officeHours": "9 to 6"}, format="json").json()["officeEnd"], "18:00")
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"weeklyOff": "sat,sun"}, format="json").json()["weeklyOff"], [5, 6])
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"weeklyOff": "none"}, format="json").json()["weeklyOff"], [])
+        self.turn(self.md_client, "main roz 7 se 8 gym jaata hoon",
+                  _cmd(intent="set_setting", setting_key="routineAdd", setting_value="Gym 07:00-08:00 daily"))
+        blocks = self.md_client.get("/api/v1/me/prefs/").json()["routineBlocks"]
+        self.assertEqual((blocks[0]["label"], blocks[0]["start"], blocks[0]["end"], len(blocks[0]["days"])), ("Gym", "07:00", "08:00", 7))
+        blocks = self.md_client.patch("/api/v1/me/prefs/", {"routineAdd": "Market 11:00-13:00 wed"}, format="json").json()["routineBlocks"]
+        self.assertEqual([b["label"] for b in blocks], ["Gym", "Market"])
+        self.assertEqual(blocks[1]["days"], [2])
+        # The gym block counts as busy time.
+        day = _workday()
+        r = self.turn(self.md_client, "us din saade 7 baje Mehta ji ko call", _cmd(
+            intent="create_task", title="Call Mehta ji", kind="CALL", due_date=day.isoformat(), due_time="07:30",
+            spoken_reply="Sir, call Mehta ji at 7:30 AM. Shall I save it?"))
+        self.assertIn("you already have Gym then", r["show"])
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"routineRemove": "gym"}, format="json").json()["routineBlocks"][0]["label"], "Market")
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"routineRemove": "yoga"}, format="json").status_code, 422)
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"weeklyOff": "funday"}, format="json").status_code, 422)
+        # The PA's routine is her own.
+        self.assertEqual(self.pa_client.get("/api/v1/me/prefs/").json()["officeEnd"], "19:00")
+
+    def test_reminder_lead_times_come_from_settings(self):
+        day = _workday()
+        meeting = services.create_private_task(self.md, {"title": "Board Meeting", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                         "due_date": day, "due_time": time(16, 0)})
+        fixed = services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                       "due_date": day, "due_time": time(12, 0), "remind_before_minutes": 45})
+        dated = services.create_private_task(self.md, {"title": "Pay electricity bill", "kind": Kind.PAYMENT,
+                                                       "priority": Priority.NORMAL, "due_date": day})
+        self.assertIsNone(meeting.remind_before_minutes)  # not frozen at creation: the setting decides
+
+        def fire(task_id, label):
+            rems = self.md_client.get("/api/v1/reminders/?hours=168").json()["reminders"]
+            item = next(r for r in rems if str(task_id) in r["key"] and r["label"] == label)
+            return tu.to_local(datetime.fromisoformat(item["fire_at"])).strftime("%H:%M")
+
+        self.assertEqual(fire(meeting.id, "before"), "15:45")
+        self.assertEqual(fire(fixed.id, "before"), "11:15")
+        self.assertEqual(fire(dated.id, "day"), "09:30")
+        self.turn(self.md_client, "meeting reminder 30 minute pehle do",
+                  _cmd(intent="set_setting", setting_key="remindBeforeMeeting", setting_value="30"))
+        self.md_client.patch("/api/v1/me/prefs/", {"dayReminderTime": "8 am"}, format="json")
+        self.assertEqual(fire(meeting.id, "before"), "15:30")   # every meeting follows the new setting
+        self.assertEqual(fire(fixed.id, "before"), "11:15")     # an explicit lead stays as asked
+        self.assertEqual(fire(dated.id, "day"), "08:00")
+
+    def test_morning_briefing_is_raised_once_without_naming_private_items(self):
+        from core import followups
+        Alert.objects.all().delete()
+        self.md_client.patch("/api/v1/me/prefs/", {"briefingTime": "08:00"}, format="json")
+        self.pa_client.patch("/api/v1/me/prefs/", {"briefingEnabled": "off"}, format="json")
+        at = tu.now_local().replace(hour=8, minute=10, second=0, microsecond=0)
+        self.assertEqual(followups.run(now=at.replace(hour=7, minute=50)), 0)  # not yet
+        raised = followups.run(now=at)
+        self.assertEqual(raised, 1)
+        alert = Alert.objects.get(recipient=self.md, ref_id__startswith="morning:")
+        self.assertIn("Good morning, Sir", alert.spoken_text)
+        self.assertIn("a personal item", alert.spoken_text)  # today's private meeting is counted, not named
+        self.assertNotIn(SECRET, alert.spoken_text + alert.body + alert.title)
+        self.assertFalse(Alert.objects.filter(recipient=self.pa, ref_id__startswith="morning:").exists())
+        self.assertEqual(followups.run(now=at + timedelta(minutes=30)), 0)  # once a day
+        self.assertEqual(followups.run(now=at.replace(hour=13)), 0)         # too late to be a morning briefing
+        self.assertEqual(self.md_client.get("/api/v1/alerts/").json()["results"][0]["spoken_text"], alert.spoken_text)
+
+    def test_pa_hears_only_that_sir_is_busy(self):
+        day = _workday()
+        services.create_private_task(self.md, {"title": SECRET + " hearing", "kind": Kind.MEETING, "priority": Priority.URGENT,
+                                               "due_date": day, "due_time": time(16, 0)})
+        r = self.turn(self.pa_client, "Sir se us din 4 baje meeting chahiye", _cmd(
+            intent="request_for_md", title="Meeting with Sir – Vendor Review", kind="MEETING",
+            due_date=day.isoformat(), due_time="16:00", spoken_reply="Priya, request to Sir: meeting at 4 PM. Send it?"))
+        self.assertEqual(r["action"], "md_request")
+        self.assertIn("Sir is busy then", r["show"])
+        self.assertIn("5 PM instead?", r["show"])
+        self.assertNotIn(SECRET, json.dumps(r))
+        r = self.turn(self.pa_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved")
+        req = TaskRequest.objects.filter(requested_by=self.pa).latest("created_at")
+        self.assertEqual(req.payload["due_time"], "17:00")
+        self.assert_no_secret(self.pa_client.get("/api/v1/alerts/"))
+
+    def test_sir_is_told_when_mansi_is_already_busy(self):
+        day = _workday()
+        services.create_pa_task(self.md, {"title": "Prepare vendor file", "kind": Kind.TASK, "priority": Priority.NORMAL,
+                                          "due_date": day, "due_time": time(15, 0), "duration_minutes": 60})
+        r = self.turn(self.md_client, "Mansi ko bolo us din 3 baje courier bhej de", _cmd(
+            intent="assign_to_pa", title="Courier the Contract", kind="TASK", due_date=day.isoformat(), due_time="15:00",
+            spoken_reply="Sir, task for Priya: courier the contract at 3 PM. Shall I save it?"))
+        self.assertEqual(r["action"], "pa_task")
+        self.assertIn("Priya already has Prepare vendor file then", r["show"])
+
+    def test_app_flow_returns_the_offered_time_as_overrides(self):
+        day = _workday()
+        services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                               "due_date": day, "due_time": time(16, 0), "duration_minutes": 60})
+        draft = self.interpret(self.md_client, "4 baje Sharma meeting", self._meeting_cmd(day))
+        self.assertEqual(draft["schedule"]["suggested"]["due_time"], "17:00")
+        self.assertTrue(draft["schedule"]["question"])
+        yes = self.interpret(self.md_client, "haan", _cmd(intent="confirm_pending"), previous="4 baje Sharma meeting",
+                             awaiting="Personal task: Meeting with Sharma ji", pending=draft)
+        self.assertEqual(yes["action"], "confirm_pending")
+        self.assertEqual(yes["overrides"], {"due_date": day.isoformat(), "due_time": "17:00"})
+        keep = self.interpret(self.md_client, "4 hi rakho", _cmd(intent="confirm_pending", keep_original=True),
+                              previous="4 baje Sharma meeting", awaiting="Personal task: Meeting with Sharma ji", pending=draft)
+        self.assertEqual(keep["overrides"], {})
+        # The model sees what JARVIS asked and the two times, so it can read the answer by meaning.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")) as fake:
+            self.md_client.post("/api/v1/assistant/interpret/", {"text": "haan", "awaiting": "x", "pending": draft}, format="json")
+        waiting = fake.call_args.args[1]["awaiting_confirmation"]
+        self.assertEqual(waiting["offered_time"]["due_time"], "17:00")
+        self.assertEqual(waiting["original_time"]["due_time"], "16:00")
+        self.assertIn("instead?", waiting["jarvis_asked"])

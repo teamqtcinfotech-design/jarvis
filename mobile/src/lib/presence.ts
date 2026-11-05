@@ -8,6 +8,8 @@ export interface PresenceInputs {
   awayAfterMinutes: number;
   meetingMode: boolean;
   busyWindows: { start: string; end: string }[];
+  /** He switched meeting mode off during a diary meeting: the diary does not count as "in a meeting" until this time. */
+  busyOverrideUntil?: number;
   quietHoursEnabled: boolean;
   quietStartHour: number;
   quietEndHour: number;
@@ -98,9 +100,10 @@ export function usePresence(inputs: PresenceInputs) {
   }, [markActive, takeSnapshot]);
 
   const now = snap.now;
-  const inMeeting =
-    inputs.meetingMode ||
-    (now > 0 && inputs.busyWindows.some((w) => new Date(w.start).getTime() <= now && now < new Date(w.end).getTime()));
+  const diaryMeeting =
+    now > 0 && now >= (inputs.busyOverrideUntil ?? 0) &&
+    inputs.busyWindows.some((w) => new Date(w.start).getTime() <= now && now < new Date(w.end).getTime());
+  const inMeeting = inputs.meetingMode || diaryMeeting;
   const away = snap.idleMs > inputs.awayAfterMinutes * 60_000;
   const quiet = now > 0 && inputs.quietHoursEnabled && inQuietHours(new Date(now), inputs.quietStartHour, inputs.quietEndHour);
 
@@ -115,6 +118,8 @@ export function usePresence(inputs: PresenceInputs) {
     state,
     faceDown: snap.faceDown,
     inMeeting,
+    /** "In a meeting" because of the diary (not the switch). */
+    diaryMeeting,
     sensorAvailable,
     zValue: snap.z,
     idleSeconds: Math.round(snap.idleMs / 1000),

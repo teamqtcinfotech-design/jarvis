@@ -1,3 +1,4 @@
+import { Poppins_400Regular, Poppins_500Medium, Poppins_600SemiBold, Poppins_700Bold, useFonts } from '@expo-google-fonts/poppins';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React from 'react';
@@ -37,6 +38,9 @@ function Shell() {
 }
 
 export default function RootLayout() {
+  // Poppins for everything; the first screen waits the few hundred ms the fonts take, so nothing flashes.
+  const [fontsLoaded, fontError] = useFonts({ Poppins_400Regular, Poppins_500Medium, Poppins_600SemiBold, Poppins_700Bold });
+  if (!fontsLoaded && !fontError) return null;
   return (
     <SafeAreaProvider>
       <SessionProvider>

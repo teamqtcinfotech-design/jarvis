@@ -3,7 +3,7 @@ import { StyleSheet, TextInput, View } from 'react-native';
 
 import { api } from '@/lib/api';
 import { TASK_DRAFTS, draftHeading } from '@/lib/drafts';
-import { addDays, dayLabel, isoDate } from '@/lib/format';
+import { addDays, dayLabel, isoDate, timeLabel } from '@/lib/format';
 import { colors, kindLabel, priorityColor, priorityLabel, radius, shadow } from '@/lib/theme';
 import type { CategoryOption, Draft, DraftAction, Kind, Priority, StaffOption } from '@/lib/types';
 
@@ -67,6 +67,15 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
   const saveLabel = draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}` : SAVE_LABEL[draft.action] ?? 'Confirm';
   const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text : !!(draft.target || draft.targets?.length))
     && (draft.action !== 'delegation' || !!draft.staff);
+
+  // JARVIS found a clash or a free slot and offered a time: one tap takes it (or he can just say "haan").
+  const offered = draft.schedule?.suggested ?? null;
+  const takeOffered = () => {
+    if (!offered) return;
+    const cleared = draft.schedule ? { ...draft.schedule, suggested: null, question: '', question_hi: '' } : null;
+    if (draft.action === 'change_task') onChange({ changes: { ...draft.changes, due_date: offered.due_date, due_time: offered.due_time }, schedule: cleared });
+    else onChange({ due_date: offered.due_date, due_time: offered.due_time, schedule: cleared });
+  };
 
   return (
     <View style={s.card}>
@@ -135,6 +144,16 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
       {draft.warnings?.length ? (
         <View style={s.warn}>
           {draft.warnings.map((w) => <Txt key={w} variant="small" style={{ color: colors.warn }}>{w}</Txt>)}
+        </View>
+      ) : null}
+
+      {offered && !waitingForAnswer ? (
+        <View style={[s.rowWrap, { marginTop: 10, alignItems: 'center' }]}>
+          <Chip
+            label={`Free ${dayLabel(offered.due_date) === 'Today' ? '' : `${dayLabel(offered.due_date).toLowerCase()} `}at ${timeLabel(offered.due_time)} — use it`}
+            icon="time-outline"
+            onPress={takeOffered}
+          />
         </View>
       ) : null}
 

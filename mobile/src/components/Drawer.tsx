@@ -27,10 +27,12 @@ interface Props {
   meetingMode: boolean;
   onMeetingMode: (on: boolean) => void;
   presence: string;
+  /** "In a meeting" comes from the diary, not the switch: switching off overrides it until the meeting ends. */
+  meetingFromDiary?: boolean;
 }
 
 /** Slide-in side menu: the task lists live here, one tap away from the orb. */
-export function Drawer({ open, onClose, title, subtitle, items, onSelect, meetingMode, onMeetingMode, presence }: Props) {
+export function Drawer({ open, onClose, title, subtitle, items, onSelect, meetingMode, onMeetingMode, presence, meetingFromDiary }: Props) {
   const insets = useSafeAreaInsets();
   const [x] = useState(() => new Animated.Value(-WIDTH));
   const [visible, setVisible] = useState(open);
@@ -61,7 +63,11 @@ export function Drawer({ open, onClose, title, subtitle, items, onSelect, meetin
         <View style={s.meeting}>
           <View style={{ flex: 1 }}>
             <Txt variant="heading" style={{ fontSize: 14 }}>Meeting mode</Txt>
-            <Txt variant="caption">{meetingMode ? 'JARVIS stays silent and vibrates only' : presence}</Txt>
+            <Txt variant="caption">
+              {meetingMode
+                ? meetingFromDiary ? 'From your diary · silent until it ends. Switch off to talk now.' : 'JARVIS stays silent and vibrates only'
+                : presence}
+            </Txt>
           </View>
           <Switch value={meetingMode} onValueChange={onMeetingMode} trackColor={{ true: colors.gold }} />
         </View>

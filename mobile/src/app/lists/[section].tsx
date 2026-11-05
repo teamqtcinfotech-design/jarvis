@@ -8,6 +8,7 @@ import { TaskRow } from '@/components/TaskRow';
 import { TaskSheet } from '@/components/TaskSheet';
 import { Empty, IconButton, Tag, Txt } from '@/components/ui';
 import { relativeAgo } from '@/lib/format';
+import { useLayout } from '@/lib/layout';
 import { useSession } from '@/lib/session';
 import { colors } from '@/lib/theme';
 import type { Dashboard, TaskItem } from '@/lib/types';
@@ -38,6 +39,7 @@ export default function ListScreen() {
   const { user } = useSession();
   const router = useRouter();
   const { data, error, updatedAt, reload } = useDashboard();
+  const { isTablet } = useLayout();
   const [openTask, setOpenTask] = useState<TaskItem | null>(null);
   if (!user) return <Redirect href="/login" />;
   const isMD = user.role === 'MD';
@@ -78,7 +80,7 @@ export default function ListScreen() {
         <Txt variant="title" style={{ flex: 1, textAlign: 'center', marginRight: 40 }}>{title}</Txt>
       </View>
       <ScrollView
-        contentContainerStyle={{ padding: 20, paddingBottom: 60 }}
+        contentContainerStyle={[{ padding: 20, paddingBottom: 60 }, isTablet && { maxWidth: 820, width: '100%', alignSelf: 'center' }]}
         refreshControl={<RefreshControl refreshing={false} onRefresh={() => reload(true)} tintColor={colors.gold} />}
       >
         {body}

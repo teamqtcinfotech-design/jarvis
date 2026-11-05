@@ -1,5 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import { api } from './api';
@@ -24,6 +24,26 @@ export interface Prefs {
   wakeWordEnabled: boolean;
   /** Meeting mode: JARVIS stays silent and vibrates only. */
   meetingMode: boolean;
+  /** Work routine (server-side scheduling uses it): office hours, weekly off (Monday = 0), fixed blocks. */
+  officeStart: string;
+  officeEnd: string;
+  weeklyOff: number[];
+  routineBlocks: RoutineBlock[];
+  /** How early reminders speak, by kind, when the task itself did not say. */
+  remindBeforeMeeting: number;
+  remindBeforeCall: number;
+  remindBeforeTask: number;
+  dayReminderTime: string;
+  /** The spoken morning briefing, raised by the server at this time. */
+  briefingEnabled: boolean;
+  briefingTime: string;
+}
+
+export interface RoutineBlock {
+  label: string;
+  start: string;
+  end: string;
+  days: number[];
 }
 
 const DEFAULTS: Prefs = {
@@ -37,6 +57,16 @@ const DEFAULTS: Prefs = {
   quietEndHour: 7,
   wakeWordEnabled: false,
   meetingMode: false,
+  officeStart: '10:00',
+  officeEnd: '19:00',
+  weeklyOff: [6],
+  routineBlocks: [],
+  remindBeforeMeeting: 15,
+  remindBeforeCall: 5,
+  remindBeforeTask: 30,
+  dayReminderTime: '09:30',
+  briefingEnabled: true,
+  briefingTime: '09:00',
 };
 
 const KEY = 'jarvis.prefs';
@@ -64,6 +94,9 @@ function clean(data: Partial<Prefs> | null | undefined): Partial<Prefs> {
 export function PrefsProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const [prefs, setPrefs] = useState<Prefs>(DEFAULTS);
+  // When the user changed something here, a server pull that was already in flight must not put the old value
+  // back (that is how "meeting mode" used to switch itself on again).
+  const lastLocalChange = useRef(0);
 
   useEffect(() => {
     SecureStore.getItemAsync(KEY).then((raw) => {
@@ -90,23 +123,34 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const update = useCallback((patch: Partial<Prefs>) => {
+    lastLocalChange.current = Date.now();
     setPrefs((prev) => {
       const next = { ...prev, ...patch };
       SecureStore.setItemAsync(KEY, JSON.stringify(next)).catch(() => undefined);
       if (patch.voiceAccent) setVoiceAccent(patch.voiceAccent);
       return next;
     });
-    api('/me/prefs/', { method: 'PATCH', body: patch }).catch(() => undefined); // offline: local copy still applies
-  }, []);
+    const sentAt = Date.now();
+    api<Partial<Prefs>>('/me/prefs/', { method: 'PATCH', body: patch })
+      .then((r) => {
+        if (sentAt >= lastLocalChange.current) applyServerPrefs(r.data); // the server's copy after our change
+      })
+      .catch(() => undefined); // offline: local copy still applies
+  }, [applyServerPrefs]);
 
   // Keep in step with the server: on sign-in, whenever the app comes to the front, and every so often.
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
-    const pull = () =>
-      api<Partial<Prefs>>('/me/prefs/')
-        .then((r) => !cancelled && applyServerPrefs(r.data))
+    const pull = () => {
+      const startedAt = Date.now();
+      return api<Partial<Prefs>>('/me/prefs/')
+        .then((r) => {
+          if (cancelled || startedAt < lastLocalChange.current) return; // older than a change made here
+          applyServerPrefs(r.data);
+        })
         .catch(() => undefined);
+    };
     const kick = setTimeout(pull, 300);
     const timer = setInterval(pull, SYNC_MS);
     const sub = AppState.addEventListener('change', (s) => s === 'active' && pull());

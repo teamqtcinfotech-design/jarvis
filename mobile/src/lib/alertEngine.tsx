@@ -22,6 +22,7 @@ import { PresenceState, usePresence } from './presence';
 import { useSession } from './session';
 import { say } from './speech';
 import type { Priority, Reminder, ServerAlert } from './types';
+import { onPush } from './wake';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => {
@@ -226,13 +227,39 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const address = user?.role === 'MD' ? 'Sir' : user?.name ?? '';
 
   // Meeting mode is a shared setting (JARVIS can switch it by voice, even from the background listener).
+  // A meeting in his diary also counts as "in a meeting"; switching the mode OFF during one (by hand or by
+  // voice) overrides the diary until that meeting ends, otherwise the switch would seem to do nothing.
   const meetingMode = prefs.meetingMode;
-  const setMeetingMode = useCallback((on: boolean) => updatePrefs({ meetingMode: on }), [updatePrefs]);
   const [busyWindows, setBusyWindows] = useState<{ start: string; end: string }[]>([]);
+  const [busyOverrideUntil, setBusyOverrideUntil] = useState(0);
+  const busyWindowsRef = useRef(busyWindows);
+  useEffect(() => {
+    busyWindowsRef.current = busyWindows;
+  }, [busyWindows]);
+  const overrideDiaryNow = useCallback(() => {
+    const now = Date.now();
+    const current = busyWindowsRef.current.find((w) => Date.parse(w.start) <= now && now < Date.parse(w.end));
+    setBusyOverrideUntil(current ? Date.parse(current.end) : 0);
+  }, []);
+  const setMeetingMode = useCallback(
+    (on: boolean) => {
+      updatePrefs({ meetingMode: on });
+      if (on) setBusyOverrideUntil(0);
+      else overrideDiaryNow();
+    },
+    [updatePrefs, overrideDiaryNow],
+  );
+  // Switched off by voice ("meeting mode band karo") or on another device: same override.
+  const prevMeetingMode = useRef(meetingMode);
+  useEffect(() => {
+    if (prevMeetingMode.current && !meetingMode) overrideDiaryNow();
+    prevMeetingMode.current = meetingMode;
+  }, [meetingMode, overrideDiaryNow]);
   const presence = usePresence({
     awayAfterMinutes: prefs.awayAfterMinutes,
     meetingMode,
     busyWindows,
+    busyOverrideUntil,
     quietHoursEnabled: prefs.quietHoursEnabled,
     quietStartHour: prefs.quietStartHour,
     quietEndHour: prefs.quietEndHour,
@@ -492,12 +519,14 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     const unsub = dataChanged.subscribe(() => {
       poll();
     });
+    const offPush = onPush(() => poll()); // a live push while the app is open: fetch it now, not in 20 s
     return () => {
       clearTimeout(kick);
       clearInterval(pollTimer);
       clearInterval(tickTimer);
       sub.remove();
       unsub();
+      offPush();
     };
   }, [poll, tick]);
 

@@ -10,6 +10,7 @@ urlpatterns = [
     path("auth/device-token/", views.DeviceTokenView.as_view()),
     path("me/", views.MeView.as_view()),
     path("me/prefs/", views.MePrefsView.as_view()),
+    path("me/push-token/", views.PushTokenView.as_view()),
     path("health/", views.HealthView.as_view()),
     path("today/", views.TodayView.as_view()),
     path("busy/", views.BusyView.as_view()),
@@ -41,6 +42,7 @@ urlpatterns = [
     path("assistant/turn/", views.ConversationTurnView.as_view()),
     path("assistant/briefing/", views.BriefingView.as_view()),
     path("assistant/usage/", views.AiUsageView.as_view()),
+    path("views/<str:kind>/", views.DataViewView.as_view()),
     # Things the user asked JARVIS to remember (owner-only)
     path("memories/", views.MemoryListView.as_view()),
     path("memories/<uuid:memory_id>/", views.MemoryDetailView.as_view()),

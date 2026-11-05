@@ -14,9 +14,10 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from . import ai_brain, scheduling, services
 from . import timeutils as tu
 from .models import Alert, Priority, SharedTask, Status, TaskRequest, User
-from .services import delegated_qs, get_md, get_pa, md_private_qs, pa_tasks_qs, shared_md_tasks_qs
+from .services import delegated_qs, get_md, get_pa, get_prefs, md_private_qs, pa_tasks_qs, shared_md_tasks_qs
 
 log = logging.getLogger("jarvis.followups")
 
@@ -26,6 +27,7 @@ PA_NOT_STARTED = timedelta(days=1)
 REPEAT_AFTER = timedelta(days=2)
 ACTIVE_HOURS = range(9, 20)  # 9:00 .. 19:59 local
 DIGEST_AT = (18, 30)
+BRIEFING_WINDOW = timedelta(hours=4)  # a briefing missed (worker down) is still given within this long, then dropped
 OPEN = [Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED]
 
 
@@ -36,8 +38,8 @@ def _already(key: str) -> bool:
 def _raise(recipient: User, key: str, title: str, body: str, spoken: str, priority: str = Priority.NORMAL) -> bool:
     if _already(key + f"@{recipient.id}"):
         return False
-    Alert.objects.create(recipient=recipient, kind=Alert.Kind.INFO, priority=priority, title=title[:200], body=body[:400],
-                         spoken_text=spoken[:400], ref_type="followup", ref_id=(key + f"@{recipient.id}")[:64])
+    Alert.objects.create(recipient=recipient, kind=Alert.Kind.INFO, priority=priority, title=title[:200], body=body[:2000],
+                         spoken_text=spoken[:2000], ref_type="followup", ref_id=(key + f"@{recipient.id}")[:64])
     return True
 
 
@@ -46,17 +48,53 @@ def _days(delta: timedelta) -> str:
     return f"{d} day{'s' if d != 1 else ''}"
 
 
+def morning_briefings(now=None) -> int:
+    """At each person's chosen time: one spoken briefing of the day, raised as an alert.
+
+    Private items are counted and timed but never named in the stored text (an alert row is not encrypted and may
+    be spoken from a locked phone); he can ask JARVIS for the details.
+    """
+    now = now or timezone.now()
+    local = tu.to_local(now)
+    raised = 0
+    for user in [u for u in (get_md(), get_pa()) if u]:
+        prefs = get_prefs(user)
+        if not prefs.get("briefingEnabled", True):
+            continue
+        hhmm = prefs.get("briefingTime") or "09:00"
+        try:
+            hour, minute = int(hhmm[:2]), int(hhmm[3:5])
+        except ValueError:
+            hour, minute = 9, 0
+        at = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if not (at <= local < at + BRIEFING_WINDOW):
+            continue
+        key = f"morning:{local.date().isoformat()}"
+        if _already(key + f"@{user.id}"):
+            continue
+        facts, fallback = services.briefing_facts(user, "morning", conceal_private=True)
+        if scheduling.is_off_day(prefs, local.date()) and not facts["today"] and not facts["overdue"]:
+            continue  # a quiet day off: nothing to say
+        text, _engine = ai_brain.briefing(facts, fallback, user=user)
+        raised += _raise(user, key, "Good morning, here is your day", text, text)
+    return raised
+
+
 def run(now=None) -> int:
     """One pass. Safe to call every few minutes; it only raises what is due and not yet raised."""
     now = now or timezone.now()
     local = tu.to_local(now)
+    raised = 0
+    try:
+        raised += morning_briefings(now)  # has its own clock: the briefing may be set before ACTIVE_HOURS
+    except Exception:  # noqa: BLE001 — the other nudges must still run
+        log.exception("morning briefing failed")
     if local.hour not in ACTIVE_HOURS:
-        return 0
+        return raised
     md, pa = get_md(), get_pa()
     if not md:
-        return 0
+        return raised
     pa_name = pa.spoken_name if pa else "your PA"
-    raised = 0
 
     # 1) Staff tasks with no update for 2 days
     for task in delegated_qs().filter(status__in=OPEN):

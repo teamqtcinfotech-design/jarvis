@@ -113,9 +113,21 @@ class InterpretSerializer(serializers.Serializer):
     # A draft JARVIS has just read back and is waiting to have confirmed (e.g. "Personal task: Call Mehta, tomorrow 11 AM").
     awaiting = serializers.CharField(max_length=400, required=False, allow_blank=True, default="")
     choices = ChoicesSerializer(required=False, allow_null=True, default=None)
+    # The waiting card itself, so a "yes" can take the time JARVIS offered, or a new time can be checked again.
+    pending = serializers.JSONField(required=False, allow_null=True, default=None)
 
     def validate_history(self, value):
         return value[-8:]
+
+    def validate_pending(self, value):
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("pending must be an object.")
+        import json
+        if len(json.dumps(value, default=str)) > 16000:
+            raise serializers.ValidationError("pending is too large.")
+        return value
 
 
 class TurnSerializer(serializers.Serializer):

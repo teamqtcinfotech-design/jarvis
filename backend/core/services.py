@@ -81,14 +81,23 @@ def get_pa() -> User | None:
 
 
 # --------------------------------------------------------------------------- schedule helpers
-def default_remind_before(kind: str, priority: str) -> int:
+def default_remind_before(kind: str, priority: str, prefs: dict | None = None) -> int:
+    """Lead time for a reminder when the user did not ask for one: from the reader's settings, by kind."""
+    prefs = prefs or pref_defaults()
     if kind == Kind.MEETING:
-        return 15
+        return int(prefs.get("remindBeforeMeeting", 15))
     if kind == Kind.CALL:
-        return 10
-    if priority == Priority.URGENT:
-        return 15
-    return 30
+        return int(prefs.get("remindBeforeCall", 5))
+    lead = int(prefs.get("remindBeforeTask", 30))
+    return min(lead, 15) if priority == Priority.URGENT else lead
+
+
+def day_reminder_time(prefs: dict | None = None) -> time:
+    raw = (prefs or {}).get("dayReminderTime") or "09:30"
+    try:
+        return time.fromisoformat(raw)
+    except ValueError:
+        return DATE_ONLY_REMINDER_TIME
 
 
 def apply_schedule(task, data: dict, *, creating: bool):
@@ -125,10 +134,10 @@ def apply_schedule(task, data: dict, *, creating: bool):
         task.scheduled_start = None
         task.scheduled_end = None
 
-    if data.get("remind_before_minutes") is not None and data.get("remind_before_minutes") != 0:
+    # Only an explicit lead ("15 minute pehle yaad dilana") is stored. Otherwise it stays empty and the reader's
+    # own setting for that kind applies at reminder time, so changing the setting by voice covers every task.
+    if data.get("remind_before_minutes"):
         task.remind_before_minutes = data["remind_before_minutes"]
-    elif creating or task.remind_before_minutes is None:
-        task.remind_before_minutes = default_remind_before(kind, priority)
 
 
 def is_overdue(task, now: datetime | None = None) -> bool:
@@ -946,13 +955,21 @@ def ai_context(user: User, include_private: bool = True) -> dict:
     ctx["memories"] = [m.text for m in Memory.objects.filter(owner=user)[:MEMORY_LIMIT]]
     # JARVIS settings the speaker may change by voice.
     current = get_prefs(user)
-    ctx["settings"] = {
-        k: {"now": current[k], "allowed": v["values"] if v["type"] == "enum" else ("on/off" if v["type"] == "bool" else f"{v['min']}-{v['max']}"),
-            "means": v["say"]}
-        for k, v in PREF_SCHEMA.items()
-    }
+    def allowed(v):
+        return {"enum": v.get("values"), "bool": "on/off", "time": "HH:MM (24h)",
+                "days": "day names: sunday / sat,sun / weekdays / none",
+                "blocks": "set with routineAdd / routineRemove"}.get(v["type"]) or f"{v['min']}-{v['max']}"
+    ctx["settings"] = {k: {"now": current[k], "allowed": allowed(v), "means": v["say"]} for k, v in PREF_SCHEMA.items()}
     ctx["settings"]["quietHours"] = {"now": f"{current['quietStartHour']}-{current['quietEndHour']}", "allowed": "START-END in 24h",
                                      "means": "quiet hours start and end together"}
+    ctx["settings"]["officeHours"] = {"now": f"{current['officeStart']}-{current['officeEnd']}", "allowed": "START-END in 24h, e.g. 10-19",
+                                      "means": "office hours start and end together"}
+    ctx["settings"]["routineAdd"] = {"now": "", "allowed": "Label HH:MM-HH:MM [daily | weekdays | mon,wed | mon-sat]",
+                                     "means": "add a fixed block to the routine (gym, lunch, market) that JARVIS keeps free"}
+    ctx["settings"]["routineRemove"] = {"now": "", "allowed": "the block's label", "means": "remove a fixed block from the routine"}
+    # The routine in plain words, so "office kab tak hai" / "Sunday off hai?" can be answered.
+    from . import scheduling  # local import: scheduling reads prefs from here
+    ctx["routine"] = scheduling.routine_summary(current)
     return ctx
 
 
@@ -974,9 +991,128 @@ PREF_SCHEMA = {
     "quietEndHour": {"type": "int", "min": 0, "max": 23, "default": 7, "say": "quiet hours end"},
     "wakeWordEnabled": {"type": "bool", "default": False, "say": "Hey JARVIS listening"},
     "meetingMode": {"type": "bool", "default": False, "say": "meeting mode"},
+    # Work routine: used to find free slots, spot clashes and judge how full a day is.
+    "officeStart": {"type": "time", "default": "10:00", "say": "office start"},
+    "officeEnd": {"type": "time", "default": "19:00", "say": "office end"},
+    "weeklyOff": {"type": "days", "default": [6], "say": "weekly off"},
+    "routineBlocks": {"type": "blocks", "default": [], "say": "fixed routine"},
+    # Reminders: how early JARVIS speaks, by kind, when the task itself did not say.
+    "remindBeforeMeeting": {"type": "int", "min": 0, "max": 240, "default": 15, "say": "meeting reminder (minutes before)"},
+    "remindBeforeCall": {"type": "int", "min": 0, "max": 240, "default": 5, "say": "call reminder (minutes before)"},
+    "remindBeforeTask": {"type": "int", "min": 0, "max": 1440, "default": 30, "say": "task reminder (minutes before)"},
+    "dayReminderTime": {"type": "time", "default": "09:30", "say": "time for reminders of date-only items"},
+    # Morning briefing, raised by the server and spoken when he picks up the phone.
+    "briefingEnabled": {"type": "bool", "default": True, "say": "morning briefing"},
+    "briefingTime": {"type": "time", "default": "09:00", "say": "morning briefing time"},
 }
 _TRUE_WORDS = {"on", "true", "yes", "1", "haan", "han", "ha", "enable", "enabled", "chalu", "chaalu", "start"}
 _FALSE_WORDS = {"off", "false", "no", "0", "nahi", "nahin", "disable", "disabled", "band", "stop"}
+_DAY_WORDS = {
+    0: {"mon", "monday", "somvaar", "somvar", "somwar", "सोमवार"},
+    1: {"tue", "tues", "tuesday", "mangalvaar", "mangalvar", "mangalwar", "मंगलवार"},
+    2: {"wed", "wednesday", "budhvaar", "budhvar", "budhwar", "बुधवार"},
+    3: {"thu", "thur", "thurs", "thursday", "guruvaar", "guruvar", "guruwar", "गुरुवार"},
+    4: {"fri", "friday", "shukravaar", "shukravar", "shukrawar", "शुक्रवार"},
+    5: {"sat", "saturday", "shanivaar", "shanivar", "shaniwar", "शनिवार"},
+    6: {"sun", "sunday", "ravivaar", "ravivar", "raviwar", "itvaar", "itwar", "रविवार", "इतवार"},
+}
+_NO_DAYS = {"none", "no", "nahi", "nahin", "koi nahi", "off", "nothing", "0", "-", ""}
+_ALL_DAYS = {"daily", "roz", "everyday", "every day", "all", "sab", "har din", "hardin"}
+_WEEKDAYS_WORDS = {"weekdays", "weekday", "mon-fri", "monday to friday"}
+_TIME_TOKEN = re.compile(r"(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.|baje|बजे)?", re.IGNORECASE)
+
+
+def _parse_time_text(raw) -> str:
+    """'9', '09:00', '9.30', '7 pm', '19:30' -> 'HH:MM'. Raises ServiceError when it is not a time."""
+    if isinstance(raw, time):
+        return raw.strftime("%H:%M")
+    s = str(raw or "").strip().lower()
+    m = _TIME_TOKEN.search(s)
+    if not m:
+        raise ServiceError("invalid", "I need a time like 9:30 or 18:00.", 422)
+    hour, minute = int(m.group(1)), int(m.group(2) or 0)
+    suffix = (m.group(3) or "").replace(".", "")
+    if suffix == "pm" and hour < 12:
+        hour += 12
+    if suffix == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ServiceError("invalid", "I need a time like 9:30 or 18:00.", 422)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _parse_days(raw) -> list[int]:
+    """Weekday numbers (Monday = 0) from a list or words such as 'sunday', 'sat,sun', 'weekdays', 'none'."""
+    if isinstance(raw, (list, tuple)):
+        out = set()
+        for item in raw:
+            if isinstance(item, bool):
+                raise ServiceError("invalid", "Days must be names or numbers.", 422)
+            if isinstance(item, int) and 0 <= item <= 6:
+                out.add(item)
+            else:
+                out.update(_parse_days(str(item)))
+        return sorted(out)
+    s = " ".join(str(raw or "").lower().replace("&", " and ").split())
+    if s in _NO_DAYS:
+        return []
+    if s in _ALL_DAYS:
+        return list(range(7))
+    if s in _WEEKDAYS_WORDS:
+        return [0, 1, 2, 3, 4]
+    out = set()
+    # "mon-sat" style ranges
+    for a, b in re.findall(r"([a-zऀ-ॿ]+)\s*(?:-|to|se|से)\s*([a-zऀ-ॿ]+)", s):
+        da, db = _day_index(a), _day_index(b)
+        if da is not None and db is not None:
+            i = da
+            while True:
+                out.add(i)
+                if i == db:
+                    break
+                i = (i + 1) % 7
+            s = s.replace(f"{a}", " ").replace(f"{b}", " ")
+    for word in re.split(r"[,\s/]+|\band\b|\baur\b|\bऔर\b", s):
+        word = word.strip(" .")
+        if not word or word in {"and", "aur", "to", "se", "-", "off", "ko", "chhutti", "holiday"}:
+            continue
+        idx = _day_index(word)
+        if idx is None:
+            raise ServiceError("invalid", f"I don't know the day '{word}'. Say day names like Sunday or Saturday.", 422)
+        out.add(idx)
+    return sorted(out)
+
+
+def _day_index(word: str) -> int | None:
+    w = word.strip().lower()
+    for idx, names in _DAY_WORDS.items():
+        if w in names:
+            return idx
+    return None
+
+
+def _parse_block(raw) -> dict:
+    """'Gym 07:00-08:00', 'gym 7 to 8 daily', 'Lunch 13:00-13:45 weekdays' or a dict -> a routine block."""
+    if isinstance(raw, dict):
+        label = str(raw.get("label") or "").strip()[:40]
+        start, end = _parse_time_text(raw.get("start")), _parse_time_text(raw.get("end"))
+        days = _parse_days(raw.get("days")) if raw.get("days") not in (None, "") else list(range(7))
+    else:
+        s = str(raw or "").strip()
+        times = list(_TIME_TOKEN.finditer(s))
+        if len(times) < 2:
+            raise ServiceError("invalid", "A routine block needs a name, a start and an end, like 'Gym 7:00-8:00'.", 422)
+        label = s[:times[0].start()].strip(" :-,") or "Routine"
+        label = re.sub(r"\b(from|se|at)\s*$", "", label, flags=re.IGNORECASE).strip()[:40]
+        start, end = _parse_time_text(times[0].group(0)), _parse_time_text(times[1].group(0))
+        tail = s[times[1].end():].strip(" ,.-")
+        tail = re.sub(r"^(on|ko|every|har)\s+", "", tail, flags=re.IGNORECASE)
+        days = _parse_days(tail) if tail else list(range(7))
+    if not label:
+        raise ServiceError("invalid", "What is this routine block called (gym, lunch, market)?", 422)
+    if not days:
+        days = list(range(7))
+    return {"label": label, "start": start, "end": end, "days": days}
 
 
 def pref_defaults() -> dict:
@@ -1006,17 +1142,33 @@ def coerce_pref(key: str, value) -> tuple[str, object]:
         raise ServiceError("invalid", f"Say on or off for {spec['say']}.", 422)
     if t == "int":
         try:
-            n = int(str(value).strip())
+            n = int(re.sub(r"[^\d-]", "", str(value).strip()) or "x") if not isinstance(value, int) else value
         except ValueError:
             raise ServiceError("invalid", f"{spec['say']} needs a number.", 422)
         if not spec["min"] <= n <= spec["max"]:
             raise ServiceError("invalid", f"{spec['say']} must be between {spec['min']} and {spec['max']}.", 422)
         return key, n
+    if t == "time":
+        return key, _parse_time_text(value)
+    if t == "days":
+        return key, _parse_days(value)
+    if t == "blocks":
+        if not isinstance(value, (list, tuple)):
+            raise ServiceError("invalid", "The routine must be a list of blocks.", 422)
+        blocks = [_parse_block(b) for b in value][:12]
+        return key, blocks
     s = str(value).strip()
     s = spec.get("aliases", {}).get(s.lower(), s)
     if s not in spec["values"]:
         raise ServiceError("invalid", f"{spec['say']} can be: " + ", ".join(spec["values"]) + ".", 422)
     return key, s
+
+
+def _say_time(hhmm: str) -> str:
+    try:
+        return tu.fmt_time(tu.combine_local(tu.today_local(), time.fromisoformat(hhmm)))
+    except ValueError:
+        return hhmm
 
 
 def describe_pref(key: str, value) -> str:
@@ -1025,11 +1177,31 @@ def describe_pref(key: str, value) -> str:
         return f"{spec['say']} {'on' if value else 'off'}"
     if spec["type"] == "int":
         return f"{spec['say']} {value}"
+    if spec["type"] == "time":
+        return f"{spec['say']} {_say_time(value)}"
+    if spec["type"] == "days":
+        from .scheduling import WEEKDAY_NAMES
+        return f"{spec['say']} " + (", ".join(WEEKDAY_NAMES[d] for d in value) if value else "none")
+    if spec["type"] == "blocks":
+        if not value:
+            return "no fixed routine"
+        return spec["say"] + ": " + "; ".join(f"{b['label']} {_say_time(b['start'])} to {_say_time(b['end'])}" for b in value)
     return spec.get("labels", {}).get(value, f"{spec['say']} {value}")
 
 
-def expand_pref_patch(patch: dict) -> dict:
-    """'quietHours': '22-7' (also '10 pm to 7 am' style numbers) -> start, end, enabled."""
+def _two_times(raw: str, what: str) -> tuple[str, str]:
+    tokens = list(_TIME_TOKEN.finditer(str(raw)))
+    if len(tokens) < 2:
+        raise ServiceError("invalid", f"{what} need a start and an end, like 10 to 19.", 422)
+    return _parse_time_text(tokens[0].group(0)), _parse_time_text(tokens[1].group(0))
+
+
+def expand_pref_patch(patch: dict, current: dict | None = None) -> dict:
+    """Spoken shorthand -> real settings.
+
+    quietHours '22-7' -> start, end, enabled; officeHours '10-19' (or '10 to 7') -> officeStart, officeEnd;
+    routineAdd 'Gym 07:00-08:00 daily' / routineRemove 'gym' -> the full routineBlocks list (needs ``current``).
+    """
     patch = dict(patch)
     if "quietHours" in patch:
         raw = str(patch.pop("quietHours"))
@@ -1037,11 +1209,30 @@ def expand_pref_patch(patch: dict) -> dict:
         if len(nums) != 2:
             raise ServiceError("invalid", "Quiet hours need a start and an end hour, like 22 to 7.", 422)
         patch.update({"quietStartHour": nums[0], "quietEndHour": nums[1], "quietHoursEnabled": True})
+    if "officeHours" in patch:
+        start, end = _two_times(patch.pop("officeHours"), "Office hours")
+        sh, eh = int(start[:2]), int(end[:2])
+        if eh <= sh and eh < 12:  # "10 to 7" means 10:00 to 19:00
+            end = f"{eh + 12:02d}{end[2:]}"
+        patch.update({"officeStart": start, "officeEnd": end})
+    if "routineAdd" in patch or "routineRemove" in patch:
+        blocks = list((current or pref_defaults()).get("routineBlocks") or [])
+        if "routineRemove" in patch:
+            label = str(patch.pop("routineRemove") or "").strip().lower()
+            kept = [b for b in blocks if label and label not in b["label"].lower()]
+            if len(kept) == len(blocks):
+                raise ServiceError("invalid", f"There is no routine block called '{label}'.", 422)
+            blocks = kept
+        if "routineAdd" in patch:
+            block = _parse_block(patch.pop("routineAdd"))
+            blocks = [b for b in blocks if b["label"].lower() != block["label"].lower()] + [block]
+        patch["routineBlocks"] = blocks
     return patch
 
 
 def set_prefs(user: User, patch: dict) -> dict:
-    clean = dict(coerce_pref(k, v) for k, v in expand_pref_patch(patch or {}).items())
+    expanded = expand_pref_patch(patch or {}, get_prefs(user))
+    clean = dict(coerce_pref(k, v) for k, v in expanded.items())
     if not clean:
         raise ServiceError("invalid", "Nothing to change.", 422)
     row, _ = UserPrefs.objects.get_or_create(user=user)
@@ -1080,25 +1271,60 @@ def delete_memory(user: User, memory_id) -> None:
     audit(user, "memory.delete", "memory", memory_id)
 
 
-def briefing_facts(user: User, kind: str) -> tuple[dict, str]:
+def briefing_facts(user: User, kind: str, conceal_private: bool = False) -> tuple[dict, str]:
+    """Facts for a spoken briefing plus a plain fallback text.
+
+    conceal_private=True (the stored morning briefing): the MD's private items are counted and timed but never
+    named, because an Alert row is not encrypted and may be spoken from a locked phone.
+    """
+    from . import scheduling  # local import: scheduling imports this module
+
     dash = dashboard(user)
+    prefs = get_prefs(user)
+    today = tu.today_local()
+
+    def name(item):
+        return "a personal item" if conceal_private and item.get("scope") == "private" else item["title"]
+
     facts = {
         "reader": "MD" if user.is_md else f"PA ({user.spoken_name})",
         "kind": kind,
         "date": dash["date_label"],
         "now": tu.now_local().strftime("%I:%M %p"),
-        "overdue": [{"title": i["title"], "priority": i["priority"], "was_due": i["due_label"]} for i in dash["overdue"]],
-        "today": [{"title": i["title"], "priority": i["priority"], "kind": i["kind"], "when": i["due_label"],
+        "overdue": [{"title": name(i), "priority": i["priority"], "was_due": i["due_label"]} for i in dash["overdue"]],
+        "today": [{"title": name(i), "priority": i["priority"], "kind": i["kind"], "when": i["due_label"],
                    "minutes": i["estimated_minutes"]} for i in dash["today"]],
-        "upcoming": [{"title": i["title"], "when": i["due_label"]} for i in dash["upcoming"][:8]],
+        "upcoming": [{"title": name(i), "when": i["due_label"]} for i in dash["upcoming"][:8]],
         "completed_today": dash["completed_today"],
         "pending_requests": [{"title": r["title"], "from": r["requested_by"], "priority": r["priority"]}
                              for r in dash["requests"] if r["state"] == "PENDING"],
         "delegated_open": [{"title": d["title"], "staff": d["assignee"]["staff_name"], "status": d["status"],
                             "overdue": d["overdue"]} for d in dash["delegated"] if d["status"] != Status.COMPLETED][:12],
+        "routine": scheduling.routine_summary(prefs),
+        "weekly_off_today": scheduling.is_off_day(prefs, today),
     }
+    if conceal_private:
+        facts["private_items_today"] = sum(1 for i in dash["today"] if i.get("scope") == "private")
+
+    # Where today collides with itself, and whether it is simply too full.
+    def span_name(c):
+        return "a personal item" if conceal_private and c.get("private") else c["title"]
+    pairs = scheduling.overlapping_pairs(user, today, prefs)
+    facts["clashes_today"] = [
+        {"a": span_name(a), "b": span_name(b), "at": tu.fmt_time(max(a["start"], b["start"]))} for a, b in pairs[:4]
+    ]
+    load = scheduling.day_load(user, today, prefs)
+    facts["day_load"] = {"items": load["count"], "busy_minutes": load["minutes"], "free_capacity_minutes": load["capacity"],
+                         "heavy": load["heavy"]}
+    if load["heavy"] and load["movable"]:
+        m = load["movable"]
+        facts["day_load"]["could_move"] = {"title": span_name(m), "to": tu.fmt_day(today + timedelta(days=1))}
+
     address = "Sir" if user.is_md else user.spoken_name
-    parts = [f"Good {'evening' if kind == 'evening' else 'morning' if tu.now_local().hour < 12 else 'afternoon'}, {address}."]
+    hour = tu.now_local().hour
+    greeting = {"morning": "Good morning", "evening": "Good evening"}.get(
+        kind, "Good morning" if hour < 12 else "Good afternoon" if hour < 17 else "Good evening")
+    parts = [f"{greeting}, {address}."]
     if facts["overdue"]:
         parts.append(f"{len(facts['overdue'])} item{'s are' if len(facts['overdue']) > 1 else ' is'} overdue, starting with {facts['overdue'][0]['title']}.")
     if facts["today"]:
@@ -1106,6 +1332,12 @@ def briefing_facts(user: User, kind: str) -> tuple[dict, str]:
         parts.append(f"Today you have {len(facts['today'])} item{'s' if len(facts['today']) > 1 else ''}: {firsts}.")
     else:
         parts.append("Nothing else is scheduled for today.")
+    for c in facts["clashes_today"][:2]:
+        parts.append(f"{c['a']} and {c['b']} overlap at {c['at']}; tell me which one to move.")
+    if load["heavy"]:
+        hint = f" You could move {facts['day_load']['could_move']['title']} to {facts['day_load']['could_move']['to']}." \
+            if facts["day_load"].get("could_move") else ""
+        parts.append(f"Today is heavy with {load['count']} items.{hint}")
     if facts["pending_requests"]:
         parts.append(f"{len(facts['pending_requests'])} request{'s are' if len(facts['pending_requests']) > 1 else ' is'} waiting for your decision.")
     late = [d for d in facts["delegated_open"] if d["overdue"]]

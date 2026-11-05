@@ -7,14 +7,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui';
 import { useAlertEngine } from '@/lib/alertEngine';
 import { api, currentServer, deviceTokens } from '@/lib/api';
-import { relativeAgo } from '@/lib/format';
+import { relativeAgo, timeLabel } from '@/lib/format';
 import { usePrefs } from '@/lib/prefs';
 import { presenceLabel } from '@/lib/presence';
 import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
 import type { AiUsageSummary, MemoryItem } from '@/lib/types';
-import { type WakeStatus, wakeSettings, wakeStart, wakeStatus, wakeStop, wakeSupported } from '@/lib/wake';
+import { type WakeStatus, wakeSetListening, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
 
 function Row({ title, detail, right }: { title: string; detail?: string; right: React.ReactNode }) {
   return (
@@ -31,6 +31,9 @@ function Row({ title, detail, right }: { title: string; detail?: string; right: 
 interface Health {
   taskpanel: { label: string; mode: string; linked: boolean; unconfirmed_commands: number; last_sync: string | null; last_sync_error: string };
 }
+
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const dayNames = (days: number[]) => (days.length ? days.map((d) => WEEKDAYS[d] ?? '').filter(Boolean).join(', ') : 'none');
 
 export default function Settings() {
   const router = useRouter();
@@ -66,7 +69,8 @@ export default function Settings() {
   const toggleWake = async (on: boolean) => {
     setWakeNote('');
     if (!on) {
-      await wakeStop();
+      // Only the microphone part goes off; reminders and messages keep arriving in the background.
+      await wakeSetListening(false);
       update({ wakeWordEnabled: false });
       setWake(await wakeStatus());
       return;
@@ -95,6 +99,7 @@ export default function Settings() {
         refreshToken: tokens.refresh,
         address: isMD ? 'Sir' : user?.name ?? '',
         speakWhenLocked: prefs.privateAloudWhenLocked,
+        wakeWord: true,
       });
       update({ wakeWordEnabled: ok });
       if (!ok) setWakeNote('Could not start the listener. Check the microphone permission and try again.');
@@ -157,20 +162,30 @@ export default function Settings() {
           </Txt>
         </Card>
 
-        <Txt variant="label" style={{ marginTop: 22 }}>“Hey JARVIS” when the app is closed</Txt>
+        <Txt variant="label" style={{ marginTop: 22 }}>When the app is closed</Txt>
         <Card style={s.card}>
+          <Row
+            title="Reminders and messages in the background"
+            detail={
+              !wakeSupported ? 'Not included in this build.'
+                : wake?.running ? 'On. Anything from Sir or Mansi reaches this phone within half a minute, spoken when it is unlocked.'
+                : 'Starting… (open the app once after a restart).'
+            }
+            right={wake?.running ? <Tag label="On" color={colors.success} bg={colors.successSoft} /> : null}
+          />
           <Row
             title="Listen for “Hey JARVIS”"
             detail={
               !wakeSupported ? 'Not included in this build.'
-                : wake?.running ? 'On. Say “Hey JARVIS” any time, even with the app closed.'
+                : wake?.listening ? 'On. Say “Hey JARVIS” any time, even with the app closed.'
                 : 'Off. Switch on to wake JARVIS by voice from anywhere.'
             }
-            right={<Switch value={prefs.wakeWordEnabled && !!wake?.running} disabled={!wakeSupported || wakeBusy} onValueChange={toggleWake} trackColor={{ true: colors.gold }} />}
+            right={<Switch value={prefs.wakeWordEnabled && !!wake?.listening} disabled={!wakeSupported || wakeBusy} onValueChange={toggleWake} trackColor={{ true: colors.gold }} />}
           />
           {wakeNote ? <Txt variant="small" style={{ color: colors.warn, marginTop: 4 }}>{wakeNote}</Txt> : null}
           {wakeSupported ? (
             <View style={s.chips}>
+              <Chip label="Run phone setup again" icon="construct-outline" onPress={() => router.push('/setup')} />
               {!wake?.overlayAllowed ? <Chip label="Allow display over other apps" icon="open-outline" onPress={() => wakeSettings.overlay()} /> : null}
               {!wake?.batteryUnrestricted ? <Chip label="Battery: no restrictions" icon="battery-charging-outline" onPress={() => wakeSettings.battery()} /> : null}
               {xiaomi ? <Chip label="Autostart (Xiaomi)" icon="power-outline" onPress={() => { if (!wakeSettings.autostart()) setWakeNote('Open Security app → Autostart and allow JARVIS.'); }} /> : null}
@@ -235,6 +250,32 @@ export default function Settings() {
               <Tag label="Notifications are blocked — allow them in Android settings" color={colors.danger} bg={colors.dangerSoft} />
             ) : null}
           </View>
+        </Card>
+
+        <Txt variant="label" style={{ marginTop: 22 }}>Work routine & reminders</Txt>
+        <Card style={s.card}>
+          <Row title="Office hours" detail={`${timeLabel(prefs.officeStart)} – ${timeLabel(prefs.officeEnd)} · free slots are suggested inside these`} right={null} />
+          <Row title="Weekly off" detail={dayNames(prefs.weeklyOff)} right={null} />
+          <Row
+            title="Fixed routine"
+            detail={prefs.routineBlocks.length
+              ? prefs.routineBlocks.map((b) => `${b.label} ${timeLabel(b.start)}–${timeLabel(b.end)}${b.days.length === 7 ? '' : ` (${dayNames(b.days)})`}`).join(' · ')
+              : 'None yet. Blocks here are kept free when JARVIS suggests a time.'}
+            right={null}
+          />
+          <Row
+            title="Morning briefing"
+            detail={`At ${timeLabel(prefs.briefingTime)}: the day, clashes, pending requests — spoken when you pick up the phone.`}
+            right={<Switch value={prefs.briefingEnabled} onValueChange={(v) => update({ briefingEnabled: v })} trackColor={{ true: colors.gold }} />}
+          />
+          <Row
+            title="Reminders before"
+            detail={`Meetings ${prefs.remindBeforeMeeting} min · calls ${prefs.remindBeforeCall} min · tasks ${prefs.remindBeforeTask} min · date-only items at ${timeLabel(prefs.dayReminderTime)}`}
+            right={null}
+          />
+          <Txt variant="caption" style={{ marginTop: 6 }}>
+            Change any of these by voice: “office 10 se 7”, “Sunday off”, “gym 7 se 8 roz”, “briefing 8 baje”, “meeting reminder 30 minute pehle”.
+          </Txt>
         </Card>
 
         <Txt variant="label" style={{ marginTop: 22 }}>Staff task app (TaskPanel)</Txt>

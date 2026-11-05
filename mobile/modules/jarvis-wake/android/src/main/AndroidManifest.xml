@@ -2,6 +2,7 @@
   <uses-permission android:name="android.permission.RECORD_AUDIO" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -11,13 +12,27 @@
   <uses-permission android:name="android.permission.INTERNET" />
 
   <application>
-    <!-- Always-on "Hey JARVIS" listener. Microphone type: Android shows the mic indicator while it runs. -->
+    <!-- Background service while signed in: watches for reminders and messages (specialUse) and, when
+         "Hey JARVIS" is on, listens for the wake word (microphone: Android shows the mic indicator). -->
     <service
       android:name="com.qtcinfotech.jarvis.wake.WakeService"
       android:exported="false"
-      android:foregroundServiceType="microphone" />
+      android:foregroundServiceType="microphone|specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Private two-person assistant: speaks reminders and messages from the MD or PA while the app is closed" />
+    </service>
 
-    <!-- After a reboot Android does not let an app open the microphone by itself: this posts "Tap to switch JARVIS on". -->
+    <!-- Live push from the server (Firebase Cloud Messaging): shows and speaks an alert the moment it is created. -->
+    <service
+      android:name="com.qtcinfotech.jarvis.wake.PushService"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="com.google.firebase.MESSAGING_EVENT" />
+      </intent-filter>
+    </service>
+
+    <!-- After a reboot: restart the watcher, and post "Tap to switch JARVIS on" for the microphone part. -->
     <receiver
       android:name="com.qtcinfotech.jarvis.wake.BootReceiver"
       android:exported="true">

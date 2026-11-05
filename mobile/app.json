@@ -3,7 +3,7 @@
     "name": "JARVIS",
     "slug": "jarvis",
     "scheme": "jarvis",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -14,7 +14,8 @@
     },
     "android": {
       "package": "com.qtcinfotech.jarvis",
-      "versionCode": 3,
+      "versionCode": 4,
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#13233A",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -42,7 +43,7 @@
       [
         "expo-speech-recognition",
         {
-          "microphonePermission": "JARVIS listens only while you tap the mic, to capture your command.",
+          "microphonePermission": "JARVIS uses the microphone to hear your commands and the words “Hey JARVIS”. Nothing is sent until you speak to it.",
           "speechRecognitionPermission": "JARVIS converts your spoken command to text.",
           "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox", "com.google.android.as"]
         }

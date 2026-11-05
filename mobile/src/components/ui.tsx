@@ -12,22 +12,25 @@ import {
   ViewStyle,
 } from 'react-native';
 
-import { colors, fonts, priorityColor, priorityLabel, prioritySoft, radius, shadow } from '@/lib/theme';
+import { colors, fontFor, fonts, priorityColor, priorityLabel, prioritySoft, radius, shadow } from '@/lib/theme';
 
 type Variant = 'display' | 'title' | 'heading' | 'body' | 'small' | 'label' | 'caption';
 
 const variantStyle: Record<Variant, TextStyle> = {
-  display: { fontFamily: fonts.serif, fontSize: 28, fontWeight: '600', color: colors.ink, letterSpacing: -0.3, lineHeight: 36 },
-  title: { fontFamily: fonts.serif, fontSize: 21, fontWeight: '600', color: colors.ink, letterSpacing: -0.2, lineHeight: 28 },
-  heading: { fontSize: 16, fontWeight: '600', color: colors.text, lineHeight: 22 },
-  body: { fontSize: 16, color: colors.text, lineHeight: 24 },
-  small: { fontSize: 14, color: colors.muted, lineHeight: 20 },
-  label: { fontSize: 12, fontWeight: '600', color: colors.muted, letterSpacing: 0.6, textTransform: 'uppercase' },
+  display: { fontSize: 27, fontWeight: '700', color: colors.ink, letterSpacing: -0.4, lineHeight: 36 },
+  title: { fontSize: 20, fontWeight: '600', color: colors.ink, letterSpacing: -0.2, lineHeight: 28 },
+  heading: { fontSize: 15, fontWeight: '600', color: colors.text, lineHeight: 22 },
+  body: { fontSize: 15, color: colors.text, lineHeight: 23 },
+  small: { fontSize: 13, color: colors.muted, lineHeight: 19 },
+  label: { fontSize: 11, fontWeight: '600', color: colors.muted, letterSpacing: 0.8, textTransform: 'uppercase' },
   caption: { fontSize: 12, color: colors.faint, lineHeight: 16 },
 };
 
+/** Text in Poppins. The weight asked for (in the variant or the style) picks the matching font file. */
 export function Txt({ variant = 'body', style, ...rest }: TextProps & { variant?: Variant }) {
-  return <Text {...rest} style={[variantStyle[variant], style]} />;
+  const flat = StyleSheet.flatten([variantStyle[variant], style]) as TextStyle;
+  const family = flat.fontFamily && flat.fontFamily.startsWith('Poppins') ? flat.fontFamily : fontFor(flat.fontWeight);
+  return <Text {...rest} style={[flat, { fontFamily: family }]} />;
 }
 
 export function Icon({ name, size = 20, color = colors.ink }: { name: string; size?: number; color?: string }) {
@@ -184,7 +187,7 @@ export const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   buttonCompact: { minHeight: 38, paddingHorizontal: 12, borderRadius: radius.sm },
-  buttonText: { fontSize: 15, fontWeight: '600', letterSpacing: 0.2 },
+  buttonText: { fontSize: 14, fontFamily: fonts.semibold, letterSpacing: 0.2 },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -195,9 +198,9 @@ export const styles = StyleSheet.create({
     marginRight: 8,
     marginBottom: 8,
   },
-  chipText: { fontSize: 13, fontWeight: '500' },
+  chipText: { fontSize: 13, fontFamily: fonts.medium },
   tag: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, marginRight: 6 },
-  tagText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.4 },
+  tagText: { fontSize: 11, fontFamily: fonts.semibold, letterSpacing: 0.3 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 22, marginBottom: 10 },
   iconButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
   empty: { paddingVertical: 18, paddingHorizontal: 12, borderRadius: radius.md, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.line },

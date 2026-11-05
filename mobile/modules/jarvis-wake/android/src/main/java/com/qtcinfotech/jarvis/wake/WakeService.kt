@@ -20,13 +20,20 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 
 /**
- * Foreground service: listens for "Hey JARVIS" on the phone (no audio leaves it) and, while the app is closed,
- * speaks reminders that come due. A permanent notification shows while it runs; "Stop" ends it.
+ * Foreground service that runs whenever someone is signed in on this phone:
+ *
+ *  - always: checks the server every half minute for reminders due now and messages that just arrived, and
+ *    speaks or shows them while the app is closed (ReminderWatcher);
+ *  - when "Hey JARVIS" is on: also listens for the wake word on the phone (no audio leaves it).
+ *
+ * A permanent notification shows while it runs. The microphone part can be switched on and off without
+ * stopping the watcher; after a reboot the watcher comes back by itself and the microphone waits for one tap.
  */
 class WakeService : Service() {
     private lateinit var notifier: WakeNotifier
     private var audioThread: Thread? = null
     @Volatile private var stopped = false
+    @Volatile private var micStopped = false
     private var watcherThread: HandlerThread? = null
     private var watcher: ReminderWatcher? = null
     private var loop: ConversationLoop? = null
@@ -44,26 +51,42 @@ class WakeService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            Log.w(TAG, "No microphone permission; not starting.")
-            stopSelf()
-            return START_NOT_STICKY
+        val prefs = WakeBus.prefs(this)
+        val micAllowed = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        // Started from the boot receiver (app in the background): Android does not allow the microphone then.
+        val noMic = intent?.getBooleanExtra(EXTRA_NO_MIC, false) == true
+        val wantMic = prefs.getBoolean(WakeBus.KEY_WAKE_WORD, false) && micAllowed && !noMic
+
+        val notification = notifier.serviceNotification(listening = wantMic)
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                startForeground(WakeNotifier.SERVICE_ID, notification,
+                    if (wantMic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                startForeground(WakeNotifier.SERVICE_ID, notification,
+                    if (wantMic) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST)
+            else -> startForeground(WakeNotifier.SERVICE_ID, notification)
         }
-        val notification = notifier.serviceNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            startForeground(WakeNotifier.SERVICE_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(WakeNotifier.SERVICE_ID, notification)
-        }
-        notifier.cancelSwitchOn()
-        if (audioThread == null) startListening()
+        if (wantMic) notifier.cancelSwitchOn()
+        if (wantMic && audioThread == null) startListening()
+        if (!wantMic && audioThread != null) stopListening()
         if (watcherThread == null) startWatcher()
         WakeBus.running = true
+        WakeBus.listening = wantMic
         return START_STICKY
+    }
+
+    private fun stopListening() {
+        micStopped = true
+        audioThread?.interrupt()
+        audioThread = null
+        WakeBus.listening = false
+        Log.i(TAG, "Hey JARVIS switched off; still watching for reminders and messages")
     }
 
     private fun startListening() {
         stopped = false
+        micStopped = false
         audioThread = Thread({
             val detector = try {
                 WakeDetector(this)
@@ -100,7 +123,7 @@ class WakeService : Service() {
             var lastReport = System.currentTimeMillis()
             Log.i(TAG, "Listening for Hey JARVIS (models loaded)")
             try {
-                while (!stopped) {
+                while (!stopped && !micStopped) {
                     if (WakeBus.paused || WakeBus.inConversation || WakeBus.appInForeground && WakeBus.listener == null) {
                         // Someone else needs the mic (JARVIS itself is listening or talking): let it go.
                         if (recording) {
@@ -117,7 +140,7 @@ class WakeService : Service() {
                         Log.i(TAG, "listening again (state=${record.recordingState})")
                     }
                     var got = 0
-                    while (got < chunk.size && !stopped) {
+                    while (got < chunk.size && !stopped && !micStopped) {
                         val n = record.read(chunk, got, chunk.size - got)
                         if (n <= 0) break
                         got += n
@@ -230,6 +253,7 @@ class WakeService : Service() {
     override fun onDestroy() {
         stopped = true
         WakeBus.running = false
+        WakeBus.listening = false
         loop?.destroy()
         loop = null
         audioThread?.interrupt()
@@ -245,11 +269,14 @@ class WakeService : Service() {
         private const val TAG = "JarvisWake"
         const val ACTION_STOP = "com.qtcinfotech.jarvis.wake.STOP"
         const val EXTRA_WAKE = "jarvis_wake"
+        const val EXTRA_NO_MIC = "jarvis_no_mic"
         private const val THRESHOLD = 0.5f
-        private const val WATCH_EVERY_MS = 60_000L
+        private const val WATCH_EVERY_MS = 30_000L  // a message from Sir or Mansi reaches a closed app within half a minute
 
-        fun start(context: Context) {
+        /** (Re)start the service; it reads the saved settings and switches the microphone part on or off to match. */
+        fun start(context: Context, withMicrophone: Boolean = true) {
             val intent = Intent(context, WakeService::class.java)
+            if (!withMicrophone) intent.putExtra(EXTRA_NO_MIC, true)
             ContextCompat.startForegroundService(context, intent)
         }
 

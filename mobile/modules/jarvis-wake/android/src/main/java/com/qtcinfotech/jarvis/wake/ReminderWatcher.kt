@@ -65,6 +65,15 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         return true
     }
 
+    /** A live push (see PushService): show and speak it now, and remember it so the next check does not repeat it. */
+    fun deliverPush(key: String, title: String, spoken: String, urgent: Boolean) {
+        val spokenKeys = prefs.getStringSet(WakeBus.KEY_SPOKEN, emptySet())?.toMutableSet() ?: mutableSetOf()
+        if (key in spokenKeys) return
+        if (!WakeBus.inConversation) deliver(key, title, spoken, false, urgent)
+        spokenKeys.add(key)
+        prefs.edit().putStringSet(WakeBus.KEY_SPOKEN, spokenKeys).apply()
+    }
+
     /** "2026-11-04T11:00:00+05:30" (with or without fractional seconds, or a trailing Z) -> epoch seconds. */
     private fun parseIsoSeconds(iso: String): Long? {
         if (iso.isBlank()) return null

@@ -172,6 +172,12 @@ JARVIS_AI_ANSWER_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_ANSWER_TIMEOU
 JARVIS_AI_MAX_SEARCHES = int(os.environ.get("JARVIS_AI_MAX_SEARCHES", "3"))  # web searches per question
 JARVIS_AI_DAILY_ANSWER_LIMIT = int(os.environ.get("JARVIS_AI_DAILY_ANSWER_LIMIT", "150"))  # per user per day
 
+# Live push to the phones (Firebase Cloud Messaging). Either a path to the service-account key or its JSON.
+# Without one, push is off and the phones fall back to their half-minute check.
+FIREBASE_SERVICE_ACCOUNT_FILE = os.environ.get("FIREBASE_SERVICE_ACCOUNT_FILE", "")
+FIREBASE_SERVICE_ACCOUNT_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON", "")
+JARVIS_PUSH_ENABLED = env_bool("JARVIS_PUSH_ENABLED", True)
+
 # TaskPanel connector (public_html/taskPanel integration API, signed server-to-server).
 # "mock" = built-in contract double with the same API shape; "live" = real TaskPanel.
 TASKPANEL_MODE = os.environ.get("TASKPANEL_MODE", os.environ.get("LARAVEL_MODE", "mock")).lower()

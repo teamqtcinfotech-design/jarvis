@@ -7,16 +7,21 @@ import re
 from datetime import date, time
 
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 
-from . import ai_brain, hinglish_parser, services
+from . import ai_brain, datacards, hinglish_parser, scheduling, services
 from . import timeutils as tu
-from .models import Kind, Priority, TaskCategory, User
+from .models import Kind, Priority, PrivateTask, SharedTask, TaskCategory, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
 TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation"}
 EDIT_ACTIONS = {"change_task", "delete_task"}
 _CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind"}
+# Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the PA's
+# (Sir giving Mansi work) or the MD's (Mansi asking for Sir's time; she only ever hears "busy", never why).
+_SLOT_ACTIONS = {"private_task": "self", "pa_meeting": "self", "pa_task": "pa", "md_request": "md", "change_task": "self"}
+MAX_SCHEDULE_QUESTIONS = 2  # ask about a clash at most twice, then take his word
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 _KINDS = {k for k, _ in Kind.choices}
@@ -268,12 +273,243 @@ _TASK_INTENTS = {"create_task", "assign_to_staff", "assign_to_team", "assign_to_
                  "request_for_md", "needs_destination"}
 
 
+# ------------------------------------------------------------------ does it fit the diary?
+def _clean_pending(pending) -> dict | None:
+    """The card the phone (or the background brain) is holding. Untrusted: only the fields used here are checked."""
+    if not isinstance(pending, dict) or not isinstance(pending.get("action"), str):
+        return None
+    p = dict(pending)
+    p["due_date"] = _safe_date(str(p.get("due_date") or ""))
+    p["due_time"] = _safe_time(str(p.get("due_time") or ""))
+    p["kind"] = p.get("kind") if p.get("kind") in _KINDS else Kind.TASK
+    p["title"] = str(p.get("title") or "")[:200]
+    p["duration_minutes"] = int(p["duration_minutes"]) if isinstance(p.get("duration_minutes"), int) and p["duration_minutes"] > 0 else None
+    p["changes"] = {k: str(v) for k, v in (p.get("changes") or {}).items() if k in _CHANGE_FIELDS} if isinstance(p.get("changes"), dict) else {}
+    p["targets"] = [t for t in (p.get("targets") or []) if isinstance(t, dict) and isinstance(t.get("id"), str)] \
+        if isinstance(p.get("targets"), list) else []
+    if not p["targets"] and isinstance(p.get("target"), dict) and isinstance(p["target"].get("id"), str):
+        p["targets"] = [p["target"]]
+    p["schedule"] = p.get("schedule") if isinstance(p.get("schedule"), dict) else {}
+    p["warnings"] = [str(w) for w in p.get("warnings") or []] if isinstance(p.get("warnings"), list) else []
+    return p
+
+
+def _target_task(t: dict):
+    try:
+        if t.get("scope") == "private":
+            return PrivateTask.objects.get(id=t["id"])
+        return SharedTask.objects.select_related("staff").get(id=t["id"])
+    except (ObjectDoesNotExist, ValueError, KeyError, TypeError):
+        return None
+
+
+def _slot_of(user: User, draft: dict):
+    """(whose diary, kind, due_date, due_time, minutes, ids to leave out) for what the draft adds or moves."""
+    whose = _SLOT_ACTIONS.get(draft.get("action", ""))
+    if not whose:
+        return None
+    if draft["action"] == "change_task":
+        targets = draft.get("targets") or []
+        changes = draft.get("changes") or {}
+        if len(targets) != 1 or not ({"due_date", "due_time"} & changes.keys()):
+            return None
+        task = _target_task(targets[0])
+        if task is None:
+            return None
+        if isinstance(task, SharedTask):
+            if task.assignee_type == SharedTask.Assignee.STAFF:
+                return None  # a staff member's diary is not ours to judge
+            if task.assignee_type == SharedTask.Assignee.PA and task.origin != SharedTask.Origin.MD_MEET_PA:
+                whose = "pa" if user.is_md else "self"
+        local = tu.to_local(task.due_at) if task.due_at else None
+        due_date = _safe_date(changes.get("due_date") or "") or (local.date().isoformat() if local else
+                                                                  task.due_date.isoformat() if task.due_date else "")
+        due_time = _safe_time(changes.get("due_time") or "") or (local.strftime("%H:%M") if local else "")
+        kind = changes.get("kind") if changes.get("kind") in _KINDS else task.kind
+        return whose, kind, due_date, due_time, task.estimated_minutes, [str(task.id)]
+    return whose, draft.get("kind") or Kind.TASK, draft.get("due_date") or "", draft.get("due_time") or "", \
+        draft.get("duration_minutes"), []
+
+
+def _insert_notes(reply: str, notes: list[str], hindi: bool = False) -> str:
+    """Put short notes before the closing question of a reply ("... Shall I save it?")."""
+    if not notes:
+        return reply
+    text = " ".join(notes)
+    end = "।" if hindi else "."
+    m = re.match(rf"^(.*[{end}!])\s+([^{end}!?]*\?)\s*$", reply.strip(), re.S)
+    if m:
+        return f"{m.group(1)} {text} {m.group(2)}"
+    return f"{reply.strip()} {text}".strip()
+
+
+def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> None:
+    """Look at the diary before a timed item is saved or moved: clash -> offer the next free slot; a meeting or call
+    with no time -> offer one; a very full day or a weekly off -> say so. The draft keeps the user's own words;
+    only the spoken question changes, and nothing is moved until he answers."""
+    if draft.get("needs_clarification"):
+        return
+    slot = _slot_of(user, draft)
+    if not slot:
+        return
+    whose, kind, due_date, due_time, minutes, exclude = slot
+    if not due_date and kind not in (Kind.MEETING, Kind.CALL):
+        return  # a task with no day needs no slot
+    subject = {"pa": services.get_pa(), "md": services.get_md()}.get(whose, user)
+    if subject is None:
+        return
+    prefs = services.get_prefs(subject)
+    review = scheduling.review(subject, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes, prefs=prefs,
+                               exclude_ids=exclude)
+    anonymous = whose == "md"  # Mansi only ever hears that Sir is busy, never with what
+    pa = services.get_pa()
+    pa_name = pa.spoken_name if pa else "your PA"
+    address_hi = "सर" if user.is_md else user.spoken_name
+    item = (draft.get("targets") or [{}])[0].get("title", "") if draft["action"] == "change_task" else draft.get("title", "")
+    item = item or "this"
+    if whose == "pa" and draft["action"] != "change_task":
+        item = f"{item} for {pa_name}"
+    d = date.fromisoformat(due_date) if due_date else None
+    day_en = tu.fmt_day(d) if d else ""
+    day_cap = day_en[:1].upper() + day_en[1:]
+    day_hi = tu.fmt_day_hi(d) if d else ""
+    when_en = _due_label(due_date, due_time)
+    when_hi = f"{day_hi} {tu.fmt_time_hi(tu.combine_local(d, time.fromisoformat(due_time)))}" if d and due_time else day_hi
+
+    sug = review.get("suggested")
+    alt_en = alt_hi = ""
+    if sug:
+        s_local = tu.to_local(sug["start"])
+        alt_en = tu.fmt_time(sug["start"]) if sug["same_day"] or not d else f"{tu.fmt_day(s_local.date())} at {tu.fmt_time(sug['start'])}"
+        alt_hi = tu.fmt_time_hi(sug["start"]) if sug["same_day"] or not d else f"{tu.fmt_day_hi(s_local.date())} {tu.fmt_time_hi(sug['start'])}"
+
+    notes_en, notes_hi, warnings = [], [], []
+    load = review.get("load") or {}
+    if load.get("heavy"):
+        n = load["count"]
+        who = {"self": "", "pa": f"{pa_name} ", "md": "Sir "}[whose]
+        notes_en.append(f"{who}{day_en if who else day_cap} already has {n} items.")
+        notes_hi.append(f"{day_hi} पहले से {n} काम हैं।")
+        warnings.append(f"{day_cap} already has {n} items")
+    if review.get("off_day"):
+        notes_en.append(f"{day_cap} is a weekly off.")
+        notes_hi.append(f"{day_hi} छुट्टी का दिन है।")
+        warnings.append(f"{day_cap} is a weekly off")
+
+    question_en = question_hi = ""
+    clashes = review.get("clashes") or []
+    if clashes:
+        c = clashes[0]
+        span = f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"
+        if anonymous:
+            head_en = f"{address}, {item} {when_en}: Sir is busy then ({span})."
+            head_hi = f"{address_hi}, {when_hi} {item}: सर उस समय बिज़ी हैं।"
+            warnings.append(f"Sir is busy {span}")
+        else:
+            has = {"self": "you already have", "pa": f"{pa_name} already has"}.get(whose, "there is already")
+            head_en = f"{address}, {item} {when_en}: {has} {c['title']} then."
+            head_hi = f"{address_hi}, {when_hi} {item}: उस समय {c['title']} पहले से है।"
+            warnings.append(f"Overlaps with {c['title']} ({span})")
+        tail_en = f" Shall I put it at {alt_en} instead?" if sug else " Shall I save it anyway?"
+        tail_hi = f" {alt_hi} रख दूँ?" if sug else " फिर भी सेव कर दूँ?"
+        question_en = _insert_notes(head_en + tail_en, notes_en)
+        question_hi = _insert_notes(head_hi + tail_hi, notes_hi, hindi=True)
+    elif review.get("needs_slot") and sug:
+        s_en, e_en = tu.fmt_time(sug["start"]), tu.fmt_time(sug["end"])
+        s_hi, e_hi = tu.fmt_time_hi(sug["start"]), tu.fmt_time_hi(sug["end"])
+        s_day = tu.to_local(sug["start"]).date()
+        free = {"self": "you're free", "pa": f"{pa_name} is free", "md": "Sir is free"}[whose]
+        free_hi = {"self": "आप", "pa": pa_name, "md": "सर"}[whose]
+        if d:
+            head_en = f"{address}, {item} {day_en}: {free} {s_en}–{e_en}. Shall I put it at {s_en}?"
+            head_hi = f"{address_hi}, {day_hi} {free_hi} {s_hi} से {e_hi} तक फ्री हैं। {s_hi} रख दूँ?"
+        else:
+            head_en = f"{address}, {item}: {free} {tu.fmt_day(s_day)} {s_en}–{e_en}. Shall I put it then?"
+            head_hi = f"{address_hi}, {tu.fmt_day_hi(s_day)} {free_hi} {s_hi} से {e_hi} तक फ्री हैं। तब रख दूँ?"
+        question_en = _insert_notes(head_en, notes_en)
+        question_hi = _insert_notes(head_hi, notes_hi, hindi=True)
+
+    draft["schedule"] = {
+        "for": whose,
+        "asked": asked,
+        "question": question_en,
+        "question_hi": question_hi,
+        "notes": notes_en,
+        "notes_hi": notes_hi,
+        "clashes": [{"title": "" if anonymous else c["title"], "start": c["start"].isoformat(), "end": c["end"].isoformat(),
+                     "label": f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"} for c in clashes[:3]],
+        "suggested": ({"due_date": sug["due_date"], "due_time": sug["due_time"], "label": alt_en} if sug else None),
+        "load": {"count": load.get("count", 0), "heavy": bool(load.get("heavy"))} if load else None,
+        "off_day": bool(review.get("off_day")),
+        "base_reply": draft.get("spoken_reply", ""),
+    }
+    draft["warnings"] = list(draft.get("warnings") or []) + warnings
+    if question_en:
+        draft["spoken_reply"] = question_en
+    elif notes_en and draft.get("spoken_reply"):
+        draft["spoken_reply"] = _insert_notes(draft["spoken_reply"], notes_en)
+
+
+def _rebuilt(pending: dict, new: dict) -> dict:
+    """The waiting card with a new day / time, ready to be looked at again."""
+    trial = {k: v for k, v in pending.items()}
+    if trial.get("action") == "change_task":
+        trial["changes"] = {**(trial.get("changes") or {}), **new}
+    else:
+        trial.update(new)
+        trial["due_label"] = _due_label(trial.get("due_date", ""), trial.get("due_time", ""))
+    trial.update({"needs_clarification": False, "question": "", "schedule": None, "warnings": [], "overrides": {},
+                  "done_reply": "", "done_speak": "", "done_lang": "en"})
+    return trial
+
+
+def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: str, draft: dict) -> dict:
+    """A yes while a card waits. A plain yes takes the slot JARVIS offered (if it offered one); a time in the reply
+    replaces the card's; keep_original saves it exactly as first said. Returns the draft to send back, which is a
+    fresh question when the new time collides as well (asked at most twice)."""
+    draft["overrides"] = {}
+    if not pending:
+        return draft
+    sched = pending.get("schedule") or {}
+    if cmd.get("keep_original"):
+        return draft
+    d, t = _safe_date(str(cmd.get("due_date") or "")), _safe_time(str(cmd.get("due_time") or ""))
+    offered = sched.get("suggested") or {}
+    if not d and not t:
+        if _safe_date(str(offered.get("due_date") or "")) and _safe_time(str(offered.get("due_time") or "")):
+            draft["overrides"] = {"due_date": offered["due_date"], "due_time": offered["due_time"]}
+        return draft
+    is_change = pending.get("action") == "change_task"
+    base = (pending.get("changes") or {}) if is_change else pending
+    cur_date = _safe_date(str(base.get("due_date") or "")) or _safe_date(str(offered.get("due_date") or "")) \
+        or tu.today_local().isoformat()
+    cur_time = _safe_time(str(base.get("due_time") or ""))
+    new = {"due_date": d or cur_date}
+    if t or cur_time:
+        new["due_time"] = t or cur_time
+    draft["overrides"] = new
+    asked = int(sched.get("asked") or 0)
+    if new.get("due_time") and asked < MAX_SCHEDULE_QUESTIONS and pending.get("action") in _SLOT_ACTIONS:
+        trial = _rebuilt(pending, new)
+        _advise_schedule(user, trial, address, asked=asked + 1)
+        if (trial.get("schedule") or {}).get("clashes") and trial["schedule"].get("question"):
+            lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
+            trial["reply_language"] = lang
+            hi = trial["schedule"]["question_hi"]
+            trial["speak_text"], trial["speak_lang"] = (hi, "hi") if lang == "hi" and hi else (trial["spoken_reply"], "en")
+            return trial
+    return draft
+
+
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
-                awaiting: str = "", choices: dict | None = None, include_private: bool = True) -> dict:
+                awaiting: str = "", choices: dict | None = None, include_private: bool = True,
+                pending: dict | None = None) -> dict:
     """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed.
     choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer.
-    include_private=False: phone locked; the MD's private items are kept out of the model's view."""
+    include_private=False: phone locked; the MD's private items are kept out of the model's view.
+    pending: the waiting card itself (so a yes can take the time JARVIS offered, or a new time can be checked)."""
     full_text = f"{previous}. {text}".strip(". ") if previous else text
+    card = _clean_pending(pending) if awaiting else None  # the waiting card (not to be confused with pending requests)
     ctx = services.ai_context(user, include_private=include_private)
     # The last few turns of THIS conversation, so follow-ups like "aur Neha ko bhi" make sense.
     ctx["conversation"] = ai_brain.history_text(history)
@@ -285,6 +521,14 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         # The reply goes to the model on its own (so a side question is not glued onto the draft);
         # the draft and its original sentence are background.
         ctx["awaiting_confirmation"] = {"draft": awaiting[:400], "original_sentence": previous[:1000]}
+        sched = (card or {}).get("schedule") or {}
+        if sched.get("question"):
+            base = card.get("changes") if card.get("action") == "change_task" else card
+            ctx["awaiting_confirmation"]["jarvis_asked"] = str(sched["question"])[:300]
+            ctx["awaiting_confirmation"]["original_time"] = {"due_date": base.get("due_date", ""), "due_time": base.get("due_time", "")}
+            if sched.get("suggested"):
+                ctx["awaiting_confirmation"]["offered_time"] = {"due_date": sched["suggested"].get("due_date", ""),
+                                                                "due_time": sched["suggested"].get("due_time", "")}
         model_text = text
     staff_names = [s["name"] for s in ctx["staff"]]
     pending = ctx.get("pending_requests", [])
@@ -342,6 +586,9 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "targets": [],          # every item this applies to (complete / accept / decline / change / delete can take several)
         "target_candidates": [],
         "changes": {},          # change_task: the new values
+        "schedule": None,       # diary check: clash / free slot / full day (see _advise_schedule)
+        "overrides": {},        # confirm_pending: day / time to apply to the waiting card before saving
+        "view": None,           # data the phone draws for this answer (timeline / chart / table), see datacards
         "setting_key": "",      # set_setting
         "setting_value": "",
         "needs_clarification": bool(cmd.get("needs_clarification")),
@@ -459,7 +706,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         key = (cmd.get("setting_key") or "").strip()
         value = (cmd.get("setting_value") or "").strip()
         try:
-            patch = services.expand_pref_patch({key: value}) if key else {}
+            patch = services.expand_pref_patch({key: value}, services.get_prefs(user)) if key else {}
             clean = dict(services.coerce_pref(k, v) for k, v in patch.items())
             if not clean:
                 raise services.ServiceError("invalid", "Which setting should I change?", 422)
@@ -475,6 +722,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     elif intent == "briefing":
         draft["action"] = "briefing"
         draft["spoken_reply"] = draft["spoken_reply"] or f"Here is your briefing, {address}."
+        draft["view"] = datacards.build(user, "today", include_private)
     elif intent == "general_question":
         # Answered by /assistant/ask/ (web search). The answering step asks for missing details itself.
         draft["action"] = "ask"
@@ -494,6 +742,9 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["action"] = "confirm_pending"  # the phone saves the draft it is holding
         draft["needs_clarification"] = False
         draft["question"] = ""
+        result = _confirm_with_pending(user, cmd, card, address, draft)
+        if result is not draft:
+            return result  # the new time collides too: a fresh question, same card
     elif intent == "cancel_pending":
         draft["action"] = "cancel_pending"
         draft["needs_clarification"] = False
@@ -511,6 +762,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["spoken_reply"] = draft["spoken_reply"] or f"Okay {address}. Just say Hello JARVIS whenever you need me."
     else:
         draft["action"] = "answer"
+        if intent == "query":
+            # The spoken answer is short; the screen gets the data (timeline, chart or table) that fits the question.
+            kind = cmd.get("view_kind") if cmd.get("view_kind") in datacards.VIEW_KINDS else datacards.guess_kind(full_text)
+            draft["view"] = datacards.build(user, kind, include_private)
         if not draft["spoken_reply"]:
             if intent == "query":
                 today = ctx["open_items"]["today"]
@@ -552,15 +807,23 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             bits = [b for b in (draft["due_label"], f"{priority.lower()} priority" if priority != "NORMAL" else "") if b]
             draft["spoken_reply"] = f"{address}, {what}: {draft['title']}" + (f", {', '.join(bits)}" if bits else "") + ". Shall I save it?"
 
+    # Does it fit the diary? (clash, free slot, a very full day) — may replace the question above.
+    if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"]:
+        _advise_schedule(user, draft, address)
+
     if draft["needs_clarification"] and draft["question"]:
         draft["spoken_reply"] = draft["question"]
 
     # Voice text: the model's Devanagari version is used only when the final reply is still the model's own
     # sentence (server-built confirmations are English and are spoken as written).
     hindi = (cmd.get("spoken_reply_hi") or "").strip()
-    if (draft["reply_language"] == "hi" and hindi and _DEVANAGARI.search(hindi)
-            and draft["spoken_reply"] == (cmd.get("spoken_reply") or "").strip()):
-        draft["speak_text"], draft["speak_lang"] = hindi, "hi"
+    sched = draft.get("schedule") or {}
+    model_reply = (cmd.get("spoken_reply") or "").strip()
+    base_reply = sched.get("base_reply", draft["spoken_reply"]) if sched.get("notes_hi") and not sched.get("question") else draft["spoken_reply"]
+    if draft["reply_language"] == "hi" and sched.get("question_hi"):
+        draft["speak_text"], draft["speak_lang"] = sched["question_hi"], "hi"
+    elif draft["reply_language"] == "hi" and hindi and _DEVANAGARI.search(hindi) and base_reply == model_reply:
+        draft["speak_text"], draft["speak_lang"] = _insert_notes(hindi, sched.get("notes_hi") or [], hindi=True), "hi"
     else:
         draft["speak_text"], draft["speak_lang"] = draft["spoken_reply"], "en"
     done_hi = (cmd.get("done_reply_hi") or "").strip()

@@ -1,6 +1,6 @@
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Platform } from 'react-native';
+import { Animated, Platform } from 'react-native';
 
 import { stopSpeaking } from './speech';
 
@@ -41,6 +41,12 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const errored = useRef(false);
   const stateRef = useRef<CaptureState>('idle');
   const probing = useRef<Probe | null>(null);
+  // How loud he is speaking right now (0..1), for the orb. Driven by the recogniser's volume events.
+  const [level] = useState(() => new Animated.Value(0));
+  const setLevel = useCallback(
+    (v: number) => Animated.timing(level, { toValue: Math.max(0, Math.min(1, v)), duration: 110, useNativeDriver: true }).start(),
+    [level],
+  );
   const handlersRef = useRef(handlers);
   useEffect(() => {
     handlersRef.current = handlers;
@@ -84,7 +90,12 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     if (event.isFinal) finalText.current = text;
     setPartial(text);
   });
+  useSpeechRecognitionEvent('volumechange', (event) => {
+    if (probing.current) return;
+    setLevel((event.value + 2) / 12); // the recogniser reports -2 (silence) .. 10 (loud)
+  });
   useSpeechRecognitionEvent('end', () => {
+    setLevel(0);
     if (probing.current) {
       finishProbe(false);
       return;
@@ -155,6 +166,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       continuous: false,
       addsPunctuation: true,
       contextualStrings: handlersRef.current.hints?.length ? handlersRef.current.hints.slice(0, 60) : undefined,
+      volumeChangeEventOptions: { enabled: true, intervalMillis: 120 },
       androidIntentOptions: {
         // A natural pause mid-sentence is not the end of it.
         EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
@@ -208,5 +220,5 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     [],
   );
 
-  return { state, partial, start, stop, cancel, probe };
+  return { state, partial, start, stop, cancel, probe, level };
 }

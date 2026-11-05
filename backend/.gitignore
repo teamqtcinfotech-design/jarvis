@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 dev.sqlite3
 staticfiles/
+firebase*.json

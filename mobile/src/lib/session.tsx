@@ -4,6 +4,7 @@ import { AppState } from 'react-native';
 
 import * as apiClient from './api';
 import type { SessionUser } from './types';
+import { pushForget, pushToken, wakeStop } from './wake';
 
 const LOCK_AFTER_MS = 60_000; // re-lock after 1 minute in the background
 
@@ -68,6 +69,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
+    // This phone must hear nothing for this login any more: forget its push token on the server and locally.
+    try {
+      const token = await pushToken();
+      if (token) await apiClient.api('/me/push-token/', { method: 'DELETE', body: { token } });
+    } catch {
+      // best effort; the native side still drops the token below
+    }
+    await pushForget();
+    await wakeStop(); // the background watcher's login goes with the session
     await apiClient.logout();
     setUser(null);
     setLocked(false);

@@ -23,4 +23,6 @@ android {
 
 dependencies {
   implementation "com.microsoft.onnxruntime:onnxruntime-android:1.19.2"
+  // Live push: alerts reach the phone the moment the server creates them (configured by the app's google-services.json).
+  implementation "com.google.firebase:firebase-messaging:24.1.0"
 }

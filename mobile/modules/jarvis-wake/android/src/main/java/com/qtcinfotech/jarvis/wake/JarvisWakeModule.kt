@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -20,10 +21,16 @@ class JarvisWakeModule : Module() {
 
     override fun definition() = ModuleDefinition {
         Name("JarvisWake")
-        Events("wake", "tts")
+        Events("wake", "tts", "push")
 
         OnCreate {
             WakeBus.listener = { sendEvent("wake", emptyMap<String, Any>()) }
+            WakeBus.pushListener = {
+                try {
+                    sendEvent("push", emptyMap<String, Any>())
+                } catch (_: Throwable) {
+                }
+            }
             TtsEngine.init(context)
             TtsEngine.callback = { id, event ->
                 try {
@@ -34,7 +41,19 @@ class JarvisWakeModule : Module() {
         }
         OnDestroy {
             WakeBus.listener = null
+            WakeBus.pushListener = null
             TtsEngine.callback = null
+        }
+
+        // Live push: this phone's Firebase token (registered with the server by the app), and its removal at sign-out.
+        AsyncFunction("getPushToken") {
+            val token = PushService.currentToken()
+            if (token != null) WakeBus.prefs(context).edit().putString(WakeBus.KEY_PUSH_TOKEN, token).apply()
+            token
+        }
+        AsyncFunction("deletePushToken") {
+            WakeBus.prefs(context).edit().remove(WakeBus.KEY_PUSH_TOKEN).apply()
+            PushService.deleteToken()
         }
 
         // JARVIS's voice: reconnects by itself and always reports back (see TtsEngine).
@@ -59,34 +78,52 @@ class JarvisWakeModule : Module() {
             mapOf(
                 "supported" to true,
                 "running" to WakeBus.running,
+                "listening" to WakeBus.listening,
                 "overlayAllowed" to (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)),
                 "micAllowed" to (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED),
+                "notificationsAllowed" to NotificationManagerCompat.from(context).areNotificationsEnabled(),
                 "batteryUnrestricted" to (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || pm.isIgnoringBatteryOptimizations(context.packageName)),
                 "manufacturer" to (Build.MANUFACTURER ?: ""),
             )
         }
 
+        // Start (or re-apply) the background service. It always watches for reminders and messages; the microphone
+        // part ("Hey JARVIS") runs only when wakeWord is true and the microphone is allowed. Returns whether it listens.
         AsyncFunction("start") { config: Map<String, Any?> ->
+            val micAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            val wakeWord = (config["wakeWord"] as? Boolean ?: true) && micAllowed
             WakeBus.prefs(context).edit()
                 .putBoolean(WakeBus.KEY_ENABLED, true)
+                .putBoolean(WakeBus.KEY_WAKE_WORD, wakeWord)
                 .putString(WakeBus.KEY_SERVER, (config["serverUrl"] as? String ?: "").trimEnd('/'))
                 .putString(WakeBus.KEY_ACCESS, config["accessToken"] as? String ?: "")
                 .putString(WakeBus.KEY_REFRESH, config["refreshToken"] as? String ?: "")
                 .putString(WakeBus.KEY_ADDRESS, config["address"] as? String ?: "Sir")
                 .putBoolean(WakeBus.KEY_SPEAK_LOCKED, config["speakWhenLocked"] as? Boolean ?: false)
                 .apply()
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                return@AsyncFunction false
-            }
             WakeBus.paused = false
             WakeService.start(context)
-            true
+            wakeWord
         }
 
+        // Switch only the microphone part on or off; the watcher keeps running.
+        AsyncFunction("setListening") { on: Boolean ->
+            val micAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            val wakeWord = on && micAllowed
+            WakeBus.prefs(context).edit().putBoolean(WakeBus.KEY_WAKE_WORD, wakeWord).apply()
+            if (WakeBus.running || WakeBus.prefs(context).getBoolean(WakeBus.KEY_ENABLED, false)) {
+                WakeBus.paused = false
+                WakeService.start(context)
+            }
+            wakeWord
+        }
+
+        // Signing out: the service stops for good (its login is gone).
         AsyncFunction("stop") {
             WakeBus.prefs(context).edit().putBoolean(WakeBus.KEY_ENABLED, false).apply()
             WakeService.stop(context)
             WakeBus.running = false
+            WakeBus.listening = false
         }
 
         Function("pause") { WakeBus.paused = true }

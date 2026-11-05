@@ -12,7 +12,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from . import ai_brain, ai_usage, assistant, conversation, services
+from . import ai_brain, ai_usage, assistant, conversation, datacards, push, services
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
@@ -104,6 +104,7 @@ class HealthView(APIView):
         return Response({
             "server_time": tu.now_local().isoformat(),
             "ai": {"enabled": ai_brain.ai_available()},
+            "push": push.describe(),
             "taskpanel": {
                 **tp_client().describe(),
                 "linked": link is not None,
@@ -421,6 +422,25 @@ class MePrefsView(APIView):
         return Response(services.set_prefs(request.user, patch))
 
 
+class PushTokenView(APIView):
+    """The phone's Firebase token, so alerts reach it the moment they are created (even with the app closed)."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        token = str((request.data or {}).get("token") or "")
+        try:
+            push.register_device(request.user, token, str((request.data or {}).get("platform") or "android"))
+        except ValueError as err:
+            return error("invalid", str(err), 422)
+        services.audit(request.user, "push.register", "user", request.user.id)
+        return Response({"registered": True, "push": push.describe()})
+
+    def delete(self, request):
+        token = str((request.data or {}).get("token") or request.query_params.get("token") or "")
+        removed = push.forget_device(request.user, token)
+        return Response({"removed": removed})
+
+
 class DeviceTokenView(APIView):
     """A separate login for the phone's background "Hey JARVIS" service.
 
@@ -448,7 +468,7 @@ class InterpretView(APIView):
         s.is_valid(raise_exception=True)
         draft = assistant.build_draft(request.user, s.validated_data["text"], s.validated_data["previous"],
                                       s.validated_data["history"], s.validated_data["awaiting"],
-                                      s.validated_data.get("choices"))
+                                      s.validated_data.get("choices"), pending=s.validated_data.get("pending"))
         return Response(draft)
 
 
@@ -528,7 +548,19 @@ class BriefingView(APIView):
             kind = "now"
         facts, fallback = services.briefing_facts(request.user, kind)
         text, engine = ai_brain.briefing(facts, fallback, user=request.user)
-        return Response({"kind": kind, "text": text, "engine": engine, "generated_at": tu.now_local().isoformat()})
+        return Response({"kind": kind, "text": text, "engine": engine, "generated_at": tu.now_local().isoformat(),
+                         "view": datacards.build(request.user, "today")})
+
+
+class DataViewView(APIView):
+    """One data view (timeline / chart / table) for the screen: the tablet's workspace and the phone's dashboard."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request, kind):
+        view = datacards.build(request.user, kind, include_private=request.query_params.get("private") != "0")
+        if view is None:
+            return error("not_found", "No such view.", 404)
+        return Response(view)
 
 
 # ------------------------------------------------------------------ reminders + alerts

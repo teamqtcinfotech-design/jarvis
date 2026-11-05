@@ -15,8 +15,8 @@ class WakeNotifier(private val context: Context) {
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_SERVICE, "Hey JARVIS listening", NotificationManager.IMPORTANCE_MIN).apply {
-                    description = "Shows while JARVIS listens for “Hey JARVIS”."
+                NotificationChannel(CHANNEL_SERVICE, "JARVIS is on", NotificationManager.IMPORTANCE_MIN).apply {
+                    description = "Shows while JARVIS watches for reminders and messages (and listens for “Hey JARVIS”)."
                     setShowBadge(false)
                 }
             )
@@ -40,20 +40,16 @@ class WakeNotifier(private val context: Context) {
 
     private fun icon(): Int = context.applicationInfo.icon
 
-    fun serviceNotification(): Notification {
-        val stop = PendingIntent.getService(
-            context, 1,
-            Intent(context, WakeService::class.java).setAction(WakeService.ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+    /** The permanent notification. It stays while someone is signed in; the switch in Settings controls the microphone part. */
+    fun serviceNotification(listening: Boolean = WakeBus.listening): Notification {
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, CHANNEL_SERVICE)
         else @Suppress("DEPRECATION") Notification.Builder(context)
         return builder
             .setSmallIcon(icon())
-            .setContentTitle("JARVIS is listening for “Hey JARVIS”")
-            .setContentText("Nothing is sent until you say the words.")
+            .setContentTitle(if (listening) "JARVIS is listening for “Hey JARVIS”" else "JARVIS is on")
+            .setContentText(if (listening) "Nothing is sent until you say the words. Reminders and messages reach you here too."
+                            else "Reminders and messages reach you even when the app is closed.")
             .setContentIntent(openApp())
-            .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
@@ -66,6 +62,7 @@ class WakeNotifier(private val context: Context) {
             .setSmallIcon(icon())
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text)) // a morning briefing is a whole paragraph
             .setContentIntent(openApp())
             .setAutoCancel(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
