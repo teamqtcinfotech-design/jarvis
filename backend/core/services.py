@@ -959,7 +959,8 @@ def ai_context(user: User, include_private: bool = True) -> dict:
         return {"enum": v.get("values"), "bool": "on/off", "time": "HH:MM (24h)",
                 "days": "day names: sunday / sat,sun / weekdays / none",
                 "blocks": "set with routineAdd / routineRemove"}.get(v["type"]) or f"{v['min']}-{v['max']}"
-    ctx["settings"] = {k: {"now": current[k], "allowed": allowed(v), "means": v["say"]} for k, v in PREF_SCHEMA.items()}
+    ctx["settings"] = {k: {"now": current[k], "allowed": allowed(v), "means": v["say"]}
+                       for k, v in PREF_SCHEMA.items() if not v.get("hidden")}
     ctx["settings"]["quietHours"] = {"now": f"{current['quietStartHour']}-{current['quietEndHour']}", "allowed": "START-END in 24h",
                                      "means": "quiet hours start and end together"}
     ctx["settings"]["officeHours"] = {"now": f"{current['officeStart']}-{current['officeEnd']}", "allowed": "START-END in 24h, e.g. 10-19",
@@ -991,6 +992,9 @@ PREF_SCHEMA = {
     "quietEndHour": {"type": "int", "min": 0, "max": 23, "default": 7, "say": "quiet hours end"},
     "wakeWordEnabled": {"type": "bool", "default": False, "say": "Hey JARVIS listening"},
     "meetingMode": {"type": "bool", "default": False, "say": "meeting mode"},
+    # Set by the server when meeting mode is switched OFF during a diary meeting: that meeting no longer counts
+    # as "in a meeting" (until this time). Kept here so it survives the app being closed and reopened.
+    "meetingOverrideUntil": {"type": "text", "default": "", "say": "diary meeting override", "hidden": True},
     # Work routine: used to find free slots, spot clashes and judge how full a day is.
     "officeStart": {"type": "time", "default": "10:00", "say": "office start"},
     "officeEnd": {"type": "time", "default": "19:00", "say": "office end"},
@@ -1150,6 +1154,8 @@ def coerce_pref(key: str, value) -> tuple[str, object]:
         return key, n
     if t == "time":
         return key, _parse_time_text(value)
+    if t == "text":
+        return key, str(value or "")[:64]
     if t == "days":
         return key, _parse_days(value)
     if t == "blocks":
@@ -1179,6 +1185,8 @@ def describe_pref(key: str, value) -> str:
         return f"{spec['say']} {value}"
     if spec["type"] == "time":
         return f"{spec['say']} {_say_time(value)}"
+    if spec["type"] == "text":
+        return f"{spec['say']} {value}" if value else f"{spec['say']} cleared"
     if spec["type"] == "days":
         from .scheduling import WEEKDAY_NAMES
         return f"{spec['say']} " + (", ".join(WEEKDAY_NAMES[d] for d in value) if value else "none")
@@ -1230,11 +1238,36 @@ def expand_pref_patch(patch: dict, current: dict | None = None) -> dict:
     return patch
 
 
+def current_busy_until(user: User, now: datetime | None = None) -> datetime | None:
+    """If a diary meeting of this person is running right now, when it ends (the latest end among overlaps)."""
+    if not user.is_md:
+        return None
+    now = now or timezone.now()
+    ends = [datetime.fromisoformat(w["end"]) for w in busy_windows(now.astimezone(tu.IST).date())
+            if datetime.fromisoformat(w["start"]) <= now < datetime.fromisoformat(w["end"])]
+    return max(ends) if ends else None
+
+
+def meeting_override_until(prefs: dict) -> datetime | None:
+    raw = (prefs or {}).get("meetingOverrideUntil") or ""
+    try:
+        return datetime.fromisoformat(raw) if raw else None
+    except ValueError:
+        return None
+
+
 def set_prefs(user: User, patch: dict) -> dict:
     expanded = expand_pref_patch(patch or {}, get_prefs(user))
     clean = dict(coerce_pref(k, v) for k, v in expanded.items())
     if not clean:
         raise ServiceError("invalid", "Nothing to change.", 422)
+    # Meeting mode switched OFF while the diary says he is in a meeting: he is overriding the diary, and the
+    # override must outlive the app (it is applied in reminders_for, which the phone reads every few seconds).
+    if clean.get("meetingMode") is False:
+        until = current_busy_until(user)
+        clean["meetingOverrideUntil"] = until.isoformat() if until else ""
+    elif clean.get("meetingMode") is True:
+        clean["meetingOverrideUntil"] = ""
     row, _ = UserPrefs.objects.get_or_create(user=user)
     row.data = {**(row.data or {}), **clean}
     row.save()

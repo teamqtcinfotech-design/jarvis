@@ -101,10 +101,15 @@ class HealthView(APIView):
         ).count()
         link = services.user_link(request.user)
         cursor = getattr(link, "cursor", None) if link else None
+        from .models import PushDevice
+
         return Response({
             "server_time": tu.now_local().isoformat(),
             "ai": {"enabled": ai_brain.ai_available()},
             "push": push.describe(),
+            # Phones registered for live push for THIS login, and what the last push attempt did.
+            "push_devices": PushDevice.objects.filter(user=request.user).count(),
+            "push_last": push.LAST,
             "taskpanel": {
                 **tp_client().describe(),
                 "linked": link is not None,

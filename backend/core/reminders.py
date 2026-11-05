@@ -13,8 +13,8 @@ from django.utils import timezone
 from . import timeutils as tu
 from .models import Kind, Priority, PrivateTask, ReminderAck, SharedTask, Status, User
 from .services import (
-    busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs, md_private_qs, pa_tasks_qs,
-    shared_md_tasks_qs,
+    busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs, md_private_qs,
+    meeting_override_until, pa_tasks_qs, shared_md_tasks_qs,
 )
 
 LOOKBACK = timedelta(hours=12)
@@ -131,5 +131,11 @@ def reminders_for(user: User, hours: int = 48) -> dict:
     today = tu.today_local()
     meetings = []
     if user.is_md:
-        meetings = [{"start": w["start"], "end": w["end"]} for w in busy_windows(today)]
+        # His own diary meetings, for the phone's "in a meeting" sense. A meeting he switched meeting mode off
+        # during no longer counts (the override is kept on the server, so closing the app does not bring it back).
+        override = meeting_override_until(prefs)
+        for w in busy_windows(today):
+            if override and datetime.fromisoformat(w["end"]) <= override:
+                continue
+            meetings.append({"start": w["start"], "end": w["end"]})
     return {"server_time": now.isoformat(), "reminders": result, "busy_windows": meetings}

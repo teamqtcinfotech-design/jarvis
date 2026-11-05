@@ -886,6 +886,32 @@ class SmartAssistantTests(BaseCase):
         self.assertEqual(self.md_client.get("/api/v1/assistant/usage/").json()["questions_today"], 1)
 
 
+class MeetingOverrideTests(BaseCase):
+    def test_switching_meeting_mode_off_during_a_diary_meeting_sticks_until_it_ends(self):
+        # The fixture meeting (now + 1 h, 30 min) is in the diary; make one that is running right now too.
+        now = tu.now_local()
+        start = (now - timedelta(minutes=10)).replace(second=0, microsecond=0)
+        running = services.create_private_task(self.md, {"title": "Running meeting", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                         "due_date": start.date(), "due_time": start.time(), "duration_minutes": 60})
+        windows = self.md_client.get("/api/v1/reminders/").json()["busy_windows"]
+        self.assertTrue(any(datetime.fromisoformat(w["start"]) <= running.scheduled_start <= datetime.fromisoformat(w["end"]) for w in windows))
+        # He switches meeting mode off while it runs: that meeting stops counting, the later one still does.
+        r = self.md_client.patch("/api/v1/me/prefs/", {"meetingMode": False}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["meetingOverrideUntil"])
+        windows = self.md_client.get("/api/v1/reminders/").json()["busy_windows"]
+        self.assertFalse(any(datetime.fromisoformat(w["start"]) <= running.scheduled_start < datetime.fromisoformat(w["end"]) for w in windows))
+        self.assertTrue(any(datetime.fromisoformat(w["start"]) == self.private.scheduled_start for w in windows))
+        # Mansi still sees Sir as busy (his override is about his own phone's manners, not his availability).
+        pa_busy = self.pa_client.get("/api/v1/today/").json()["md_busy_today"]
+        self.assertTrue(any(datetime.fromisoformat(w["start"]) <= running.scheduled_start < datetime.fromisoformat(w["end"]) for w in pa_busy))
+        # Switching it on again clears the override; the AI never sees this internal setting.
+        self.assertEqual(self.md_client.patch("/api/v1/me/prefs/", {"meetingMode": True}, format="json").json()["meetingOverrideUntil"], "")
+        self.assertNotIn("meetingOverrideUntil", services.ai_context(self.md)["settings"])
+        health = self.md_client.get("/api/v1/health/").json()
+        self.assertIn("push_devices", health)
+
+
 class DataViewTests(BaseCase):
     """Answers as data: timeline / chart / table views, scoped exactly like everything else."""
 

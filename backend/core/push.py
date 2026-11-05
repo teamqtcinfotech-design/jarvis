@@ -31,6 +31,8 @@ SYNC = False  # tests: send inline instead of in a background thread
 _app = None
 _failed = False
 _lock = threading.Lock()
+# What happened the last time a push was attempted (shown in /health/ so a phone that hears nothing can be diagnosed).
+LAST: dict = {"at": None, "alert": "", "devices": 0, "sent": 0, "removed": 0, "error": ""}
 
 
 def _credential_source():
@@ -154,10 +156,19 @@ def send_to_user(user, data: dict[str, str], urgent: bool = False) -> dict:
 
 
 def send_alert(alert_id) -> dict:
+    from django.utils import timezone
+
     alert = Alert.objects.select_related("recipient").filter(id=alert_id).first()
     if alert is None or alert.acknowledged_at:
         return {"sent": 0, "removed": 0, "devices": 0}
-    return send_to_user(alert.recipient, payload_for(alert), urgent=(alert.priority == "URGENT"))
+    try:
+        result = send_to_user(alert.recipient, payload_for(alert), urgent=(alert.priority == "URGENT"))
+        LAST.update(at=timezone.now().isoformat(), alert=f"{alert.kind} for {alert.recipient.username}", error="", **result)
+        return result
+    except Exception as err:  # noqa: BLE001
+        LAST.update(at=timezone.now().isoformat(), alert=f"{alert.kind} for {alert.recipient.username}",
+                    error=f"{type(err).__name__}: {str(err)[:160]}")
+        raise
 
 
 def notify_alert(alert_id) -> None:
