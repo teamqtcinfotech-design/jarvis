@@ -22,7 +22,7 @@ import { PresenceState, usePresence } from './presence';
 import { useSession } from './session';
 import { say } from './speech';
 import type { Priority, Reminder, ServerAlert } from './types';
-import { onPush } from './wake';
+import { onPush, wakeSupported } from './wake';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => {
@@ -56,6 +56,17 @@ export interface EngineItem {
   followups: number;
   concealed?: boolean;
   mode?: 'loud' | 'silent';
+  /** Why it was kept back instead of spoken: the offer later says "during your meeting" rather than "while you were away". */
+  heldFor?: 'missed' | 'away' | 'meeting' | 'facedown' | 'quiet';
+}
+
+/** "while you were away" / "during your meeting" …: one phrase for the whole batch, honest about the reason. */
+function heldPhrase(items: EngineItem[]): { en: string; hi: string } {
+  const reasons = new Set(items.map((i) => i.heldFor ?? 'away'));
+  if (reasons.size === 1 && reasons.has('meeting')) return { en: 'during your meeting', hi: 'आपकी मीटिंग के दौरान' };
+  if (reasons.size === 1 && reasons.has('quiet')) return { en: 'during quiet hours', hi: 'शांत समय में' };
+  if (reasons.size === 1 && reasons.has('facedown')) return { en: 'while your phone was face down', hi: 'जब फ़ोन उल्टा रखा था' };
+  return { en: 'while you were away', hi: 'जब आप दूर थे' };
 }
 
 /** "Sir, while you were away: … Shall I read them?" — built by the engine, asked by the conversation. */
@@ -107,7 +118,6 @@ async function ensureChannels() {
   await Notifications.setNotificationChannelAsync(CHANNELS.URGENT, {
     name: 'Urgent reminders',
     importance: Notifications.AndroidImportance.MAX,
-    sound: 'default',
     vibrationPattern: [0, 400, 200, 400, 200, 400],
     lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
   });
@@ -169,6 +179,25 @@ function buzzSilently(urgent: boolean) {
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** "Sir, your meeting starts in 15 minutes." -> "your meeting starts in 15 minutes." (the address is said once). */
+function withoutAddress(text: string, address: string): string {
+  const t = text.trim();
+  const low = t.toLowerCase();
+  const a = address.toLowerCase();
+  if (a && (low.startsWith(`${a}, `) || low.startsWith(`${a} `))) return t.slice(address.length + 1).trim();
+  return t;
+}
+
+/** Several things due at once are said as one sentence, not a burst of separate announcements. */
+function combined(lines: string[], address: string): string {
+  if (lines.length === 1) return lines[0];
+  const parts = lines.map((l) => {
+    const s = withoutAddress(l, address);
+    return /[.!?]$/.test(s) ? s : `${s}.`;
+  });
+  return `${address}, ${lines.length} things. ${parts.join(' ')}`;
+}
 
 /** "2 private reminders and 1 request from your PA" in English and Hindi. */
 function describeHeld(items: EngineItem[], isMD: boolean): { en: string; hi: string } {
@@ -323,7 +352,17 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [address, privateAloud],
   );
 
-  const deliver = useCallback(
+  // Told once: whatever the app speaks or shows is reported to the server, so the background part never says
+  // it again (and the other way round). Best effort; the next report retries nothing, the server list is the truth.
+  const tell = useCallback((items: EngineItem[]) => {
+    const keys = items.filter((i) => i.source === 'reminder').map((i) => i.key);
+    const ids = items.map((i) => i.alertId).filter((id): id is string => !!id);
+    if (!keys.length && !ids.length) return;
+    api('/told/', { method: 'POST', body: { keys, ids } }).catch(() => undefined);
+  }, []);
+
+  /** Put an item on screen (banner now, or queued behind the current one) and register its urgent follow-ups. */
+  const show = useCallback(
     (item: EngineItem, mode: 'loud' | 'silent') => {
       const shown: EngineItem = { ...item, mode, concealed: mode === 'silent' && item.isPrivate };
       if (!currentRef.current) setCurrent(shown);
@@ -332,6 +371,19 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         queueRef.current.sort((a, b) => RANK[a.priority] - RANK[b.priority]);
         setQueued(queueRef.current.length);
       }
+      if (item.priority === 'URGENT' && item.followups < FOLLOWUP_MINUTES.length) {
+        followups.current.set(item.key, {
+          item: { ...item, followups: item.followups + 1 },
+          at: Date.now() + FOLLOWUP_MINUTES[item.followups] * 60_000,
+        });
+      }
+    },
+    [setCurrent],
+  );
+
+  const deliver = useCallback(
+    (item: EngineItem, mode: 'loud' | 'silent') => {
+      show(item, mode);
       if (mode === 'loud') {
         Haptics.notificationAsync(
           item.priority === 'URGENT' ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success,
@@ -340,20 +392,31 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       } else {
         buzzSilently(item.priority === 'URGENT');
       }
-      if (item.priority === 'URGENT' && item.followups < FOLLOWUP_MINUTES.length) {
-        followups.current.set(item.key, {
-          item: { ...item, followups: item.followups + 1 },
-          at: Date.now() + FOLLOWUP_MINUTES[item.followups] * 60_000,
-        });
-      }
+      tell([item]);
     },
-    [spokenFor, setCurrent],
+    [show, spokenFor, tell],
+  );
+
+  /** Several things at the same moment: shown one by one, said as ONE sentence. */
+  const deliverTogether = useCallback(
+    (items: EngineItem[]) => {
+      if (items.length === 1) return deliver(items[0], 'loud');
+      items.forEach((item) => show(item, 'loud'));
+      Haptics.notificationAsync(
+        items.some((i) => i.priority === 'URGENT') ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success,
+      ).catch(() => undefined);
+      say(combined(items.map(spokenFor), address));
+      tell(items);
+    },
+    [deliver, show, spokenFor, tell, address],
   );
 
   const hold = useCallback(
-    (item: EngineItem) => {
+    (item: EngineItem, why: NonNullable<EngineItem['heldFor']>) => {
       if (heldRef.current.some((h) => h.key === item.key)) return;
-      const next = [...heldRef.current, item].sort((a, b) => RANK[a.priority] - RANK[b.priority] || a.fireAt - b.fireAt);
+      const next = [...heldRef.current, { ...item, heldFor: why }].sort(
+        (a, b) => RANK[a.priority] - RANK[b.priority] || a.fireAt - b.fireAt,
+      );
       setHeld(next);
     },
     [setHeld],
@@ -367,14 +430,15 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     if (items.length <= announcedHeld.current) return;
     announcedHeld.current = items.length;
     const what = describeHeld(items, isMD);
+    const when = heldPhrase(items);
     const sir = isMD ? 'Sir' : address;
     const them = items.length === 1 ? 'it' : 'them';
     offerSeq.current += 1;
     setOffer({
       id: offerSeq.current,
       count: items.length,
-      text: `${sir}, while you were away: ${what.en}. Shall I read ${them}?`,
-      textHi: `${isMD ? 'सर' : address}, जब आप दूर थे: ${what.hi}। पढ़ कर सुनाऊँ?`,
+      text: `${sir}, ${when.en}: ${what.en}. Shall I read ${them}?`,
+      textHi: `${isMD ? 'सर' : address}, ${when.hi}: ${what.hi}। पढ़ कर सुनाऊँ?`,
     });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
   }, [address, isMD]);
@@ -387,45 +451,86 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     talkingRef.current = talking;
   }, []);
 
+  /**
+   * Decide what happens to one item that is due now. Returns 'loud' when it should be spoken (the caller speaks
+   * everything due at this moment as one sentence), or handles it itself (silent banner, or held for later).
+   */
   const route = useCallback(
-    (item: EngineItem, state: PresenceState, now: number) => {
+    (item: EngineItem, state: PresenceState, now: number): 'loud' | null => {
       handled.current.add(item.key);
       const missed = item.source === 'reminder' && item.followups === 0 && now - item.fireAt > STALE_MS;
-      if (missed) return hold(item); // fired while the app was closed or the phone asleep
+      if (missed) {
+        hold(item, 'missed'); // fired while the app was closed or the phone asleep
+        return null;
+      }
       if (item.priority === 'LOW' && item.source === 'server') {
-        return state === 'present' ? deliver(item, 'silent') : hold(item);
+        // Small news ("Mansi started a task"): never spoken, never vibrates, never offered; it is in the lists.
+        tell([item]);
+        return null;
       }
       if (state === 'present') {
         // Mid-conversation with JARVIS: show it quietly, never speak over him (he can act on it by voice).
-        if (talkingRef.current) return deliver(item, 'silent');
-        // With you — but is someone talking in the room? Then it is a meeting: vibrate, hold the words.
-        const probe = voiceProbe.current;
-        if (!probe) return deliver(item, 'loud');
-        probe()
-          .catch(() => false)
-          .then((voices) => {
-            if (!voices) return deliver(item, 'loud');
-            deliver(item, 'silent');
-            hold(item);
-          });
-        return;
+        if (talkingRef.current) {
+          deliver(item, 'silent');
+          return null;
+        }
+        return 'loud';
       }
-      if (state === 'away') return hold(item);
+      if (state === 'away') {
+        hold(item, 'away');
+        return null;
+      }
       // meeting / face down / quiet hours: only urgent interrupts, and silently
-      return item.priority === 'URGENT' ? deliver(item, 'silent') : hold(item);
+      if (item.priority === 'URGENT') deliver(item, 'silent');
+      else hold(item, state);
+      return null;
     },
-    [deliver, hold],
+    [deliver, hold, tell],
+  );
+
+  /** Everything due right now that may be spoken: one voice check for the room, then one sentence. */
+  const speakNow = useCallback(
+    (items: EngineItem[]) => {
+      const probe = voiceProbe.current;
+      const go = (voices: boolean) => {
+        if (voices) {
+          // Someone is talking in the room: he is here, so it goes on screen with a vibration, just not aloud.
+          // (It is NOT "while you were away": he can see it, and it is never offered again.)
+          items.forEach((item) => deliver(item, 'silent'));
+          return;
+        }
+        deliverTogether(items);
+      };
+      if (!probe) go(false);
+      else probe().catch(() => false).then(go);
+    },
+    [deliver, deliverTogether],
   );
 
   const tick = useCallback(() => {
+    // While JARVIS is not on screen, the phone's always-on part (ReminderWatcher) delivers reminders and news and
+    // reports them as told. This JavaScript side keeps running in the background too, so without this guard the same
+    // reminder was said twice: once by the watcher and once from here. Everything is re-checked on return
+    // (the "active" handler below polls first, so anything the watcher already said is skipped).
+    if (wakeSupported && AppState.currentState !== 'active') return;
     const now = Date.now();
     const due: EngineItem[] = [];
     for (const r of remindersRef.current) {
-      if (!handled.current.has(r.key) && Date.parse(r.fire_at) <= now) due.push(fromReminder(r));
+      if (handled.current.has(r.key) || Date.parse(r.fire_at) > now) continue;
+      if (r.told_at) {
+        handled.current.add(r.key); // the background part already said it while the app was closed
+        continue;
+      }
+      due.push(fromReminder(r));
     }
     for (const a of alertsRef.current) {
       const key = `alert:${a.id}`;
-      if (!handled.current.has(key)) due.push(fromAlert(a));
+      if (handled.current.has(key)) continue;
+      if (!a.fresh) {
+        handled.current.add(key); // told already, or old news: it stays in the lists, it is not announced
+        continue;
+      }
+      due.push(fromAlert(a));
     }
     for (const [k, s] of snoozed.current) {
       if (s.until <= now) {
@@ -442,17 +547,44 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       }
     }
     due.sort((a, b) => RANK[a.priority] - RANK[b.priority] || a.fireAt - b.fireAt);
+    const loud: EngineItem[] = [];
     for (const item of due) {
       if (currentRef.current?.key === item.key) setCurrent(null);
-      route(item, presenceRef.current, now);
+      if (route(item, presenceRef.current, now) === 'loud') loud.push(item);
     }
+    if (loud.length) speakNow(loud);
     offerHeldIfBack();
-  }, [route, offerHeldIfBack, setCurrent]);
+  }, [route, speakNow, offerHeldIfBack, setCurrent]);
+
+  /** The server list is the truth: anything no longer in it (task finished, request decided) leaves the screen. */
+  const pruneGone = useCallback(
+    (live: Set<string>) => {
+      const stays = (i: EngineItem) => live.has(i.key) || snoozed.current.has(i.key) || followups.current.has(i.key);
+      queueRef.current = queueRef.current.filter(stays);
+      setQueued(queueRef.current.length);
+      const remaining = heldRef.current.filter(stays);
+      if (remaining.length !== heldRef.current.length) {
+        setHeld(remaining);
+        announcedHeld.current = Math.min(announcedHeld.current, remaining.length);
+      }
+      if (currentRef.current && !stays(currentRef.current)) advance();
+    },
+    [advance, setHeld],
+  );
 
   const scheduleOs = useCallback(async (reminders: Reminder[]) => {
     const now = Date.now();
     const upcoming = reminders.filter((r) => Date.parse(r.fire_at) > now + 5000).slice(0, 40);
     setUpcomingCount(upcoming.length);
+    // With the background part on this phone, it delivers reminders while the app is closed (and reports them
+    // as told). A second alarm from here would only make a second notification for the same reminder.
+    if (wakeSupported) {
+      if (scheduledSig.current !== 'off') {
+        scheduledSig.current = 'off';
+        await Notifications.cancelAllScheduledNotificationsAsync().catch(() => undefined);
+      }
+      return;
+    }
     const sig = upcoming.map((r) => r.key + r.fire_at).join('|');
     if (sig === scheduledSig.current) return;
     scheduledSig.current = sig;
@@ -465,7 +597,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
           title: r.is_private ? 'JARVIS' : 'JARVIS · Reminder',
           body: r.is_private ? 'You have a private reminder. Open JARVIS to see it.' : r.title,
           data: { key: r.key },
-          sound: r.priority === 'URGENT' ? 'default' : undefined,
+          sound: r.priority === 'URGENT', // the phone's default notification sound, urgent only
         },
         trigger: {
           type: Notifications.SchedulableTriggerInputTypes.DATE,
@@ -486,12 +618,13 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       alertsRef.current = alerts.data.results;
       setBusyWindows(rem.data.busy_windows);
       setLastSync(Date.now());
+      pruneGone(new Set([...rem.data.reminders.map((r) => r.key), ...alerts.data.results.map((a) => `alert:${a.id}`)]));
       await scheduleOs(rem.data.reminders).catch(() => undefined);
       tick();
     } catch {
       // Offline: keep last known data; OS notifications already scheduled still fire.
     }
-  }, [scheduleOs, tick]);
+  }, [scheduleOs, tick, pruneGone]);
 
   // Permissions + channels
   useEffect(() => {
@@ -594,9 +727,9 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const acceptOffer = useCallback(() => {
     setOffer(null);
     const items = [...heldRef.current];
-    for (const item of items) say(spokenFor(item)); // one after another
+    if (items.length) say(combined(items.map(spokenFor), address)); // one sentence, the address once
     acknowledgeAllHeld().catch(() => undefined);
-  }, [spokenFor, acknowledgeAllHeld]);
+  }, [spokenFor, acknowledgeAllHeld, address]);
 
   const declineOffer = useCallback(() => {
     setOffer(null);

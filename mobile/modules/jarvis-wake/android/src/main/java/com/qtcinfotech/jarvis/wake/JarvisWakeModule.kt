@@ -71,6 +71,7 @@ class JarvisWakeModule : Module() {
         }
         OnActivityEntersBackground {
             WakeBus.appInForeground = false
+            WakeBus.paused = false  // the app no longer needs the microphone: "Hey JARVIS" listens again at once
         }
 
         AsyncFunction("getStatus") {
@@ -78,7 +79,8 @@ class JarvisWakeModule : Module() {
             mapOf(
                 "supported" to true,
                 "running" to WakeBus.running,
-                "listening" to WakeBus.listening,
+                // false while Android is silencing the microphone, so the app restarts the listening part
+                "listening" to (WakeBus.listening && !WakeBus.micBlocked),
                 "overlayAllowed" to (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)),
                 "micAllowed" to (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED),
                 "notificationsAllowed" to NotificationManagerCompat.from(context).areNotificationsEnabled(),

@@ -93,6 +93,7 @@ export default function Talk() {
               onChange={conv.editDraft}
               onSave={conv.save}
               onCancel={conv.cancelDraft}
+              onReply={conv.send}
             />
           ) : null}
         </ScrollView>

@@ -3,6 +3,8 @@ package com.qtcinfotech.jarvis.wake
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import android.util.Log
 
 /**
@@ -15,11 +17,16 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         val prefs = WakeBus.prefs(context)
         if (!prefs.getBoolean(WakeBus.KEY_ENABLED, false)) return
+        // With "display over other apps" allowed, Android lets the service use the microphone even when it is
+        // started from the background, so "Hey JARVIS" comes back by itself. Otherwise: watch only, and ask
+        // for one tap. If the microphone turns out to be silenced anyway, the service posts that tap itself.
+        val overlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+        val wakeWord = prefs.getBoolean(WakeBus.KEY_WAKE_WORD, false)
         try {
-            WakeService.start(context, withMicrophone = false)
+            WakeService.start(context, withMicrophone = overlay)
         } catch (e: Throwable) {
             Log.w("JarvisWake", "Could not start the watcher after boot: ${e.message}")
         }
-        if (prefs.getBoolean(WakeBus.KEY_WAKE_WORD, false)) WakeNotifier(context).showSwitchOn()
+        if (wakeWord && !overlay) WakeNotifier(context).showSwitchOn()
     }
 }

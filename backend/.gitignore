@@ -5,3 +5,4 @@ __pycache__/
 dev.sqlite3
 staticfiles/
 firebase*.json
+xai_samples/

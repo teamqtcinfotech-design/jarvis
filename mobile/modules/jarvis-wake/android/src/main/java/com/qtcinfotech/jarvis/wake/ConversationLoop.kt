@@ -30,6 +30,10 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         private set
     private var silenceRounds = 0
     private var retries = 0
+    /** JARVIS asked something (or was just woken) and is waiting; false after a plain answer or "saved". */
+    private var patient = true
+    /** Changes every time listening starts or ends, so a late safety timer knows it is out of date. */
+    private var listenRound = 0
     private val prefs = WakeBus.prefs(context)
     private val address: String get() = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
     private val isMd: Boolean get() = address == "Sir"
@@ -41,6 +45,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         WakeBus.inConversation = true
         silenceRounds = 0
         retries = 0
+        patient = true
         overlay.show("…", "thinking")
         main.post {
             ensureRecognizer()
@@ -51,9 +56,10 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     fun end() {
         if (!active) return
         active = false
-        WakeBus.inConversation = false
+        WakeBus.inConversation = false  // "Hey JARVIS" listens again from this moment
         overlay.hide()
         main.post {
+            listenRound += 1
             try {
                 recognizer?.cancel()
             } catch (_: Throwable) {
@@ -101,6 +107,9 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         val say = resp.optString("say", show)
         val lang = if (resp.optString("say_lang") == "hi") "hi-IN" else "hi-IN" // Indian voice for both, like the app
         val listen = resp.optBoolean("listen", true)
+        // After a plain answer or a "saved", one short listen for a follow-up is enough; then the microphone goes
+        // straight back to "Hey JARVIS". Only a question that is waiting for him gets the longer wait.
+        patient = resp.optString("action") !in RESTFUL
         if (show.isNotBlank()) {
             notifier.showConversation("JARVIS: $show")
             overlay.update(show, "speaking")
@@ -129,6 +138,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     private fun listen() {
         if (!active) return
         main.post {
+            if (!active) return@post
             ensureRecognizer()
             notifier.showConversation("Listening…")
             overlay.update(null, "listening")
@@ -137,8 +147,29 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
             } catch (e: Throwable) {
                 Log.w(TAG, "startListening failed: ${e.message}")
                 end()
+                return@post
             }
+            armSafetyTimer(LISTEN_TIMEOUT_MS)
         }
+    }
+
+    /**
+     * Android's speech service sometimes never answers (it was killed, or never got the microphone). Without a
+     * timer the conversation would wait for ever and "Hey JARVIS" would stay deaf. Each call replaces the last.
+     */
+    private fun armSafetyTimer(ms: Long) {
+        val round = ++listenRound
+        main.postDelayed({
+            if (active && round == listenRound) {
+                Log.w(TAG, "speech service did not answer; giving the microphone back")
+                try {
+                    recognizer?.destroy()
+                } catch (_: Throwable) {
+                }
+                recognizer = null  // a fresh one next time
+                end()
+            }
+        }, ms)
     }
 
     private fun intent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -156,26 +187,40 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBeginningOfSpeech() {
+            if (active) armSafetyTimer(SPEECH_TIMEOUT_MS)  // he is talking: give a long sentence its time
+        }
+        override fun onRmsChanged(rmsdB: Float) {
+            overlay.level(rmsdB)  // the waves on screen move with his voice
+        }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
         override fun onPartialResults(partialResults: Bundle?) {}
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
         override fun onResults(results: Bundle?) {
-            val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
-            if (text.isEmpty()) {
+            listenRound += 1  // answered: the safety timer for this round is void
+            if (!active) return
+            val heard = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
+            if (heard.isEmpty()) {
                 silence()
                 return
             }
             silenceRounds = 0
             retries = 0
-            Log.i(TAG, "heard: $text")
+            Log.i(TAG, "heard: $heard")
+            // He said "Hey JARVIS" while JARVIS was already listening: that is a call, not an instruction.
+            val text = WAKE_PHRASE.replaceFirst(heard, "").trim()
+            if (text.isEmpty()) {
+                patient = true
+                speakThen(if (isMd) "जी सर?" else "जी?", "Ji $address?", "hi-IN") { listen() }
+                return
+            }
             send(text)
         }
 
         override fun onError(error: Int) {
+            listenRound += 1
             if (!active) return
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> silence()
@@ -192,20 +237,32 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         }
     }
 
-    /** Quiet rounds: re-listen twice, nudge once, re-listen twice more, then rest (the wake word brings JARVIS back). */
+    /**
+     * He said nothing. After a plain answer: rest at once, so "Hey JARVIS" is listening again within a second.
+     * While a question is waiting for him: listen once more, ask "Sir?" once, listen, then rest.
+     */
     private fun silence() {
         if (!active) return
         silenceRounds += 1
         when {
+            !patient -> end()
             silenceRounds < 2 -> listen()
             silenceRounds == 2 -> speakThen(if (isMd) "सर?" else "$address?", "$address?", "hi-IN") { listen() }
-            silenceRounds < 5 -> listen()
             else -> end()
         }
     }
 
     companion object {
         private const val TAG = "JarvisWake"
+        private const val LISTEN_TIMEOUT_MS = 15_000L   // nothing heard and no word from the speech service
+        private const val SPEECH_TIMEOUT_MS = 30_000L   // he started talking: the longest one sentence may take
+        /** Replies after which nothing is being asked of him. */
+        private val RESTFUL = setOf("answer", "saved", "setting_applied", "dismiss", "briefing", "read_missed")
+        /** "Hey JARVIS" as the phone's speech recogniser tends to write it, at the start of what was heard. */
+        private val WAKE_PHRASE = Regex(
+            "^\\s*(?:(?:hey|hi|hello|ok|okay|he|hay|hai|a|oh|हे|हाय|हेलो)[\\s,]+)?(?:jarvis|jarwis|jarvish|jervis|jarves|javis|jarbis|जार्विस|जारविस)[\\s,.!?]*",
+            RegexOption.IGNORE_CASE,
+        )
         fun available(context: Context): Boolean = SpeechRecognizer.isRecognitionAvailable(context)
     }
 }

@@ -3,6 +3,7 @@
 Nothing here writes business data. The draft says what WOULD happen; the phone
 then calls the normal, permission-checked endpoint with an Idempotency-Key.
 """
+import difflib
 import re
 from datetime import date, time
 
@@ -15,12 +16,13 @@ from .models import Kind, Priority, PrivateTask, SharedTask, TaskCategory, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
-TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation"}
+TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation", "pa_self_task"}
 EDIT_ACTIONS = {"change_task", "delete_task"}
 _CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind"}
 # Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the PA's
 # (Sir giving Mansi work) or the MD's (Mansi asking for Sir's time; she only ever hears "busy", never why).
-_SLOT_ACTIONS = {"private_task": "self", "pa_meeting": "self", "pa_task": "pa", "md_request": "md", "change_task": "self"}
+_SLOT_ACTIONS = {"private_task": "self", "pa_meeting": "self", "pa_task": "pa", "md_request": "md", "change_task": "self",
+                 "pa_self_task": "self"}
 MAX_SCHEDULE_QUESTIONS = 2  # ask about a clash at most twice, then take his word
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -143,6 +145,19 @@ def _mentions_pa(text: str) -> bool:
     return bool(pa and any(n and f" {n.lower()} " in low for n in (pa.display_name, pa.first_name)))
 
 
+_FOR_SIR = re.compile(r"\b(sir|md|boss|sahab|saab)\b", re.IGNORECASE)
+# Mansi speaking about herself ("mera reminder", "I have to", "mujhe yaad dilana").
+_PA_OWN = re.compile(
+    r"\b(mera|meri|mere|mujhe|mujhko|maine|khud|apna|apni|apne|personal|my|mine|myself|for me|remind me|"
+    r"i have to|i need to|i will|i'll|i must)\b", re.IGNORECASE)
+
+
+def _last_cue(pattern: re.Pattern, text: str) -> int:
+    """Where the pattern was last said (-1 if never): in "…. mere liye" the answer comes last and wins."""
+    found = [m.start() for m in pattern.finditer(text)]
+    return found[-1] if found else -1
+
+
 def _route_intent(user: User, cmd: dict, text: str) -> str:
     """Final say on where a task goes. The AI proposes; these rules keep the routing safe and predictable."""
     intent = cmd.get("intent", "unknown")
@@ -163,9 +178,20 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
             and not _PERSONAL.search(text):
         intent = "needs_destination"
     if user.is_pa:
-        if intent in {"create_task", "meet_with_pa"}:
+        # Whose is it? For Sir, her own, or the team: it is never assumed. The model judges the meaning
+        # ("Sir ki cab book karni hai" is HER job); the words must back it up, otherwise JARVIS asks.
+        sir_at, own_at = _last_cue(_FOR_SIR, text), _last_cue(_PA_OWN, text)
+        for_sir, own = sir_at >= 0, own_at >= 0
+        if intent == "meet_with_pa":
             intent = "request_for_md"
-        if intent in {"accept_request", "decline_request", "complete_task", "assign_to_pa"}:
+        elif intent == "create_task" and cmd.get("engine") == "rules":
+            # The offline parser cannot judge meaning: her words decide, the last one said wins.
+            intent = "needs_destination" if not (own or for_sir) else "pa_own" if own_at > sir_at else "request_for_md"
+        elif intent == "create_task":       # the model says it is her own
+            intent = "pa_own" if own or for_sir else "needs_destination"
+        elif intent == "request_for_md" and not for_sir:
+            intent = "pa_own" if own else "needs_destination"
+        if intent in {"accept_request", "decline_request", "assign_to_pa"}:
             intent = "unknown"
     elif intent == "request_for_md":
         intent = "create_task"
@@ -398,6 +424,12 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
 
     question_en = question_hi = ""
     clashes = review.get("clashes") or []
+    if whose == "self" and draft["action"] != "change_task" and d:
+        twin = _similar_item(subject, draft.get("title", ""), d, {c.get("id") for c in clashes})
+        if twin:
+            notes_en.append(f"You already have {twin} {day_en}.")
+            notes_hi.append(f"{twin} {day_hi} पहले से है।")
+            warnings.append(f"Similar item already on that day: {twin}")
     if clashes:
         c = clashes[0]
         span = f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"
@@ -448,6 +480,89 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         draft["spoken_reply"] = question_en
     elif notes_en and draft.get("spoken_reply"):
         draft["spoken_reply"] = _insert_notes(draft["spoken_reply"], notes_en)
+
+
+def _similar_item(user: User, title: str, day: date, skip_ids=()) -> str:
+    """The title of an open item on that day that looks like the same thing ("Meeting with Sharma ji" twice)."""
+    want = " ".join(re.findall(r"\w+", (title or "").lower()))
+    if len(want) < 6:
+        return ""
+    for item in scheduling.commitments(user, day) + scheduling.dated_items(user, day):
+        if item.get("id") in skip_ids:
+            continue
+        have = " ".join(re.findall(r"\w+", item["title"].lower()))
+        if difflib.SequenceMatcher(None, want, have).ratio() >= 0.8:
+            return item["title"]
+    return ""
+
+
+def _person_label(name: str) -> str:
+    name = " ".join((name or "").split())
+    return name.title() if name == name.lower() else name
+
+
+def _check_people(user: User, cmd: dict, draft: dict, address: str, history: list | None) -> None:
+    """Every person named must be someone JARVIS knows for this speaker: staff, the PA, a saved contact, or a
+    name already in their own tasks. Otherwise ask who they are (once), offer the nearest known name, and
+    remember the answer. Whatever the speaker explains about a person is saved as a contact straight away."""
+    saved = []
+    for c in (cmd.get("new_contacts") or [])[:3]:
+        if isinstance(c, dict) and str(c.get("name") or "").strip():
+            try:
+                services.add_contact(user, str(c["name"]), str(c.get("note") or ""))
+                saved.append(_person_label(str(c["name"])))
+            except services.ServiceError:
+                pass
+    # The person doing the work is resolved by the delegation step (it has its own "which Rahul?" question).
+    doer = services.norm_person(cmd.get("staff_name") or "") if draft["action"] == "delegation" else ""
+    names: list[str] = []
+    for n in (cmd.get("people") or [])[:4]:
+        if isinstance(n, str) and n.strip() and n.strip().lower() not in {x.lower() for x in names} \
+                and not (doer and services.norm_person(n) == doer):
+            names.append(n.strip())
+    draft["people"] = names
+    draft["contacts_saved"] = saved
+    # A question the server itself built (which staff member, nobody in that team, no PA yet) is answered first.
+    model_question = (cmd.get("clarification_question") or "").strip()
+    if draft["needs_clarification"] and draft["action"] != "choose_destination" and draft["question"] != model_question:
+        return
+    last_jarvis = " ".join(str(t.get("text", "")) for t in (history or [])[-3:] if t.get("role") == "jarvis").lower()
+    address_hi = "सर" if user.is_md else user.spoken_name
+    for name in names:
+        label = _person_label(name)
+        found = services.resolve_person(user, name)
+        if found["status"] == "known":
+            continue
+        if found["status"] == "ambiguous":
+            if f"which {label}".lower() in last_jarvis:
+                continue  # asked already; the answer is in the sentence now, do not ask in a loop
+            draft["needs_clarification"] = True
+            draft["question"] = f"{address}, which {label}: {' or '.join(found['options'])}?"
+            draft["question_hi"] = f"{address_hi}, कौन से {label}: {' या '.join(found['options'])}?"
+            return
+        if f"don't know any {label}".lower() in last_jarvis or f"किसी {label} को नहीं जानता".lower() in last_jarvis:
+            # Asked once already and the speaker carried on: take the name as an outside contact and move on.
+            try:
+                services.add_contact(user, label, "")
+                saved.append(label)
+            except services.ServiceError:
+                pass
+            continue
+        hint = f" Or did you mean {found['suggestions'][0]}?" if found["suggestions"] else ""
+        hint_hi = f" या आपका मतलब {found['suggestions'][0]} था?" if found["suggestions"] else ""
+        whose = whose_hi = ""
+        if draft["action"] == "choose_destination":
+            whose = (" And should this go in your personal tasks, to your PA, or to the team?" if user.is_md
+                     else " And is this for Sir, for you, or for someone in the team?")
+            whose_hi = (" और इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम को?" if user.is_md
+                        else " और ये सर के लिए है, आपके लिए, या टीम में किसी के लिए?")
+        draft["needs_clarification"] = True
+        draft["question"] = f"{address}, I don't know any {label}. Is {label} on the staff, or an outside contact?{hint}{whose}"
+        draft["question_hi"] = (f"{address_hi}, मैं किसी {label} को नहीं जानता। क्या {label} स्टाफ़ में हैं, "
+                                f"या बाहर के कॉन्टैक्ट?{hint_hi}{whose_hi}")
+        return
+    if saved:
+        draft["warnings"] = list(draft.get("warnings") or []) + [f"Saved as a contact: {', '.join(saved)}"]
 
 
 def _rebuilt(pending: dict, new: dict) -> dict:
@@ -501,9 +616,26 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
     return draft
 
 
+_SCREEN_ACTIONS = {"export_pdf", "export_csv", "share", "open_item", "open_settings", "go_home"}
+
+
+def _clean_screen(screen) -> dict | None:
+    """What the app says is on its screen (a data card): untrusted, so only short plain fields are kept."""
+    if not isinstance(screen, dict):
+        return None
+    items = []
+    for it in (screen.get("items") if isinstance(screen.get("items"), list) else [])[:15]:
+        if isinstance(it, dict) and it.get("id") and it.get("title"):
+            items.append({"id": str(it["id"])[:64], "title": str(it["title"])[:120]})
+    kind = str(screen.get("kind") or "")[:20]
+    if not kind:
+        return None
+    return {"kind": kind, "title": str(screen.get("title") or "")[:80], "items": items}
+
+
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
                 awaiting: str = "", choices: dict | None = None, include_private: bool = True,
-                pending: dict | None = None) -> dict:
+                pending: dict | None = None, screen: dict | None = None) -> dict:
     """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed.
     choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer.
     include_private=False: phone locked; the MD's private items are kept out of the model's view.
@@ -513,6 +645,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     ctx = services.ai_context(user, include_private=include_private)
     # The last few turns of THIS conversation, so follow-ups like "aur Neha ko bhi" make sense.
     ctx["conversation"] = ai_brain.history_text(history)
+    # The card he is looking at, so "is list ka PDF", "pehla wala" or a bare name from the list make sense.
+    on_screen = _clean_screen(screen)
+    if on_screen:
+        ctx["on_screen"] = on_screen
     model_text = full_text
     if choices and choices.get("items"):
         ctx["choices"] = {"intent": choices["intent"], "items": [{"id": i["id"], "title": i["title"]} for i in choices["items"][:10]]}
@@ -586,9 +722,13 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "targets": [],          # every item this applies to (complete / accept / decline / change / delete can take several)
         "target_candidates": [],
         "changes": {},          # change_task: the new values
+        "people": [],           # everyone named in it (checked against staff, contacts and past tasks)
+        "contacts_saved": [],   # people the speaker just explained, now remembered
+        "question_hi": "",      # Devanagari version of a server-built question, for the Hindi voice
         "schedule": None,       # diary check: clash / free slot / full day (see _advise_schedule)
         "overrides": {},        # confirm_pending: day / time to apply to the waiting card before saving
         "view": None,           # data the phone draws for this answer (timeline / chart / table), see datacards
+        "screen_action": "",    # something to do on the app's screen (export, share, open an item, go somewhere)
         "setting_key": "",      # set_setting
         "setting_value": "",
         "needs_clarification": bool(cmd.get("needs_clarification")),
@@ -604,10 +744,14 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "done_lang": "en",
     }
 
+    summary_hi = ""  # Hindi twin of a server-written answer (lists and charts), for the Hindi voice
+
     if intent == "create_task":
         draft["action"] = "private_task"
     elif intent == "request_for_md":
         draft["action"] = "md_request"
+    elif intent == "pa_own":
+        draft["action"] = "pa_self_task"  # Mansi's own task: on her list, visible to Sir, no approval needed
     elif intent == "assign_to_staff":
         draft["action"] = "delegation"
         _prepare_delegation(draft, cmd, user, address)
@@ -628,10 +772,15 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     elif intent == "needs_destination":
         draft["action"] = "choose_destination"
         draft["needs_clarification"] = True
-        draft["question"] = draft["question"] or (
-            f"{address}, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?"
-            if user.is_md else f"{address}, should I send this to Sir, or assign it to someone in the team?"
-        )
+        if cmd.get("intent") != "needs_destination":
+            draft["question"] = ""  # the model was asking something else; whose it is comes first
+        if not draft["question"]:
+            if user.is_md:
+                draft["question"] = f"{address}, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?"
+                draft["question_hi"] = "सर, इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम में किसी को?"
+            else:
+                draft["question"] = f"{address}, is this for Sir, for you, or for someone in the team?"
+                draft["question_hi"] = f"{address}, ये सर के लिए है, आपके लिए, या टीम में किसी के लिए?"
     elif intent in {"accept_request", "decline_request"}:
         draft["action"] = intent
         ids = {r["id"]: r for r in pending}
@@ -755,6 +904,33 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["needs_clarification"] = False
         draft["question"] = ""
         draft["spoken_reply"] = draft["spoken_reply"] or "Done."
+    elif intent == "screen_action":
+        # Voice works the screen: the app does it, nothing is saved or changed on the server.
+        act = cmd.get("screen_action") if cmd.get("screen_action") in _SCREEN_ACTIONS else ""
+        draft["action"] = "screen" if act else "answer"
+        draft["screen_action"] = act
+        draft["needs_clarification"] = False
+        draft["question"] = ""
+        if act in ("export_pdf", "export_csv", "share") and not on_screen:
+            draft["action"], draft["screen_action"] = "answer", ""
+            draft["spoken_reply"] = f"{address}, there is no list on screen. Ask me for one first, then I can download or share it."
+        elif act == "open_item":
+            known = {i["id"]: i for i in ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]}
+            for i in (on_screen or {}).get("items", []):
+                known.setdefault(i["id"], i)
+            chosen = _chosen(cmd, known)
+            if chosen:
+                draft["target"], draft["targets"] = chosen[0], chosen[:1]
+                draft["spoken_reply"] = draft["spoken_reply"] or f"Opening {chosen[0]['title']}."
+            else:
+                draft["action"], draft["screen_action"] = "answer", ""
+                draft["spoken_reply"] = f"{address}, which one should I open?"
+        elif not act:
+            draft["spoken_reply"] = f"Sorry {address}, I can't do that on the screen yet."
+        if not draft["spoken_reply"]:
+            draft["spoken_reply"] = {"export_pdf": f"Making the PDF, {address}.", "export_csv": f"Making the sheet, {address}.",
+                                     "share": f"Opening share, {address}.", "open_settings": f"Opening settings, {address}.",
+                                     "go_home": f"Okay {address}."}.get(act, f"Okay {address}.")
     elif intent == "end_conversation":
         draft["action"] = "end"
         draft["needs_clarification"] = False
@@ -764,8 +940,21 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["action"] = "answer"
         if intent == "query":
             # The spoken answer is short; the screen gets the data (timeline, chart or table) that fits the question.
+            # The model only fills in a request form (which template, whose, which period); the server fills the
+            # template from the database, so the same chart serves every person and every day.
             kind = cmd.get("view_kind") if cmd.get("view_kind") in datacards.VIEW_KINDS else datacards.guess_kind(full_text)
-            draft["view"] = datacards.build(user, kind, include_private)
+            request = {"who": cmd.get("view_who"), "from": cmd.get("view_from"), "to": cmd.get("view_to"),
+                       "by": cmd.get("view_by"), "filter": cmd.get("view_filter"), "group": cmd.get("view_group")}
+            view = datacards.build(user, kind, include_private, params=request, missing=cmd.get("view_missing") or "")
+            if view and view.get("ask"):
+                # "Ramesh" fits two people: ask which, show nothing yet.
+                draft["needs_clarification"] = True
+                draft["question"], draft["question_hi"] = view["ask"], view.get("ask_hi", "")
+                view = None
+            elif view and view.get("summary"):
+                # The sentence comes from the real numbers, never from the model's own counting.
+                draft["spoken_reply"], summary_hi = view["summary"], view.get("summary_hi", "")
+            draft["view"] = view
         if not draft["spoken_reply"]:
             if intent == "query":
                 today = ctx["open_items"]["today"]
@@ -779,6 +968,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
                     draft["spoken_reply"] += f" {len(overdue)} overdue."
             else:
                 draft["spoken_reply"] = f"Sorry {address}, I didn't catch that. Please say it again or type it."
+
+    # Does JARVIS know the people named? Never book something with a name nobody recognises.
+    if draft["action"] in TASK_ACTIONS or draft["action"] == "choose_destination":
+        _check_people(user, cmd, draft, address, history)
 
     if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"]:
         when = tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
@@ -803,6 +996,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
                 "md_request": "Request for MD",
                 "delegation": f"Assign to {draft['staff']['name']}" if draft["staff"] else "Assign to staff",
                 "pa_task": f"Task for {pa_name}",
+                "pa_self_task": "Your own task",
             }[draft["action"]]
             bits = [b for b in (draft["due_label"], f"{priority.lower()} priority" if priority != "NORMAL" else "") if b]
             draft["spoken_reply"] = f"{address}, {what}: {draft['title']}" + (f", {', '.join(bits)}" if bits else "") + ". Shall I save it?"
@@ -820,7 +1014,12 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     sched = draft.get("schedule") or {}
     model_reply = (cmd.get("spoken_reply") or "").strip()
     base_reply = sched.get("base_reply", draft["spoken_reply"]) if sched.get("notes_hi") and not sched.get("question") else draft["spoken_reply"]
-    if draft["reply_language"] == "hi" and sched.get("question_hi"):
+    if draft["reply_language"] == "hi" and draft["needs_clarification"] and draft.get("question_hi") \
+            and draft["spoken_reply"] == draft["question"]:
+        draft["speak_text"], draft["speak_lang"] = draft["question_hi"], "hi"
+    elif draft["reply_language"] == "hi" and summary_hi and draft["spoken_reply"] == (draft.get("view") or {}).get("summary"):
+        draft["speak_text"], draft["speak_lang"] = summary_hi, "hi"  # the server-written answer, in Hindi
+    elif draft["reply_language"] == "hi" and sched.get("question_hi"):
         draft["speak_text"], draft["speak_lang"] = sched["question_hi"], "hi"
     elif draft["reply_language"] == "hi" and hindi and _DEVANAGARI.search(hindi) and base_reply == model_reply:
         draft["speak_text"], draft["speak_lang"] = _insert_notes(hindi, sched.get("notes_hi") or [], hindi=True), "hi"

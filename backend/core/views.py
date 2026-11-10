@@ -1,8 +1,10 @@
 import logging
+import re
 from datetime import date
 
+from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
-from django.http import Http404
+from django.http import Http404, HttpResponse, StreamingHttpResponse
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
@@ -12,7 +14,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from . import ai_brain, ai_usage, assistant, conversation, datacards, push, services
+from . import ai_brain, ai_usage, assistant, conversation, datacards, push, services, xai
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
@@ -23,6 +25,7 @@ from .permissions import IsMD, IsMDOrPA, IsPA
 from .reminders import reminders_for
 from .serializers import (
     AckSerializer,
+    ToldSerializer,
     AskSerializer,
     MemoryInputSerializer,
     DecisionSerializer,
@@ -106,6 +109,7 @@ class HealthView(APIView):
         return Response({
             "server_time": tu.now_local().isoformat(),
             "ai": {"enabled": ai_brain.ai_available()},
+            "voice": xai.describe() if settings.JARVIS_GROK_VOICE else "off (phone voice)",
             "push": push.describe(),
             # Phones registered for live push for THIS login, and what the last push attempt did.
             "push_devices": PushDevice.objects.filter(user=request.user).count(),
@@ -204,6 +208,9 @@ class SharedTaskDetailView(APIView):
         if request.user.is_md:
             task = services.update_shared_md_task(request.user, task_id, s.changes(), version)
             return Response(services.shared_item(task))
+        if SharedTask.objects.filter(id=task_id, origin=SharedTask.Origin.PA_SELF, created_by=request.user).exists():
+            task = services.update_pa_self_task(request.user, task_id, s.changes(), version)  # her own task
+            return Response(services.shared_item(task))
         if SharedTask.objects.filter(id=task_id, assignee_type=SharedTask.Assignee.PA).exists():
             return error("forbidden", "Only Sir can change this task. You can update its status.", 403)
         req = services.propose_change(request.user, task_id, s.changes(), version, s.validated_data.get("reason", ""))
@@ -249,6 +256,39 @@ class PaTaskListView(APIView):
         task = services.create_pa_task(request.user, s.validated_data,
                                        meeting_with_pa=s.validated_data["meeting_with_pa"])
         return Response(services.shared_item(task), status=201)
+
+
+class PaSelfTaskView(APIView):
+    """Mansi's own task or reminder: on her list (Sir can see it), no approval, no nagging Sir."""
+
+    permission_classes = [IsPA]
+
+    @idempotent("pa_tasks.self")
+    def post(self, request):
+        s = PaTaskInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        task = services.create_pa_self_task(request.user, s.validated_data)
+        return Response(services.shared_item(task), status=201)
+
+
+class ContactListView(APIView):
+    """People JARVIS knows for this user besides the staff list. Owner-only, like memories."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        return Response({"results": services.list_contacts(request.user)})
+
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        return Response(services.add_contact(request.user, str(data.get("name") or ""), str(data.get("note") or "")), status=201)
+
+
+class ContactDetailView(APIView):
+    permission_classes = [IsMDOrPA]
+
+    def delete(self, request, contact_id):
+        services.delete_contact(request.user, contact_id)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class PaTaskStatusView(APIView):
@@ -471,9 +511,11 @@ class InterpretView(APIView):
     def post(self, request):
         s = InterpretSerializer(data=request.data)
         s.is_valid(raise_exception=True)
+        xai.tts_warm()  # he is talking: have the voice connection open by the time the reply is ready
         draft = assistant.build_draft(request.user, s.validated_data["text"], s.validated_data["previous"],
                                       s.validated_data["history"], s.validated_data["awaiting"],
-                                      s.validated_data.get("choices"), pending=s.validated_data.get("pending"))
+                                      s.validated_data.get("choices"), pending=s.validated_data.get("pending"),
+                                      screen=s.validated_data.get("screen"))
         return Response(draft)
 
 
@@ -487,6 +529,7 @@ class ConversationTurnView(APIView):
         s = TurnSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         d = s.validated_data
+        xai.tts_warm()  # he is talking: have the voice connection open by the time the reply is ready
         return Response(conversation.turn(request.user, d["text"], event=d["event"], locked=d["locked"],
                                           private_ok=d["private_ok"]))
 
@@ -511,6 +554,74 @@ class AskView(APIView):
             lang=s.validated_data["lang"],
         )
         return Response(result)
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
+
+
+def _speakable(text: str, limit: int) -> str:
+    """One spoken reply: whitespace tidied, and cut at a sentence end if it runs past the limit."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    out = ""
+    for sentence in _SENTENCE_END.split(text):
+        if len(out) + len(sentence) + 1 > limit:
+            break
+        out = f"{out} {sentence}".strip()
+    return out or text[:limit]
+
+
+class SpeakView(APIView):
+    """JARVIS's voice: text in, audio out, voiced by Grok. The phone plays it (and keeps its own voice as fallback).
+
+    Nothing is stored here: the phone caches what it has already heard, so repeats cost nothing.
+    """
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "speak"
+
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        text = _speakable(str(data.get("text") or ""), settings.JARVIS_TTS_MAX_CHARS)
+        if not text:
+            return error("invalid", "Nothing to say.", 422)
+        if not (settings.JARVIS_GROK_VOICE and xai.configured()):
+            return error("voice_off", "The Grok voice is not set up on this server.", 503)
+        if ai_usage.over_voice_limit(request.user):
+            return error("voice_limit", "Today's voice limit is reached; the phone's own voice is used until tomorrow.", 429)
+        lang = "hi" if str(data.get("lang") or "").lower().startswith("hi") else "en"
+        voice = str(data.get("voice") or "") or None
+        try:
+            if str(data.get("format") or "").lower() == "pcm":
+                # The phone's player: raw sound streamed as Grok speaks, so the voice starts in about half a second.
+                rate = 24000
+                stream = xai.tts_stream(text, voice=voice, sample_rate=rate)
+                head = next(stream)  # raises here (before any sound) if the voice cannot be reached
+                ai_usage.record_voice(request.user, len(text))
+
+                def body():
+                    yield head
+                    yield from stream
+
+                response = StreamingHttpResponse(body(), content_type="audio/L16")
+                response["X-Sample-Rate"] = str(rate)
+                response["X-Voice"] = "grok"
+                return response
+            audio = xai.tts(text, language=lang, voice=voice)
+        except StopIteration:
+            return error("voice_failed", "The voice service returned no sound.", 502)
+        except xai.XaiError as err:
+            log.warning("Grok voice failed (%s): %s", err.status, err.message)
+            return error("voice_failed", "The voice service did not answer.", 502)
+        except Exception:  # noqa: BLE001 — network trouble: the phone falls back to its own voice
+            log.warning("Grok voice unreachable", exc_info=True)
+            return error("voice_failed", "The voice service did not answer.", 502)
+        ai_usage.record_voice(request.user, len(text))
+        response = HttpResponse(audio, content_type="audio/mpeg")
+        response["X-Voice"] = "grok"
+        response["Cache-Control"] = "private, max-age=604800"
+        return response
 
 
 class AiUsageView(APIView):
@@ -562,9 +673,14 @@ class DataViewView(APIView):
     permission_classes = [IsMDOrPA]
 
     def get(self, request, kind):
-        view = datacards.build(request.user, kind, include_private=request.query_params.get("private") != "0")
+        q = request.query_params
+        # The same request form the voice uses: /views/tasks/?who=Ramesh&from=2026-11-10&to=2026-11-16&by=given
+        params = {k: q.get(k, "") for k in ("who", "from", "to", "by", "filter", "group")}
+        view = datacards.build(request.user, kind, include_private=q.get("private") != "0", params=params)
         if view is None:
             return error("not_found", "No such view.", 404)
+        if view.get("ask"):
+            return error("ambiguous", view["ask"], 422)
         return Response(view)
 
 
@@ -591,11 +707,29 @@ class ReminderAckView(APIView):
 
 
 class AlertListView(APIView):
+    """Unseen alerts of the last week. Each says whether it was already told (spoken or shown once) and whether it
+    is still fresh enough to be announced; the phone never announces the same one twice."""
     permission_classes = [IsMDOrPA]
 
     def get(self, request):
-        qs = Alert.objects.filter(recipient=request.user, acknowledged_at__isnull=True)[:50]
+        from django.utils import timezone
+
+        qs = Alert.objects.filter(recipient=request.user, acknowledged_at__isnull=True,
+                                  created_at__gte=timezone.now() - services.ALERT_LIST_FOR)[:50]
         return Response({"results": [services.alert_item(a) for a in qs]})
+
+
+class ToldView(APIView):
+    """The phone reports what it has just spoken or shown (reminder keys, alert ids), so that whoever looks next,
+    the app or the background part, does not say it again."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        s = ToldSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        reminders = services.mark_reminders_told(request.user, s.validated_data["keys"])
+        alerts = services.mark_alerts_told(request.user, s.validated_data["ids"])
+        return Response({"reminders": reminders, "alerts": alerts})
 
 
 class AlertAckView(APIView):

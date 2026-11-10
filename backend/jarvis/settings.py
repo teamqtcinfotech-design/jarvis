@@ -125,7 +125,7 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.AnonRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {"user": "300/min", "anon": "30/min", "login": "10/min", "assistant": "40/min",
-                                "ask": "12/min"},
+                                "ask": "12/min", "speak": "90/min"},
 }
 
 SIMPLE_JWT = {
@@ -171,6 +171,21 @@ JARVIS_AI_ANSWER_MODEL = os.environ.get("JARVIS_AI_ANSWER_MODEL", "claude-sonnet
 JARVIS_AI_ANSWER_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_ANSWER_TIMEOUT_SECONDS", "50"))
 JARVIS_AI_MAX_SEARCHES = int(os.environ.get("JARVIS_AI_MAX_SEARCHES", "3"))  # web searches per question
 JARVIS_AI_DAILY_ANSWER_LIMIT = int(os.environ.get("JARVIS_AI_DAILY_ANSWER_LIMIT", "150"))  # per user per day
+
+# xAI (Grok): the next brain and voice. Key stays on the server only. Models can be pinned per job.
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
+XAI_BASE_URL = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+XAI_COMMAND_MODEL = os.environ.get("XAI_COMMAND_MODEL", "grok-4.3")      # fast: commands, agent tools
+XAI_SMART_MODEL = os.environ.get("XAI_SMART_MODEL", "grok-4.7")          # briefings, hard questions, web search
+XAI_VOICE_MODEL = os.environ.get("XAI_VOICE_MODEL", "grok-voice-3.0")    # speech-to-speech
+XAI_STT_MODEL = os.environ.get("XAI_STT_MODEL", "grok-voice-transcribe-2.0")
+XAI_TTS_VOICE = os.environ.get("XAI_TTS_VOICE", "eve")
+XAI_TIMEOUT_SECONDS = float(os.environ.get("XAI_TIMEOUT_SECONDS", "40"))
+# JARVIS's spoken replies are voiced by Grok. A per-person daily character cap keeps the bill predictable
+# (60,000 characters is roughly 500 short replies, under one dollar); past it the phone uses its own voice.
+JARVIS_GROK_VOICE = env_bool("JARVIS_GROK_VOICE", True)
+JARVIS_TTS_DAILY_CHAR_LIMIT = int(os.environ.get("JARVIS_TTS_DAILY_CHAR_LIMIT", "60000"))
+JARVIS_TTS_MAX_CHARS = int(os.environ.get("JARVIS_TTS_MAX_CHARS", "700"))  # one spoken reply, cut at a sentence end
 
 # Live push to the phones (Firebase Cloud Messaging). Either a path to the service-account key or its JSON.
 # Without one, push is off and the phones fall back to their half-minute check.

@@ -41,6 +41,7 @@ class PushService : FirebaseMessagingService() {
             title = data["title"] ?: "JARVIS",
             spoken = data["spoken"] ?: data["body"] ?: "",
             urgent = data["priority"] == "URGENT",
+            priority = data["priority"] ?: "NORMAL",
         )
     }
 

@@ -13,7 +13,7 @@ import { presenceLabel } from '@/lib/presence';
 import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
-import type { AiUsageSummary, MemoryItem } from '@/lib/types';
+import type { AiUsageSummary, ContactItem, MemoryItem } from '@/lib/types';
 import { type WakeStatus, wakeSetListening, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
 
 function Row({ title, detail, right }: { title: string; detail?: string; right: React.ReactNode }) {
@@ -44,6 +44,7 @@ export default function Settings() {
   const isMD = user?.role === 'MD';
   const [health, setHealth] = useState<Health | null>(null);
   const [memories, setMemories] = useState<MemoryItem[] | null>(null);
+  const [contacts, setContacts] = useState<ContactItem[] | null>(null);
   const [usage, setUsage] = useState<AiUsageSummary | null>(null);
   const [wake, setWake] = useState<WakeStatus | null>(null);
   const [wakeBusy, setWakeBusy] = useState(false);
@@ -54,6 +55,7 @@ export default function Settings() {
     const kick = setTimeout(() => {
       api<Health>('/health/').then((r) => setHealth(r.data)).catch(() => setHealth(null));
       api<{ results: MemoryItem[] }>('/memories/').then((r) => setMemories(r.data.results)).catch(() => setMemories([]));
+      api<{ results: ContactItem[] }>('/contacts/').then((r) => setContacts(r.data.results)).catch(() => setContacts([]));
       api<AiUsageSummary>('/assistant/usage/').then((r) => setUsage(r.data)).catch(() => setUsage(null));
       refresh();
     }, 0);
@@ -114,6 +116,11 @@ export default function Settings() {
   const forget = async (id: string) => {
     setMemories((list) => (list ?? []).filter((m) => m.id !== id));
     await api(`/memories/${id}/`, { method: 'DELETE' }).catch(() => undefined);
+  };
+
+  const forgetContact = async (id: number) => {
+    setContacts((list) => (list ?? []).filter((c) => c.id !== id));
+    await api(`/contacts/${id}/`, { method: 'DELETE' }).catch(() => undefined);
   };
 
   const testVoice = () => {
@@ -224,6 +231,28 @@ export default function Settings() {
             </View>
           ))}
           <Txt variant="caption" style={{ marginTop: 8 }}>Only you can see these notes.</Txt>
+        </Card>
+
+        <Txt variant="label" style={{ marginTop: 22 }}>People JARVIS knows</Txt>
+        <Card style={s.card}>
+          {contacts === null ? <Txt variant="small">Loading…</Txt> : null}
+          {contacts?.length === 0 ? (
+            <Txt variant="small">
+              Nobody outside the staff list yet. When you name someone new, JARVIS asks who they are once and keeps them here.
+            </Txt>
+          ) : null}
+          {contacts?.map((c) => (
+            <View key={c.id} style={s.memory}>
+              <Icon name="person-outline" size={16} color={colors.gold} />
+              <Txt variant="body" style={{ flex: 1, marginLeft: 8 }}>{c.note ? `${c.name} · ${c.note}` : c.name}</Txt>
+              <Pressable onPress={() => forgetContact(c.id)} hitSlop={10} accessibilityLabel={`Remove ${c.name}`}>
+                <Icon name="trash-outline" size={18} color={colors.muted} />
+              </Pressable>
+            </View>
+          ))}
+          <Txt variant="caption" style={{ marginTop: 8 }}>
+            Staff are known already. Only you can see this list; remove a name and JARVIS will ask about it again.
+          </Txt>
         </Card>
 
         <Txt variant="label" style={{ marginTop: 22 }}>Smart alerts</Txt>

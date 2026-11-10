@@ -24,7 +24,7 @@ STATE_TTL = timedelta(minutes=10)
 MAX_HISTORY = 8
 CONFIRMABLE = TASK_ACTIONS | {"accept_request", "decline_request", "complete", "remember", "change_task", "delete_task"}
 AI_DONE_OK = {"private_task", "pa_task", "pa_meeting", "md_request", "remember", "accept_request", "decline_request",
-              "complete"}
+              "complete", "pa_self_task"}
 EMPTY = {"history": [], "pending": None, "choices": None, "offer": None}
 
 
@@ -61,7 +61,8 @@ def _heading(p: dict) -> str:
         "private_task": "Personal task", "pa_task": f"Task for {pa}", "pa_meeting": f"Meeting with {pa}",
         "delegation": f"Task for {(p.get('staff') or {}).get('name', 'a staff member')}",
         "team_delegation": f"Task for {(p.get('team') or {}).get('label', 'the team')}",
-        "md_request": "Request to Sir", "accept_request": "Accept request", "decline_request": "Decline request",
+        "md_request": "Request to Sir", "pa_self_task": "Your own task",
+        "accept_request": "Accept request", "decline_request": "Decline request",
         "complete": "Mark as done", "remember": "Remember this", "choose_destination": "Where should this go?",
         "change_task": "Change task", "delete_task": "Delete task",
     }.get(p.get("action", ""), "JARVIS")
@@ -139,6 +140,9 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         resp = _resp(show, speak, lang, listen=False, action="end")
     elif action == "dismiss":
         resp = _resp(show or "Done.", listen=True, action="dismiss")
+    elif action == "screen":
+        # Downloading, sharing or opening something needs the screen: this voice-only conversation has none.
+        resp = _resp(f"{address}, please open JARVIS for that. With the app closed I can only talk.", listen=True, action="answer")
     elif action == "ask":
         reader = "the Managing Director" if user.is_md else f"{user.spoken_name}, the MD's personal assistant,"
         ans = ai_brain.answer(draft["ask_text"], state["history"], user=user, address=address, reader=reader,
@@ -260,6 +264,12 @@ def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
     if user.is_md:
         services.update_shared_md_task(user, t["id"], clean, version)
         return False
+    own = SharedTask.objects.filter(id=t["id"], origin=SharedTask.Origin.PA_SELF, created_by=user).exists()
+    if own:  # her own task: she changes it herself
+        services.update_pa_self_task(user, t["id"], clean, version)
+        return False
+    if SharedTask.objects.filter(id=t["id"], assignee_type=SharedTask.Assignee.PA).exists():
+        raise ServiceError("forbidden", "only Sir can change a task he gave you. You can update its status.", 403)
     services.propose_change(user, t["id"], clean, version, reason)
     return True
 
@@ -284,6 +294,11 @@ def _execute(user: User, p: dict, address: str) -> dict:
         elif a == "md_request":
             services.create_md_request(user, data)
             spoken = f"Sent to Sir, {address}. I'll tell you when he answers."
+        elif a == "pa_self_task":
+            data["description"] = p.get("transcript", "")
+            services.create_pa_self_task(user, data)
+            when = f" I'll remind you {p['due_label']}." if p.get("due_label") else ""
+            spoken = f"Saved in your own tasks, {address}.{when}"
         elif a == "delegation":
             staff = StaffMember.objects.get(id=(p.get("staff") or {})["id"])
             task, command = services.delegate_to_staff(user, data, staff, category_key=p.get("category_key") or "",

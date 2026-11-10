@@ -78,12 +78,12 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     if (!probing.current) setState('listening');
   });
   useSpeechRecognitionEvent('speechstart', () => {
-    if (probing.current) finishProbe(true); // someone is talking in the room
+    // A sound alone is not a conversation (a door, a cough); the probe waits for actual words.
   });
   useSpeechRecognitionEvent('result', (event) => {
     const text = event.results[0]?.transcript ?? '';
     if (probing.current) {
-      if (text.trim()) finishProbe(true);
+      if (text.trim().split(/\s+/).length >= 2) finishProbe(true); // someone really is talking in the room
       return;
     }
     latest.current = text;

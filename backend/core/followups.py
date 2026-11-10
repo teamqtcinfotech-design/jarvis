@@ -125,32 +125,54 @@ def run(now=None) -> int:
             raised += _raise(pa, f"notstarted:{task.id}", "Not started yet", task.title,
                              f"{pa_name}, Sir's task '{task.title}' is not started yet. You can say: start it, or put it on hold with a reason.")
 
-    # 4) End of day: what slipped
+    # 4) End of day: what slipped, for each of them about their own list
     if (local.hour, local.minute) >= DIGEST_AT:
-        key = f"digest:{local.date().isoformat()}"
+        today = local.date()
+
+        def due_day(t):
+            return tu.to_local(t.due_at).date() if t.due_at else t.due_date
+
+        key = f"digest:{today.isoformat()}"
         if not _already(key + f"@{md.id}"):
-            today = local.date()
-            slipped = []
-            private_count = 0
-            for t in md_private_qs(md).filter(status__in=OPEN):
-                due = tu.to_local(t.due_at).date() if t.due_at else t.due_date
-                if due and due <= today:
-                    private_count += 1
-            for t in shared_md_tasks_qs().filter(status__in=OPEN):
-                due = tu.to_local(t.due_at).date() if t.due_at else t.due_date
-                if due and due <= today:
-                    slipped.append(t.title)
+            slipped = [t.title for t in shared_md_tasks_qs().filter(status__in=OPEN) if (d := due_day(t)) and d <= today]
+            private_count = sum(1 for t in md_private_qs(md).filter(status__in=OPEN) if (d := due_day(t)) and d <= today)
             total = private_count + len(slipped)
             if total:
-                names = "; ".join(slipped[:3])
                 parts = []
                 if slipped:
-                    parts.append(names)
+                    parts.append("; ".join(slipped[:3]))
                 if private_count:
                     parts.append(f"{private_count} private")
                 spoken = (f"Sir, {total} thing{'s' if total > 1 else ''} slipped today: " + " and ".join(parts) +
                           ". Tell me if you want them moved to tomorrow.")
                 raised += _raise(md, key, f"{total} slipped today", " · ".join(parts), spoken)
+        if pa and not _already(key + f"@{pa.id}"):
+            hers = [t.title for t in pa_tasks_qs().filter(status__in=OPEN).exclude(origin=SharedTask.Origin.MD_MEET_PA)
+                    if (d := due_day(t)) and d <= today]
+            if hers:
+                spoken = (f"{pa_name}, {len(hers)} task{'s' if len(hers) > 1 else ''} slipped today: " + "; ".join(hers[:3]) +
+                          ". Tell me if you want them moved, or put on hold with a reason.")
+                raised += _raise(pa, key, f"{len(hers)} slipped today", "; ".join(hers[:3]), spoken)
+
+    # 5) Once a week (Monday from 10:00): tasks that still have no date, so they are not forgotten
+    if local.weekday() == 0 and local.hour >= 10:
+        key = f"nodate:{local.isocalendar()[0]}-{local.isocalendar()[1]}"
+        if not _already(key + f"@{md.id}"):
+            undated = [t.title for t in shared_md_tasks_qs().filter(status__in=OPEN, due_at__isnull=True, due_date__isnull=True)]
+            private_undated = md_private_qs(md).filter(status__in=OPEN, due_at__isnull=True, due_date__isnull=True).count()
+            total = len(undated) + private_undated
+            if total:
+                parts = ([f"{len(undated)} official" if undated else ""] + [f"{private_undated} private" if private_undated else ""])
+                spoken = (f"Sir, {total} task{'s' if total > 1 else ''} still {'have' if total > 1 else 'has'} no date: "
+                          + " and ".join(p for p in parts if p) + ". Say a day for any of them whenever you like.")
+                raised += _raise(md, key, f"{total} without a date", "; ".join(undated[:3]) or f"{private_undated} private", spoken, Priority.LOW)
+        if pa and not _already(key + f"@{pa.id}"):
+            undated = [t.title for t in pa_tasks_qs().filter(status__in=OPEN, due_at__isnull=True, due_date__isnull=True)
+                       .exclude(origin=SharedTask.Origin.MD_MEET_PA)]
+            if undated:
+                spoken = (f"{pa_name}, {len(undated)} task{'s' if len(undated) > 1 else ''} still {'have' if len(undated) > 1 else 'has'} "
+                          f"no date: " + "; ".join(undated[:3]) + ". Say a day for any of them whenever you like.")
+                raised += _raise(pa, key, f"{len(undated)} without a date", "; ".join(undated[:3]), spoken, Priority.LOW)
     if raised:
         log.info("raised %d follow-up(s)", raised)
     return raised

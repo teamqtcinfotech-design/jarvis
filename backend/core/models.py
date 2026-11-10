@@ -173,6 +173,7 @@ class SharedTask(TaskFields):
         PA_REQUEST = "PA_REQUEST", "Requested by PA"
         MD_TO_PA = "MD_TO_PA", "Assigned by MD to PA"
         MD_MEET_PA = "MD_MEET_PA", "Meeting between MD and PA"
+        PA_SELF = "PA_SELF", "PA's own task"
         MD_DELEGATION = "MD_DELEGATION", "Delegated by MD"
         PA_DELEGATION = "PA_DELEGATION", "Delegated by PA"
         TASKPANEL_WEB = "TASKPANEL_WEB", "Assigned in TaskPanel"
@@ -330,6 +331,9 @@ class Alert(models.Model):
     ref_type = models.CharField(max_length=20, blank=True, default="")
     ref_id = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+    # Told = spoken or shown to the person once (by the app or by the phone's background part); after that it is
+    # never announced again by anybody. Acknowledged = seen or acted on; after that it leaves the lists.
+    delivered_at = models.DateTimeField(null=True, blank=True)
     acknowledged_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -349,12 +353,24 @@ class PushDevice(models.Model):
 
 
 class ReminderAck(models.Model):
+    """A reminder the person has seen or acted on: it leaves the lists for good."""
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     key = models.CharField(max_length=200)
     acknowledged_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "key"], name="unique_reminder_ack")]
+
+
+class ReminderTold(models.Model):
+    """A reminder that was spoken or shown once (by the app, or by the phone's background part while the app was
+    closed). Whoever handles it next sees this and does not say it again; it still sits in the list until seen."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    key = models.CharField(max_length=200)
+    told_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "key"], name="unique_reminder_told")]
 
 
 class CommandReceipt(models.Model):
@@ -402,6 +418,22 @@ class Memory(models.Model):
         ordering = ["-created_at"]
 
 
+class Contact(models.Model):
+    """A person JARVIS knows for this user who is not on the staff list (a client, a vendor, the CA...).
+
+    Learned when the user says who someone is; owner-only and encrypted, like memories. It is what lets JARVIS
+    say "I don't know any Aman" instead of quietly booking a meeting with nobody.
+    """
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="contacts")
+    name = EncryptedTextField()
+    note = EncryptedTextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
 class UserPrefs(models.Model):
     """Settings shared by the app and the background listener. JARVIS can change them by voice."""
 
@@ -429,6 +461,7 @@ class AiUsage(models.Model):
         COMMAND = "COMMAND", "Understanding a command"
         ANSWER = "ANSWER", "Answering a question"
         BRIEFING = "BRIEFING", "Briefing"
+        VOICE = "VOICE", "Spoken reply (Grok voice); input_tokens holds characters"
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ai_usage")
     day = models.DateField()

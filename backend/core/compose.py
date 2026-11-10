@@ -18,12 +18,19 @@ log = logging.getLogger("jarvis.compose")
 SYSTEM_PROMPT = """You write the short message JARVIS speaks and shows to the other person when a task, meeting or request is passed on inside a company. You speak FOR the sender, as a capable executive assistant would.
 
 Rules:
-- One or two sentences, at most 40 words. Formal and warm; never casual; no emojis, no bullet points, no headings.
-- Start with the recipient's name. State what, when, and how urgent, using only the facts given. Never invent details.
+- One sentence, at most 20 words, the way a good assistant relays a message out loud. Formal, warm, plain; never casual; no emojis, no lists.
+- Start with the recipient's name. Say what, and when if a date or time is given. Use only the facts given: never invent a day ("today"), a time, a reason or a place.
+- Mention urgency only when the priority is URGENT or HIGH ("urgent", "high priority"). Never mention a normal or low priority.
+- No filler: no "kindly requests", "at your earliest convenience", "please be informed", "as it is marked".
 - Same language style as the sender's own words: English, or Hinglish in Roman letters. No Devanagari.
-- The MD speaks to his assistant politely but briefly ("please", "kindly"); the assistant speaks to Sir respectfully.
+- The MD speaks to his assistant politely but briefly ("please"); the assistant speaks to Sir respectfully ("Sir, ...").
 - Do not sign off, do not add greetings like "hope you are well", do not mention JARVIS.
-- Output only the message text."""
+- Output only the message text.
+
+Examples:
+- Sir gives Mansi a task "Book the Pune hotel" due 12 Nov 5 PM, normal: "Mansi, please book the Pune hotel by Thursday, 12 November, 5 PM."
+- Mansi asks Sir to "Sign the vendor agreement", high: "Sir, Mansi requests your signature on the vendor agreement; it is high priority."
+- Sir sets a meeting "Review the Pune deck" tomorrow 11 AM: "Mansi, Sir would like to review the Pune deck with you tomorrow at 11 AM.\""""
 
 
 def compose(kind: str, sender: str, recipient: str, facts: dict, fallback: str, user=None) -> str:

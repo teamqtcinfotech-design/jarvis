@@ -18,6 +18,7 @@ import { Animated, AppState } from 'react-native';
 import { type HeldOffer, useAlertEngine } from './alertEngine';
 import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
+import { downloadCsv, downloadPdf, shareText } from './download';
 import { CONFIRMABLE, TASK_DRAFTS, describeDraft } from './drafts';
 import { dayLabel, timeLabel } from './format';
 import { usePrefs } from './prefs';
@@ -33,6 +34,8 @@ export interface Msg {
   text: string;
   tone?: 'error' | 'saved';
   sources?: AskAnswer['sources'];
+  /** When it was said (so the screen can tell whether an answer card is still the latest thing). */
+  at: number;
 }
 
 export type OrbState = 'idle' | 'listening' | 'thinking' | 'speaking';
@@ -63,11 +66,18 @@ interface ConversationValue {
   answers: Answer[];
   removeAnswer: (id: string) => void;
   clearAnswers: () => void;
-  /** Fetch one report / view and show it as an answer card (the Reports row on the phone). */
-  showView: (kind: string, label: string) => void;
+  /** Fetch one report / view and show it as an answer card (the Reports row; a tap on a person). `query` = its filters. */
+  showView: (kind: string, label: string, query?: string) => void;
+  /** A task he asked to open by voice ("pehla wala kholo"): the home screen opens its sheet, then clears this. */
+  itemToOpen: string;
+  clearItemToOpen: () => void;
   /** Phone only: the full-screen talk sheet. Opened by the floating orb, "Hey JARVIS" and held-alert offers. */
   talkOpen: boolean;
-  openTalk: () => void;
+  /** When the talk sheet was last opened (a tap, "Hey JARVIS", an offer): answers older than that are not "current". */
+  talkOpenedAt: number;
+  /** How it was opened: by voice (the orb in the middle) or to type (the pencil). */
+  talkMode: 'voice' | 'type';
+  openTalk: (mode?: 'voice' | 'type') => void;
   closeTalk: () => void;
   micPress: () => void;
   send: (text: string) => void;
@@ -84,12 +94,16 @@ const ConversationContext = createContext<ConversationValue | null>(null);
 const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 // AI-written "done" lines are used only where "saved" really means done. A staff task still waiting for
 // the staff app, or a team split, gets an exact status line instead.
-const AI_DONE_OK: DraftAction[] = ['private_task', 'pa_task', 'pa_meeting', 'md_request', 'remember', 'accept_request',
-  'decline_request', 'complete'];
+const AI_DONE_OK: DraftAction[] = ['private_task', 'pa_task', 'pa_meeting', 'md_request', 'pa_self_task', 'remember',
+  'accept_request', 'decline_request', 'complete'];
 const BASE_HINTS = ['JARVIS', 'Jarvis', 'Hey JARVIS'];
-// Quiet rounds (each about 6 s of the recogniser hearing nothing): re-listen silently, nudge once, re-listen, rest.
+// Quiet rounds (each about 6 s of the recogniser hearing nothing). While JARVIS is waiting on him (a question, a
+// card, just woken): listen once more, ask "Sir?" once, listen, then rest. After a plain answer: rest after the
+// first quiet round. Resting hands the microphone back to "Hey JARVIS", which cannot listen while this does.
 const NUDGE_AFTER_ROUNDS = 2;
-const REST_AFTER_ROUNDS = 5;
+const REST_AFTER_ROUNDS = 3;
+// "Hey JARVIS" as the phone's speech recogniser writes it, at the start of what was heard.
+const WAKE_PHRASE = /^\s*(?:(?:hey|hi|hello|ok|okay|he|hay|hai|a|oh|हे|हाय|हेलो)[\s,]+)?(?:jarvis|jarwis|jarvish|jervis|jarves|javis|jarbis|जार्विस|जारविस)[\s,.!?]*/i;
 
 let seq = 0;
 const newId = () => `m${Date.now()}-${seq++}`;
@@ -110,6 +124,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const [hints, setHints] = useState<string[]>(BASE_HINTS);
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [talkOpen, setTalkOpen] = useState(false);
+  const [talkOpenedAt, setTalkOpenedAt] = useState(0);
+  const [talkMode, setTalkMode] = useState<'voice' | 'type'>('voice');
+  const [itemToOpen, setItemToOpen] = useState('');
+  const answersRef = useRef<Answer[]>([]); // what is on screen, for "is list ka PDF" and "pehla wala"
   const lastQuestion = useRef('');
 
   const messagesRef = useRef<Msg[]>([]);
@@ -123,6 +141,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const offerRef = useRef<HeldOffer | null>(null); // "shall I read them?" is waiting for an answer
   const presentedOffer = useRef(0);
   const wokeAtRef = useRef(0);
+  const calledRef = useRef(false); // he has just called JARVIS ("Ji Sir?") and has not said anything yet
   // JARVIS just asked "which one?": the options, so the next words are matched against them by the AI.
   const choicesRef = useRef<{
     intent: 'complete_task' | 'accept_request' | 'decline_request' | 'change_task' | 'delete_task';
@@ -175,7 +194,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   // ---------------------------------------------------------------- helpers
   const push = (role: Msg['role'], text: string, extra: Partial<Msg> = {}) => {
-    messagesRef.current = [...messagesRef.current, { id: newId(), role, text, ...extra }];
+    messagesRef.current = [...messagesRef.current, { id: newId(), role, text, at: Date.now(), ...extra }];
     setMessages(messagesRef.current);
   };
   const setDraft = (d: Draft | null) => {
@@ -187,10 +206,21 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
   const removeAnswer = (id: string) => setAnswers((prev) => prev.filter((a) => a.id !== id));
   const clearAnswers = () => setAnswers([]);
-  const showView = async (kind: string, label: string) => {
+  const clearItemToOpen = () => setItemToOpen('');
+  /** The data card he is looking at, in a few plain fields, sent along with what he says. */
+  const onScreen = () => {
+    const top = answersRef.current[0];
+    if (!top) return null;
+    return {
+      kind: top.view.kind,
+      title: top.view.title,
+      items: top.view.rows.slice(0, 15).filter((r) => r.id && r.title).map((r) => ({ id: r.id, title: r.title })),
+    };
+  };
+  const showView = async (kind: string, label: string, query = '') => {
     setBusy('thinking');
     try {
-      const res = await api<DataView>(`/views/${kind}/`);
+      const res = await api<DataView>(`/views/${kind}/${query ? `?${query}` : ''}`);
       addAnswer(res.data, label);
     } catch {
       push('jarvis', `Couldn't load ${label.toLowerCase()} right now.`, { tone: 'error' });
@@ -198,8 +228,21 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       setBusy('');
     }
   };
-  const openTalk = () => setTalkOpen(true);
-  const closeTalk = () => setTalkOpen(false);
+  const openTalk = (mode: 'voice' | 'type' = 'voice') => {
+    setTalkOpen(true);
+    setTalkMode(mode);
+    setTalkOpenedAt(Date.now());
+  };
+  // Closing the sheet ends the conversation too: the microphone and the voice stop, so nothing keeps running
+  // out of sight (and "Hey JARVIS" is listening again at once).
+  const closeTalk = () => {
+    setTalkOpen(false);
+    expectingRef.current = false;
+    silenceRef.current = 0;
+    calledRef.current = false;
+    cancelVoice();
+    stopSpeaking();
+  };
   const history = () =>
     messagesRef.current.filter((m) => m.tone !== 'error').slice(-8).map((m) => ({ role: m.role, text: m.text }));
   const listen = () => {
@@ -228,11 +271,19 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     langRef.current === 'hi' ? { show: roman, speak: devanagari, lang: 'hi' as SpeakLang } : null;
 
   // ---------------------------------------------------------------- what the user said
-  const heard = (text: string) => {
+  const heard = (said: string) => {
     Haptics.selectionAsync().catch(() => undefined); // instant "got it" tick
     setHeldVisible(false); // he is talking: nothing should sit on top of the conversation
     silenceRef.current = 0;
     expectingRef.current = false;
+    // "Hey JARVIS" said while JARVIS was already listening is a call, not an instruction: answer it here, at
+    // once. With more after it ("Hey JARVIS, kal 5 baje…") only the rest is the instruction.
+    const text = said.replace(WAKE_PHRASE, '').trim();
+    if (!text) {
+      greet();
+      return;
+    }
+    calledRef.current = false;
     push('user', text);
     lastQuestion.current = text;
     const pendingOffer = offerRef.current;
@@ -250,6 +301,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (SILENCE_CODES.has(code)) {
       if (!expectingRef.current) return; // the user tapped once and said nothing: just rest
       silenceRef.current += 1;
+      // Is JARVIS waiting on him (a card, a question, a "which one?", an offer, or he has only just called)?
+      const waiting = !!draftRef.current || !!offerRef.current || !!choicesRef.current || !!previousRef.current
+        || calledRef.current;
+      if (!waiting) {
+        // He got his answer and said nothing more: stop here so "Hey JARVIS" is listening again straight away.
+        silenceRef.current = 0;
+        expectingRef.current = false;
+        return;
+      }
       if (silenceRef.current < NUDGE_AFTER_ROUNDS) {
         listen(); // he may be thinking: keep listening quietly
       } else if (silenceRef.current === NUDGE_AFTER_ROUNDS) {
@@ -262,6 +322,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         // Rest. A tap or "Hey JARVIS" starts the conversation again; nothing is lost.
         silenceRef.current = 0;
         expectingRef.current = false;
+        calledRef.current = false;
         if (offerRef.current) {
           offerRef.current = null;
           declineOffer(); // no answer: they stay in the list, quietly
@@ -276,7 +337,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // "Sir, while you were away: … Shall I read them?" — asked once JARVIS is idle (or right after "Hey JARVIS").
   const presentOffer = (o: HeldOffer, greetFirst: boolean) => {
     offerRef.current = o;
-    setTalkOpen(true);
+    openTalk();
     const hi = langRef.current === 'hi';
     const show = (greetFirst ? (isMD ? 'Ji Sir? ' : 'Ji? ') : '') + o.text;
     const speak = (greetFirst ? (isMD ? 'जी सर? ' : 'जी? ') : '') + (hi ? o.textHi : o.text);
@@ -290,7 +351,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const wake = () => {
     if (!user) return;
     setHeldVisible(false);
-    setTalkOpen(true);
+    openTalk();
     try {
       router.navigate('/');
     } catch {
@@ -312,7 +373,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const slim = pending ? { ...pending, categories: [], staff_candidates: [], target_candidates: [] } : null;
       const res = await api<Draft>('/assistant/interpret/', {
         method: 'POST',
-        body: { text, previous, awaiting, choices, pending: slim, history: history().slice(0, -1) },
+        body: { text, previous, awaiting, choices, pending: slim, history: history().slice(0, -1), screen: onScreen() },
         timeoutMs: 30000,
       });
       setBusy('');
@@ -362,15 +423,42 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return;
     }
     if (d.action === 'end') {
+      // "bas / thank you / stop": the conversation is over. JARVIS says its goodbye and steps off the screen.
       setDraft(null);
       previousRef.current = '';
-      reply(d.spoken_reply, speakText, lang, false); // "bas / thank you": the conversation is over
+      push('jarvis', d.spoken_reply);
+      expectingRef.current = false;
+      calledRef.current = false;
+      silenceRef.current = 0;
+      say(speakText || d.spoken_reply, { interrupt: true, lang, fallback: d.spoken_reply, onDone: () => setTalkOpen(false) });
       return;
     }
     if (d.action === 'dismiss') {
-      if (currentAlert) acknowledge(currentAlert).catch(() => undefined); // "remove this banner"
+      // "ye hatao / band karo": the banner if there is one, otherwise the card he is looking at.
+      if (currentAlert) acknowledge(currentAlert).catch(() => undefined);
+      else if (answersRef.current[0]) removeAnswer(answersRef.current[0].id);
       setHeldVisible(false);
       reply(d.spoken_reply || 'Done.', speakText, lang, true);
+      return;
+    }
+    if (d.action === 'screen') {
+      // Voice works the screen: download or share the card on it, open a task, go somewhere.
+      const top = answersRef.current[0];
+      const act = d.screen_action ?? '';
+      reply(d.spoken_reply || 'Okay.', speakText, lang, act !== 'go_home' && act !== 'open_settings');
+      if (act === 'export_pdf' && top) downloadPdf(top.view, top.text).catch(() => undefined);
+      else if (act === 'export_csv' && top) downloadCsv(top.view).catch(() => undefined);
+      else if (act === 'share' && top) shareText(top.view, top.text).catch(() => undefined);
+      else if (act === 'open_item' && d.target) {
+        setTalkOpen(false);
+        setItemToOpen(d.target.id);
+      } else if (act === 'open_settings') {
+        setTalkOpen(false);
+        router.push('/settings');
+      } else if (act === 'go_home') {
+        setTalkOpen(false);
+        router.navigate('/');
+      }
       return;
     }
     if (d.action === 'briefing') {
@@ -542,6 +630,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       } else if (d.action === 'md_request') {
         await api('/requests/', { method: 'POST', body, idempotencyKey: key });
         spoken = `Sent to Sir, ${address}. I'll tell you when he answers.`;
+      } else if (d.action === 'pa_self_task') {
+        // Mansi's own task: straight onto her list, nothing is sent to Sir for approval.
+        await api('/pa-tasks/self/', { method: 'POST', body: { ...body, description: d.transcript }, idempotencyKey: key });
+        spoken = `Saved in your own tasks, ${address}.`
+          + (d.due_date ? ` I'll remind you ${dayLabel(d.due_date).toLowerCase()}${d.due_time ? ` at ${timeLabel(d.due_time)}` : ''}.` : '');
       } else if (d.action === 'accept_request' || d.action === 'decline_request') {
         const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
         if (!list.length) return setBusy('');
@@ -653,12 +746,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     const show = isMD ? 'Ji Sir?' : `Ji ${user?.name ?? ''}?`;
     push('jarvis', show);
     expectingRef.current = true;
+    calledRef.current = true; // he called: wait for him through the quiet rounds
+    silenceRef.current = 0;
     say(isMD ? 'जी सर?' : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
   };
 
   useEffect(() => {
     fns.current = { heard, voiceError, presentOffer, wake };
   });
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
 
   // Speaking indicator; going to the background releases the mic and stops talking.
   useEffect(() => {
@@ -714,8 +812,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   }, []);
   useEffect(() => {
     if (!wakeSupported || !prefs.wakeWordEnabled) return;
-    if (listening || speaking || busy) wakePause();
-    else wakeResume();
+    if (listening || speaking || busy) {
+      // The pause expires by itself after a minute (so a closed app can never leave "Hey JARVIS" deaf);
+      // keep renewing it for as long as JARVIS really is listening or talking.
+      wakePause();
+      const renew = setInterval(wakePause, 20_000);
+      return () => clearInterval(renew);
+    }
+    wakeResume();
+    return undefined;
   }, [listening, speaking, busy, prefs.wakeWordEnabled]);
 
   // Alerts that arrive mid-conversation show quietly instead of talking over him.
@@ -730,12 +835,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (!wakeSupported || !user) return;
     let cancelled = false;
     let pushRegistered = false;
+    let configured = false;
     const ensure = () => {
       wakeStatus()
         .then(async (st) => {
           if (cancelled || !st.supported) return;
           const wantListening = prefs.wakeWordEnabled && st.micAllowed;
-          if (!st.running || st.listening !== wantListening) {
+          // Always hand the background part this session's server and login once per app start: after an
+          // update or a server switch it may still be holding the previous ones (and would then fetch
+          // reminders and JARVIS's voice from the wrong place).
+          if (!configured || !st.running || st.listening !== wantListening) {
             const tokens = await deviceTokens();
             if (cancelled) return;
             await wakeStart({
@@ -746,6 +855,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
             });
+            configured = true;
           }
           // Live push: the server learns this phone's token once per app session (Firebase rotations are
           // re-registered natively).
@@ -792,7 +902,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   const value: ConversationValue = {
     messages, draft, draftError, busy, speaking, listening, partial: voice.partial, orb, status, level,
-    answers, removeAnswer, clearAnswers, showView, talkOpen, openTalk, closeTalk,
+    answers, removeAnswer, clearAnswers, showView, itemToOpen, clearItemToOpen, talkOpen, talkOpenedAt, talkMode, openTalk, closeTalk,
     micPress, send, editDraft, cancelDraft, save, clear, greet,
   };
   return <ConversationContext.Provider value={value}>{children}</ConversationContext.Provider>;

@@ -89,6 +89,10 @@ export interface ServerAlert {
   ref_type: string;
   ref_id: string;
   created_at: string;
+  /** Spoken or shown once already (by the app or by the phone's background part): never announced again. */
+  delivered_at: string | null;
+  /** Not told yet and recent: worth announcing. Otherwise it is only for the list. */
+  fresh: boolean;
 }
 
 export interface Reminder {
@@ -102,6 +106,8 @@ export interface Reminder {
   is_private: boolean;
   spoken: string;
   ref: { scope: 'private' | 'shared'; id: string; version: number };
+  /** Spoken or shown once already: never announced again. */
+  told_at: string | null;
 }
 
 export interface StaffOption {
@@ -125,6 +131,8 @@ export type DraftAction =
   | 'team_delegation'
   | 'pa_task'
   | 'pa_meeting'
+  | 'pa_self_task'
+  | 'screen'
   | 'choose_destination'
   | 'accept_request'
   | 'decline_request'
@@ -159,6 +167,13 @@ export interface ViewRow {
   hold_reason: string;
   reason?: string;
   target?: string;
+  /** Performance rows (one person each): work given, finished, late, and the on-time share of finished work. */
+  assigned?: number;
+  done?: number;
+  late?: number;
+  on_time_pct?: number;
+  /** People rows (the staff directory): away on leave right now. `assigned` and `late` then count open work. */
+  on_leave?: boolean;
 }
 
 export interface ViewTimelineItem {
@@ -180,7 +195,7 @@ export interface ViewTimelineItem {
 /** What the server sends for the screen when JARVIS answers with data. The phone only draws it. */
 export interface DataView {
   kind: string;
-  layout: 'timeline' | 'bars' | 'stats' | 'table' | 'progress' | 'requests' | 'busy';
+  layout: 'timeline' | 'bars' | 'stats' | 'table' | 'progress' | 'requests' | 'busy' | 'people';
   title: string;
   subtitle: string;
   columns: { key: string; label: string }[];
@@ -189,6 +204,8 @@ export interface DataView {
   timeline: ViewTimelineItem[];
   series: { label: string; date: string; value: number; minutes: number; heavy: boolean; off: boolean; today: boolean }[];
   office?: { start_min: number; end_min: number };
+  /** One person's card: who they are, from the staff app. */
+  profile?: { name: string; department: string; designation: string; on_leave: boolean; leave: string };
   file_name: string;
   text: string;
 }
@@ -234,12 +251,18 @@ export interface Draft {
   target_candidates: { id: string; title: string; scope?: string; version?: number }[];
   /** change_task: the new values (title / due_date / due_time / priority / kind). */
   changes: Record<string, string>;
+  /** People named in it (the server checks it knows each one before anything is saved). */
+  people?: string[];
+  /** People the speaker just explained; now remembered as contacts. */
+  contacts_saved?: string[];
   /** Diary check for timed drafts (clash / free slot / full day). */
   schedule?: ScheduleAdvice | null;
   /** confirm_pending: the day / time to apply to the waiting card before saving ("haan" to the offered slot, or "6 baje"). */
   overrides?: { due_date?: string; due_time?: string };
   /** Data the phone draws for this answer (timeline / chart / table). */
   view?: DataView | null;
+  /** Something to do on the screen by voice: export_pdf / export_csv / share / open_item / open_settings / go_home. */
+  screen_action?: string;
   setting_key: string;
   setting_value: string;
   setting_patch?: Record<string, string | number | boolean>;
@@ -268,6 +291,14 @@ export interface AskAnswer {
 export interface MemoryItem {
   id: string;
   text: string;
+  created_at: string;
+}
+
+/** A person JARVIS knows for this user who is not on the staff list (learned when they say who someone is). */
+export interface ContactItem {
+  id: number;
+  name: string;
+  note: string;
   created_at: string;
 }
 

@@ -2,9 +2,10 @@
  * Phone: the home is a dashboard. Greeting, "next up", stat tiles, reports he can open and download, today's
  * items with progress, the latest answer. The orb floats in the bottom-right corner and opens the talk layer.
  */
+import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -16,11 +17,10 @@ import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/
 import type { SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 
+import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
 import { Drawer } from './Drawer';
 import { navItems } from './nav';
-import { OrbButton } from './Orb';
-import { TalkSheet } from './TalkSheet';
 import { TaskRow } from './TaskRow';
 import { TaskSheet } from './TaskSheet';
 import { Icon, IconButton, Txt } from './ui';
@@ -46,9 +46,12 @@ const inWords = (ms: number) => {
 function Tile({ icon, label, value, toneKey, onPress }: { icon: string; label: string; value: number | string; toneKey: string; onPress: () => void }) {
   const c = tone[toneKey] ?? tone.muted;
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.tile, pressed && { opacity: 0.8 }]}>
-      <View style={[s.tileIcon, { backgroundColor: c.bg }]}>
-        <Icon name={icon} size={16} color={c.fg} />
+    <Pressable onPress={onPress} style={({ pressed }) => [s.tile, pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] }]}>
+      <View style={s.tileTop}>
+        <View style={[s.tileIcon, { backgroundColor: c.bg }]}>
+          <Icon name={icon} size={16} color={c.fg} />
+        </View>
+        <Icon name="chevron-forward" size={14} color={colors.faint} />
       </View>
       <Txt style={s.tileValue}>{String(value)}</Txt>
       <Txt variant="caption" style={{ color: colors.muted }}>{label}</Txt>
@@ -70,6 +73,21 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     return () => clearInterval(t);
   }, []);
 
+  // An answer that arrives while the talk sheet is closed must not sit unseen at the bottom of the page:
+  // the page moves to it.
+  const pageRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
+  const answerY = useRef(0);
+  const sheetOpen = useRef(false);
+  useEffect(() => {
+    sheetOpen.current = conv.talkOpen;
+  }, [conv.talkOpen]);
+  const newestAnswer = conv.answers[0]?.id;
+  useEffect(() => {
+    if (!newestAnswer || sheetOpen.current) return undefined;
+    const t = setTimeout(() => pageRef.current?.scrollTo({ y: Math.max(0, answerY.current - 8), animated: true }), 200);
+    return () => clearTimeout(t);
+  }, [newestAnswer]);
+
   const isMD = user.role === 'MD';
   const address = isMD ? 'Sir' : user.name;
   const presence = engine.presence.state;
@@ -77,6 +95,11 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const pending = data?.requests.filter((r) => r.state === 'PENDING').length ?? 0;
   const next = data ? nextTimed([...data.today, ...data.overdue], now) : null;
   const todayList = data ? [...data.overdue, ...data.today].filter((t) => t.status !== 'COMPLETED').slice(0, 6) : [];
+  // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
+  const voiceItem = conv.itemToOpen && data
+    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
+        .find((t) => t.id === conv.itemToOpen) ?? null
+    : null;
 
   const select = (key: string) => {
     setMenu(false);
@@ -85,15 +108,30 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     else if (key === 'held') engine.setHeldVisible(true);
     else router.push({ pathname: '/lists/[section]', params: { section: key } });
   };
+  const tick = () => Haptics.selectionAsync().catch(() => undefined); // a small tap he can feel
+  // While JARVIS is up, the page behind goes soft (a real blur on Android 12 and later).
+  const soft = conv.talkOpen && CAN_BLUR ? s.blurred : null;
+  const write = () => {
+    tick();
+    conv.openTalk('type');
+  };
   const talk = () => {
+    tick();
     conv.openTalk();
     if (conv.orb === 'idle') conv.micPress();
+  };
+  // A report opens right in front of him (the sheet shows it fitted to the screen), not somewhere down the page.
+  const report = (kind: string, label: string) => {
+    tick();
+    conv.showView(kind, label);
+    conv.openTalk();
   };
   const reports = isMD
     ? [
         { kind: 'today', label: "Today's plan", icon: 'today-outline' },
         { kind: 'week', label: 'This week', icon: 'bar-chart-outline' },
         { kind: 'performance', label: 'Staff performance', icon: 'podium-outline' },
+        { kind: 'people', label: 'My staff', icon: 'people-outline' },
         { kind: 'done', label: 'Completed', icon: 'checkmark-done-outline' },
         { kind: 'late', label: 'Late items', icon: 'alert-circle-outline' },
         { kind: 'pa', label: 'With Mansi', icon: 'person-outline' },
@@ -103,13 +141,14 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         { kind: 'pa', label: 'My tasks', icon: 'list-outline' },
         { kind: 'busy', label: 'When Sir is busy', icon: 'time-outline' },
         { kind: 'performance', label: 'Staff performance', icon: 'podium-outline' },
+        { kind: 'people', label: 'Staff list', icon: 'people-outline' },
         { kind: 'done', label: 'Completed', icon: 'checkmark-done-outline' },
         { kind: 'requests', label: 'Waiting for Sir', icon: 'hand-left-outline' },
       ];
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} edges={['top']}>
-      <View style={s.top}>
+      <View style={[s.top, soft]}>
         <View>
           <IconButton icon="menu-outline" label="Menu" onPress={() => setMenu(true)} />
           {pending + engine.held.length > 0 ? <View style={s.badge} /> : null}
@@ -122,7 +161,9 @@ export function PhoneHome({ user }: { user: SessionUser }) {
       </View>
 
       <ScrollView
-        contentContainerStyle={[s.body, { paddingBottom: insets.bottom + 110 }]}
+        ref={pageRef}
+        style={soft}
+        contentContainerStyle={[s.body, { paddingBottom: insets.bottom + 96 }]}
         refreshControl={<RefreshControl refreshing={false} onRefresh={() => reload(true)} tintColor={colors.accent} />}
         showsVerticalScrollIndicator={false}
       >
@@ -161,18 +202,18 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <View style={s.tiles}>
           <Tile icon="today-outline" label="Today" value={data?.today.length ?? '–'} toneKey="accent" onPress={() => select('today')} />
           <Tile icon="alert-circle-outline" label="Late" value={data?.overdue.length ?? '–'} toneKey={data?.overdue.length ? 'danger' : 'muted'} onPress={() => select('late')} />
-          <Tile icon="checkmark-done-outline" label="Done today" value={data?.completed_today ?? '–'} toneKey="success" onPress={() => conv.showView('done', 'Completed')} />
+          <Tile icon="checkmark-done-outline" label="Done today" value={data?.completed_today ?? '–'} toneKey="success" onPress={() => report('done', 'Completed')} />
           <Tile icon="hand-left-outline" label={isMD ? 'Need your OK' : 'Waiting for Sir'} value={pending} toneKey={pending ? 'warn' : 'muted'} onPress={() => select('requests')} />
         </View>
 
         {/* Reports */}
         <View style={s.sectionHead}>
           <Txt variant="label">Reports</Txt>
-          <Txt variant="caption">Open, then download</Txt>
+          <Txt variant="caption">Tap to open</Txt>
         </View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ columnGap: 8, paddingRight: 20 }} style={{ marginHorizontal: -20, paddingLeft: 20 }}>
           {reports.map((r) => (
-            <Pressable key={r.kind} onPress={() => conv.showView(r.kind, r.label)} style={({ pressed }) => [s.report, pressed && { opacity: 0.8 }]}>
+            <Pressable key={r.kind} onPress={() => report(r.kind, r.label)} style={({ pressed }) => [s.report, pressed && { opacity: 0.8 }]}>
               <Icon name={r.icon} size={16} color={colors.accent} />
               <Txt variant="small" style={{ color: colors.text, marginLeft: 8, fontWeight: '500' }}>{r.label}</Txt>
             </Pressable>
@@ -201,7 +242,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
 
         {/* Latest answer */}
         {conv.answers.length ? (
-          <>
+          <View onLayout={(e) => { answerY.current = e.nativeEvent.layout.y; }}>
             <View style={s.sectionHead}>
               <Txt variant="label">{conv.answers[0].question}</Txt>
               <Pressable onPress={conv.clearAnswers} hitSlop={8}>
@@ -209,17 +250,22 @@ export function PhoneHome({ user }: { user: SessionUser }) {
               </Pressable>
             </View>
             <DataCard view={conv.answers[0].view} extraText={conv.answers[0].text} onRemove={() => conv.removeAnswer(conv.answers[0].id)} />
-          </>
+          </View>
         ) : null}
       </ScrollView>
 
-      {/* the orb, bottom-right */}
-      <View style={[s.fabWrap, { bottom: insets.bottom + 14 }]} pointerEvents="box-none">
-        <View style={s.fabLabel}>
-          <Txt variant="caption" style={{ color: colors.inkSoft, fontWeight: '500' }}>{conv.listening ? 'Listening…' : 'Say “Hey JARVIS”'}</Txt>
-        </View>
-        <OrbButton state={conv.orb} onPress={talk} />
-      </View>
+      {/* No orb sitting on the page. One small pencil in the corner: tap to type, hold to talk.
+          Saying "Hey JARVIS" brings the orb up in the middle of the screen. */}
+      {conv.talkOpen ? null : (
+        <Pressable
+          onPress={write}
+          onLongPress={talk}
+          accessibilityLabel="Type to JARVIS (hold to talk)"
+          style={({ pressed }) => [s.pencil, { bottom: insets.bottom + 18 }, pressed && { transform: [{ scale: 0.93 }] }]}
+        >
+          <Icon name="create-outline" size={23} color={colors.white} />
+        </Pressable>
+      )}
 
       <Drawer
         open={menu}
@@ -233,8 +279,10 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         presence={presenceLabel[presence].detail}
         meetingFromDiary={engine.presence.diaryMeeting && !engine.meetingMode}
       />
-      <TalkSheet />
-      {openTask ? <TaskSheet item={openTask} onClose={() => setOpenTask(null)} /> : null}
+      <AssistantStage />
+      {openTask ?? voiceItem ? (
+        <TaskSheet item={openTask ?? voiceItem} onClose={() => { setOpenTask(null); conv.clearItemToOpen(); }} />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -245,6 +293,11 @@ const s = StyleSheet.create({
   pill: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 7 },
   body: { paddingHorizontal: 20, paddingTop: 8 },
+  blurred: { filter: [{ blur: 14 }] },
+  pencil: {
+    position: 'absolute', right: 18, width: 54, height: 54, borderRadius: 27, backgroundColor: colors.ink,
+    alignItems: 'center', justifyContent: 'center', ...shadow, shadowOpacity: 0.28, elevation: 6,
+  },
   heroWrap: { marginTop: 18, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },
@@ -252,12 +305,11 @@ const s = StyleSheet.create({
   heroWhen: { marginLeft: 'auto', color: colors.white, fontFamily: fonts.semibold, fontSize: 13 },
   tiles: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 14, gap: 10 },
   tile: { width: '48%', flexGrow: 1, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  tileIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
+  tileTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  tileIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   tileValue: { fontSize: 24, fontWeight: '700', color: colors.ink, lineHeight: 30 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 24, marginBottom: 10 },
-  report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 9, paddingHorizontal: 14 },
+  report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 16 },
   listCard: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 4, ...shadow },
   empty: { alignItems: 'center', paddingVertical: 22, paddingHorizontal: 16, borderRadius: radius.lg, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.line },
-  fabWrap: { position: 'absolute', right: 14, flexDirection: 'row', alignItems: 'center' },
-  fabLabel: { backgroundColor: colors.surface, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6, marginRight: 4, borderWidth: 1, borderColor: colors.line, ...shadow },
 });

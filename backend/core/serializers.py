@@ -115,6 +115,15 @@ class InterpretSerializer(serializers.Serializer):
     choices = ChoicesSerializer(required=False, allow_null=True, default=None)
     # The waiting card itself, so a "yes" can take the time JARVIS offered, or a new time can be checked again.
     pending = serializers.JSONField(required=False, allow_null=True, default=None)
+    # The data card on the phone's screen right now (kind, title, first items), so "is list ka PDF" or
+    # "pehla wala kholo" can be understood. Only short plain fields are used (see assistant._clean_screen).
+    screen = serializers.JSONField(required=False, allow_null=True, default=None)
+
+    def validate_screen(self, value):
+        import json
+        if value is not None and (not isinstance(value, dict) or len(json.dumps(value, default=str)) > 6000):
+            return None  # not worth failing the request over: it is only a hint
+        return value
 
     def validate_history(self, value):
         return value[-8:]
@@ -157,3 +166,9 @@ class DecisionSerializer(serializers.Serializer):
 
 class AckSerializer(serializers.Serializer):
     key = serializers.CharField(max_length=200)
+
+
+class ToldSerializer(serializers.Serializer):
+    """Things the phone has just spoken or shown once: reminder keys and/or alert ids."""
+    keys = serializers.ListField(child=serializers.CharField(max_length=200), required=False, default=list, max_length=100)
+    ids = serializers.ListField(child=serializers.CharField(max_length=64), required=False, default=list, max_length=100)

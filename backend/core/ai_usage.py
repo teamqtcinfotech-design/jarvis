@@ -37,9 +37,28 @@ def over_answer_limit(user) -> bool:
     return answers_today(user) >= settings.JARVIS_AI_DAILY_ANSWER_LIMIT
 
 
+def record_voice(user, characters: int) -> None:
+    """Count one spoken reply voiced by Grok (billed per character)."""
+    if user is None or not getattr(user, "pk", None) or characters <= 0:
+        return
+    row, _ = AiUsage.objects.get_or_create(user=user, day=tu.today_local(), kind=AiUsage.Kind.VOICE)
+    AiUsage.objects.filter(pk=row.pk).update(requests=F("requests") + 1, input_tokens=F("input_tokens") + characters)
+
+
+def voice_chars_today(user) -> int:
+    row = AiUsage.objects.filter(user=user, day=tu.today_local(), kind=AiUsage.Kind.VOICE).first()
+    return row.input_tokens if row else 0
+
+
+def over_voice_limit(user) -> bool:
+    return voice_chars_today(user) >= settings.JARVIS_TTS_DAILY_CHAR_LIMIT
+
+
 def month_summary(user) -> dict:
     today = tu.today_local()
     rows = AiUsage.objects.filter(user=user, day__year=today.year, day__month=today.month)
+    voice = rows.filter(kind=AiUsage.Kind.VOICE).aggregate(chars=Sum("input_tokens"), n=Sum("requests"))
+    rows = rows.exclude(kind=AiUsage.Kind.VOICE)  # voice is counted in characters, not tokens
     totals = rows.aggregate(requests=Sum("requests"), input_tokens=Sum("input_tokens"),
                             output_tokens=Sum("output_tokens"), web_searches=Sum("web_searches"))
     by_kind = {k: 0 for k, _ in AiUsage.Kind.choices}
@@ -54,4 +73,9 @@ def month_summary(user) -> dict:
         "by_kind": by_kind,
         "questions_today": answers_today(user),
         "daily_question_limit": settings.JARVIS_AI_DAILY_ANSWER_LIMIT,
+        # Grok voice: characters spoken this month and today, with the daily cap.
+        "voice_chars": voice["chars"] or 0,
+        "voice_replies": voice["n"] or 0,
+        "voice_chars_today": voice_chars_today(user),
+        "daily_voice_char_limit": settings.JARVIS_TTS_DAILY_CHAR_LIMIT,
     }

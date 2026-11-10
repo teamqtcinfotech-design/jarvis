@@ -886,6 +886,67 @@ class SmartAssistantTests(BaseCase):
         self.assertEqual(self.md_client.get("/api/v1/assistant/usage/").json()["questions_today"], 1)
 
 
+@override_settings(XAI_API_KEY="xai-test", JARVIS_GROK_VOICE=True, JARVIS_TTS_DAILY_CHAR_LIMIT=40, JARVIS_TTS_MAX_CHARS=80)
+class GrokVoiceTests(BaseCase):
+    """JARVIS's spoken replies are voiced by Grok; the phone falls back to its own voice on any refusal."""
+
+    def test_text_in_audio_out_counted_and_capped(self):
+        with mock.patch("core.xai.tts", return_value=b"ID3-fake-mp3") as tts:
+            r = self.md_client.post("/api/v1/assistant/speak/", {"text": "Saved,   Sir.", "lang": "en"}, format="json")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r["Content-Type"], "audio/mpeg")
+            self.assertEqual(r.content, b"ID3-fake-mp3")
+            self.assertEqual(tts.call_args.args[0], "Saved, Sir.")           # whitespace tidied
+            self.assertEqual(tts.call_args.kwargs["language"], "en")
+            # Hindi text is sent as Hindi; a long reply is cut at a sentence end, never mid-word.
+            long = "सर, कल चार बजे शर्मा जी के साथ मीटिंग है। " + "यह बहुत लंबा वाक्य है जो सीमा से आगे निकल जाता है और काटा जाना चाहिए।"
+            self.md_client.post("/api/v1/assistant/speak/", {"text": long, "lang": "hi-IN"}, format="json")
+            self.assertEqual(tts.call_args.kwargs["language"], "hi")
+            self.assertEqual(tts.call_args.args[0], "सर, कल चार बजे शर्मा जी के साथ मीटिंग है।")
+            # The daily cap (40 characters here) is now passed: the phone is told to use its own voice.
+            r = self.md_client.post("/api/v1/assistant/speak/", {"text": "Done, Sir."}, format="json")
+            self.assertEqual(r.status_code, 429)
+            self.assertEqual(r.json()["code"], "voice_limit")
+            # Mansi's allowance is her own.
+            self.assertEqual(self.pa_client.post("/api/v1/assistant/speak/", {"text": "Done."}, format="json").status_code, 200)
+        usage = self.md_client.get("/api/v1/assistant/usage/").json()
+        self.assertEqual(usage["voice_replies"], 2)
+        self.assertGreater(usage["voice_chars"], 40)
+
+    def test_phone_gets_a_live_sound_stream(self):
+        from core import xai
+
+        def fake_stream(text, **kwargs):
+            yield b"\x01\x02" * 100
+            yield b"\x03\x04" * 100
+
+        with mock.patch("core.xai.tts_stream", side_effect=fake_stream) as stream:
+            r = self.md_client.post("/api/v1/assistant/speak/", {"text": "जी सर?", "lang": "hi", "format": "pcm"}, format="json")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r["X-Sample-Rate"], "24000")
+            self.assertEqual(b"".join(r.streaming_content), b"\x01\x02" * 100 + b"\x03\x04" * 100)
+            self.assertEqual(stream.call_args.args[0], "जी सर?")
+
+        def broken(text, **kwargs):
+            raise xai.XaiError(502, "no route")
+            yield b""  # pragma: no cover
+
+        # Unreachable before any sound: a clean error, so the phone uses its own voice for this sentence.
+        with mock.patch("core.xai.tts_stream", side_effect=broken):
+            r = self.md_client.post("/api/v1/assistant/speak/", {"text": "Done.", "format": "pcm"}, format="json")
+            self.assertEqual(r.status_code, 502)
+
+    def test_voice_off_or_failing_tells_the_phone_to_fall_back(self):
+        from core import xai
+        self.assertEqual(self.md_client.post("/api/v1/assistant/speak/", {"text": ""}, format="json").status_code, 422)
+        with mock.patch("core.xai.tts", side_effect=xai.XaiError(500, "boom")):
+            self.assertEqual(self.md_client.post("/api/v1/assistant/speak/", {"text": "Hello"}, format="json").status_code, 502)
+        with override_settings(XAI_API_KEY=""):
+            r = self.md_client.post("/api/v1/assistant/speak/", {"text": "Hello"}, format="json")
+            self.assertEqual((r.status_code, r.json()["code"]), (503, "voice_off"))
+        self.assertEqual(APIClient().post("/api/v1/assistant/speak/", {"text": "Hello"}, format="json").status_code, 401)
+
+
 class MeetingOverrideTests(BaseCase):
     def test_switching_meeting_mode_off_during_a_diary_meeting_sticks_until_it_ends(self):
         # The fixture meeting (now + 1 h, 30 min) is in the diary; make one that is running right now too.
@@ -1238,3 +1299,625 @@ class SchedulingTests(BaseCase):
         self.assertEqual(waiting["offered_time"]["due_time"], "17:00")
         self.assertEqual(waiting["original_time"]["due_time"], "16:00")
         self.assertIn("instead?", waiting["jarvis_asked"])
+
+
+class SmartBrainTests(BaseCase):
+    """JARVIS asks before it assumes: who a person is, whose task it is, and official vs personal for Sir."""
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def turn(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _aman(self, day, **extra):
+        return _cmd(intent="create_task", title="Meeting with Aman", kind="MEETING", due_date=day.isoformat(),
+                    due_time="17:00", people=["Aman"], reply_language="hi",
+                    spoken_reply="Sir, Aman ke saath meeting 5 baje. Save kar doon?",
+                    spoken_reply_hi="सर, अमन के साथ मीटिंग पाँच बजे। सेव कर दूँ?", **extra)
+
+    # ---------------------------------------------------------------- who is this person?
+    def test_unknown_person_is_questioned_then_remembered_for_the_speaker_only(self):
+        from core.models import Contact
+        day = _workday()
+        first = self.interpret(self.md_client, "Aman ke saath 5 baje meeting book karo", self._aman(day))
+        self.assertTrue(first["needs_clarification"])
+        self.assertIn("I don't know any Aman", first["question"])
+        self.assertEqual(first["spoken_reply"], first["question"])
+        self.assertEqual(first["speak_lang"], "hi")          # asked in his language
+        self.assertIn("Aman", first["speak_text"])
+        self.assertEqual(first["people"], ["Aman"])
+        self.assertEqual(Contact.objects.count(), 0)
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 1)  # nothing booked with a stranger
+        # He explains who Aman is: remembered, and the meeting carries on.
+        history = [{"role": "user", "text": "Aman ke saath 5 baje meeting book karo"}, {"role": "jarvis", "text": first["question"]}]
+        second = self.interpret(self.md_client, "bahar ka hai, hamara vendor", self._aman(
+            day, new_contacts=[{"name": "aman", "note": "vendor"}]), previous=first["transcript"], history=history)
+        self.assertFalse(second["needs_clarification"])
+        self.assertEqual(second["action"], "private_task")
+        self.assertEqual(second["contacts_saved"], ["Aman"])
+        self.assertEqual([(c["name"], c["note"]) for c in services.list_contacts(self.md)], [("Aman", "vendor")])
+        # Next time nobody is asked, and the model is told who Aman is.
+        with mock.patch("core.ai_brain.interpret", return_value=self._aman(day)) as fake:
+            third = self.md_client.post("/api/v1/assistant/interpret/", {"text": "Aman ko kal call karna hai"}, format="json").json()
+        self.assertFalse(third["needs_clarification"])
+        self.assertEqual(fake.call_args.args[1]["contacts"], [{"name": "Aman", "who": "vendor"}])
+        # Sir's contact is his alone: Mansi's JARVIS still does not know Aman, and her context has no trace of him.
+        self.assertEqual(services.list_contacts(self.pa), [])
+        self.assertNotIn("vendor", json.dumps(services.ai_context(self.pa), default=str))
+        pa = self.interpret(self.pa_client, "Sir ke liye Aman ke saath meeting", _cmd(
+            intent="request_for_md", title="Meeting with Aman", kind="MEETING", people=["Aman"]))
+        self.assertIn("I don't know any Aman", pa["question"])
+
+    def test_asked_once_then_taken_as_a_contact_even_if_the_model_forgets(self):
+        day = _workday()
+        first = self.interpret(self.md_client, "Aman ke saath meeting", self._aman(day))
+        history = [{"role": "user", "text": "Aman ke saath meeting"}, {"role": "jarvis", "text": first["question"]}]
+        second = self.interpret(self.md_client, "haan wahi", self._aman(day), previous=first["transcript"], history=history)
+        self.assertFalse(second["needs_clarification"])      # never the same question twice
+        self.assertEqual([c["name"] for c in services.list_contacts(self.md)], ["Aman"])
+        self.assertTrue(any("Aman" in w for w in second["warnings"]))
+
+    def test_known_people_pass_and_near_names_are_offered(self):
+        day = _workday()
+        services.create_private_task(self.md, {"title": "Call Sharma ji – Pune Franchise", "kind": Kind.CALL,
+                                               "priority": Priority.NORMAL, "due_date": day, "due_time": time(11, 0)})
+        for people in (["Neha"], ["Priya"], ["Sharma ji"], ["Anil Verma", "Suresh"], []):
+            d = self.interpret(self.md_client, "meeting rakho", _cmd(
+                intent="create_task", title="Review Meeting", kind="MEETING", due_date=day.isoformat(), due_time="15:00",
+                people=people, spoken_reply="Sir, review meeting at 3 PM. Shall I save it?"))
+            self.assertFalse(d["needs_clarification"], people)
+        # Two people with that name on the staff: which one?
+        d = self.interpret(self.md_client, "Ramesh ke saath meeting", _cmd(
+            intent="create_task", title="Meeting with Ramesh", kind="MEETING", due_date=day.isoformat(), due_time="15:00",
+            people=["Ramesh"]))
+        self.assertEqual(d["question"], "Sir, which Ramesh: Ramesh Kumar from Accounts or Ramesh Yadav from Logistics?")
+        # A near miss gets the closest known name offered.
+        d = self.interpret(self.md_client, "Kavit ke saath meeting", _cmd(
+            intent="create_task", title="Meeting with Kavit", kind="MEETING", due_date=day.isoformat(), due_time="15:00",
+            people=["Kavit"]))
+        self.assertIn("I don't know any Kavit", d["question"])
+        self.assertIn("did you mean Kavita Singh from Franchise", d["question"])
+        # The person who must DO the work is the delegation step's question, not a second one here.
+        d = self.interpret(self.md_client, "Ramesh ko bolo Sharma ji ko call kare", _cmd(
+            intent="assign_to_staff", staff_name="Ramesh", title="Call Sharma ji", people=["Ramesh", "Sharma ji"]))
+        self.assertEqual(d["action"], "delegation")
+        self.assertEqual(d["people"], ["Sharma ji"])
+        self.assertIn("which Ramesh", d["question"])
+
+    def test_sirs_private_titles_never_make_a_name_known_to_the_pa(self):
+        # "Mehta" appears only in Sir's private meeting. For him the name is known; for Mansi it is a stranger,
+        # and nothing in her answer shows that Sir has anything with a Mehta.
+        day = _workday()
+        cmd = _cmd(intent="create_task", title="Meeting with Mehta", kind="MEETING", due_date=day.isoformat(),
+                   due_time="15:00", people=["Mehta"])
+        self.assertFalse(self.interpret(self.md_client, "Mehta ke saath meeting", cmd)["needs_clarification"])
+        with mock.patch("core.ai_brain.interpret", return_value={**cmd, "intent": "request_for_md"}):
+            r = self.pa_client.post("/api/v1/assistant/interpret/", {"text": "Sir ke liye Mehta ke saath meeting"}, format="json")
+        self.assertIn("I don't know any Mehta", r.json()["question"])
+        self.assert_no_secret(r)
+
+    # ---------------------------------------------------------------- whose task is it?
+    def test_pa_task_is_never_assumed_to_be_for_sir(self):
+        day = _workday()
+        base = dict(title="Meeting with Neha", kind="MEETING", due_date=day.isoformat(), due_time="15:00", people=["Neha"])
+        # She did not say whose it is, and the model guessed "for Sir": JARVIS asks instead.
+        d = self.interpret(self.pa_client, "Neha ke saath 3 baje meeting book karo", _cmd(intent="request_for_md", **base))
+        self.assertEqual(d["action"], "choose_destination")
+        self.assertEqual(d["question"], "Priya, is this for Sir, for you, or for someone in the team?")
+        d = self.interpret(self.pa_client, "kal bank jaana hai", _cmd(intent="create_task", title="Go to the Bank"))
+        self.assertEqual(d["action"], "choose_destination")
+        # She said it: for Sir -> a request he accepts; her own -> her own list.
+        d = self.interpret(self.pa_client, "Sir ke liye Neha ke saath 3 baje meeting", _cmd(intent="request_for_md", **base))
+        self.assertEqual(d["action"], "md_request")
+        d = self.interpret(self.pa_client, "mujhe kal bank jaana hai yaad dilana", _cmd(intent="create_task", title="Go to the Bank"))
+        self.assertEqual(d["action"], "pa_self_task")
+        self.assertIn("Your own task", d["spoken_reply"])
+        # "Sir ki cab book karni hai" is HER job (the model judged it so, and she named Sir).
+        d = self.interpret(self.pa_client, "Sir ki cab book karni hai kal", _cmd(intent="create_task", title="Book Cab for Sir"))
+        self.assertEqual(d["action"], "pa_self_task")
+        # A stranger AND nobody named as the owner: one combined question.
+        d = self.interpret(self.pa_client, "Aman ke saath meeting book karo", _cmd(
+            intent="needs_destination", title="Meeting with Aman", kind="MEETING", people=["Aman"],
+            needs_clarification=True, clarification_question="Priya, is this for Sir, for you, or for someone in the team?"))
+        self.assertEqual(d["action"], "choose_destination")
+        self.assertIn("I don't know any Aman", d["question"])
+        self.assertIn("is this for Sir, for you, or for someone in the team", d["question"])
+        # Offline parser: her words decide, and the answer said last wins (no question loop).
+        d = self.interpret(self.pa_client, "mere liye", _cmd(intent="create_task", kind="MEETING", title="Meeting", engine="rules"),
+                           previous="Sir ke office mein meeting")
+        self.assertEqual(d["action"], "pa_self_task")
+        d = self.interpret(self.pa_client, "Sir ke liye", _cmd(intent="create_task", kind="MEETING", title="Meeting", engine="rules"),
+                           previous="mera ek meeting hai")
+        self.assertEqual(d["action"], "md_request")
+        # Sir's side is unchanged: his own meeting is his personal item, nothing for him is ever a "request".
+        d = self.interpret(self.md_client, "Neha ke saath 3 baje meeting", _cmd(intent="create_task", **base))
+        self.assertEqual(d["action"], "private_task")
+
+    def test_pa_own_task_lives_on_her_list_and_sir_is_not_nagged(self):
+        when = tu.now_local() + timedelta(minutes=20)
+        body = {"title": "Collect courier from reception", "due_date": when.date().isoformat(), "due_time": when.strftime("%H:%M")}
+        self.assertEqual(self.md_client.post("/api/v1/pa-tasks/self/", body, format="json", HTTP_IDEMPOTENCY_KEY="s0").status_code, 403)
+        alerts_before = Alert.objects.filter(recipient=self.md).count()
+        r = self.pa_client.post("/api/v1/pa-tasks/self/", body, format="json", HTTP_IDEMPOTENCY_KEY="s1")
+        self.assertEqual(r.status_code, 201, r.content)
+        task_id, version = r.json()["id"], r.json()["version"]
+        self.assertEqual(r.json()["origin"], "PA_SELF")
+        again = self.pa_client.post("/api/v1/pa-tasks/self/", body, format="json", HTTP_IDEMPOTENCY_KEY="s1")
+        self.assertEqual(again.json()["id"], task_id)            # a retry never makes a second one
+        self.assertEqual(SharedTask.objects.filter(origin="PA_SELF").count(), 1)
+        self.assertEqual(IntegrationCommand.objects.count(), 0)  # stays inside JARVIS
+        # It is on her list and she is reminded; Sir can see it but is not reminded or alerted.
+        mine = self.pa_client.get("/api/v1/today/").json()
+        self.assertIn(task_id, [i["id"] for i in mine["overdue"] + mine["today"] + mine["upcoming"] + mine["anytime"]])
+        pa_keys = [x["key"] for x in self.pa_client.get("/api/v1/reminders/").json()["reminders"]]
+        md_keys = [x["key"] for x in self.md_client.get("/api/v1/reminders/").json()["reminders"]]
+        self.assertTrue(any(task_id in k for k in pa_keys))
+        self.assertFalse(any(task_id in k for k in md_keys))
+        self.assertIn(task_id, [t["id"] for t in self.md_client.get("/api/v1/today/").json()["pa_tasks"]])
+        # Her own task: she changes it herself (no request to Sir) and finishes it without an alert to him.
+        r = self.pa_client.patch(f"/api/v1/shared-tasks/{task_id}/", {"expected_version": version, "priority": "HIGH"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(TaskRequest.objects.count(), 0)
+        r = self.pa_client.post(f"/api/v1/shared-tasks/{task_id}/complete/", {"expected_version": r.json()["version"]}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(Alert.objects.filter(recipient=self.md).count(), alerts_before)
+
+    def test_pa_own_task_by_voice_and_done_by_voice(self):
+        day = _workday()
+        r = self.turn(self.pa_client, "mujhe us din 11 baje bank jaana hai", _cmd(
+            intent="create_task", title="Go to the Bank", due_date=day.isoformat(), due_time="11:00"))
+        self.assertEqual(r["action"], "pa_self_task")
+        self.assertEqual(SharedTask.objects.filter(origin="PA_SELF").count(), 0)   # nothing before the yes
+        r = self.turn(self.pa_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved")
+        task = SharedTask.objects.get(origin="PA_SELF")
+        self.assertEqual((task.title, task.created_by, task.assignee_type), ("Go to the Bank", self.pa, "PA"))
+        self.assertEqual(TaskRequest.objects.count(), 0)         # it never went to Sir for approval
+        r = self.turn(self.pa_client, "bank wala ho gaya", _cmd(intent="complete_task", target_refs=[str(task.id)]))
+        self.assertEqual(r["action"], "complete")
+        r = self.turn(self.pa_client, "haan", _cmd(intent="confirm_pending"))
+        task.refresh_from_db()
+        self.assertEqual(task.status, "COMPLETED")
+
+    # ---------------------------------------------------------------- official vs personal
+    def _official_task_for_sir(self):
+        r = self.pa_client.post("/api/v1/requests/", {
+            "title": "Sign Indore vendor agreement", "due_date": (tu.today_local() + timedelta(days=1)).isoformat(),
+            "due_time": "12:00"}, format="json", HTTP_IDEMPOTENCY_KEY="off-1")
+        self.md_client.post(f"/api/v1/requests/{r.json()['id']}/accept/", HTTP_IDEMPOTENCY_KEY="off-2")
+        return SharedTask.objects.get(assignee_type="MD")
+
+    def test_pending_is_split_into_official_and_personal_for_sir_only(self):
+        official = self._official_task_for_sir()
+        summary = services.ai_context(self.md)["pending_summary"]
+        self.assertEqual((summary["total"], summary["official"], summary["personal"]), (2, 1, 1))
+        locked = services.ai_context(self.md, include_private=False)["pending_summary"]
+        self.assertEqual((locked["total"], locked["official"]), (1, 1))
+        self.assertNotIn("personal", locked)                     # a locked phone does not even count them
+        # The screen: both kinds, each row labelled; the official view has no personal row at all.
+        view = self.md_client.get("/api/v1/views/pending/").json()
+        self.assertEqual([s["label"] for s in view["stats"]], ["Official", "Personal", "Late", "Due today"])
+        self.assertEqual({r["title"]: r["who"] for r in view["rows"]}, {SECRET: "Personal", official.title: "Official"})
+        only = self.md_client.get("/api/v1/views/official/")
+        self.assert_no_secret(only)
+        self.assertEqual([r["title"] for r in only.json()["rows"]], [official.title])
+        self.assertNotIn("Personal", [s["label"] for s in only.json()["stats"]])
+        # The words pick the view when the model does not say.
+        for text, kind in (("kya koi mere task pending hai", "pending"), ("official task kitne baaki hain", "official"),
+                           ("mere personal task pending hain kya", "private")):
+            d = self.interpret(self.md_client, text, _cmd(intent="query", spoken_reply="Sir, 2 pending hain."))
+            self.assertEqual(d["view"]["kind"], kind, text)
+        # Locked phone: the pending answer carries official rows only.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="pending", spoken_reply="x")) as fake:
+            r = self.md_client.post("/api/v1/assistant/turn/", {"text": "kya pending hai", "locked": True, "private_ok": False}, format="json")
+        self.assertNotIn(SECRET, json.dumps(r.json()))
+        self.assertNotIn(SECRET, json.dumps(fake.call_args.args[1], default=str))
+
+    def test_pa_has_no_personal_category_and_never_sees_sirs(self):
+        self._official_task_for_sir()
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Book flights for Pune visit"}, format="json", HTTP_IDEMPOTENCY_KEY="p1")
+        self.pa_client.post("/api/v1/pa-tasks/self/", {"title": "Renew my ID card"}, format="json", HTTP_IDEMPOTENCY_KEY="p2")
+        ctx = services.ai_context(self.pa)
+        self.assertEqual(ctx["pending_summary"], {"total": 2, "late": 0, "due_today": 0, "later_or_no_date": 2, "from_sir": 1, "own": 1})
+        self.assertNotIn(SECRET, json.dumps(ctx, default=str))
+        for kind in ("pending", "official"):
+            r = self.pa_client.get(f"/api/v1/views/{kind}/")
+            self.assertEqual(r.status_code, 200, kind)
+            self.assert_no_secret(r)
+            self.assertNotIn("Personal", [s["label"] for s in r.json()["stats"]])
+        view = self.pa_client.get("/api/v1/views/pending/").json()
+        self.assertEqual({r["title"]: r["who"] for r in view["rows"]},
+                         {"Book flights for Pune visit": "From Sir", "Renew my ID card": "Your own"})
+        self.assertEqual(self.pa_client.get("/api/v1/views/private/").status_code, 404)
+        # Sir's context marks which of her tasks are her own, and does not count them as work he gave.
+        md_ctx = services.ai_context(self.md)
+        self.assertEqual(md_ctx["pending_summary"]["with_pa_open"], 1)
+        self.assertEqual(sorted(bool(t.get("her_own_task")) for t in md_ctx["tasks_given_to_pa"]), [False, True])
+
+    def test_contacts_are_owner_only(self):
+        r = self.md_client.post("/api/v1/contacts/", {"name": "sharma ji", "note": "our CA"}, format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        cid = r.json()["id"]
+        self.assertEqual(r.json()["name"], "Sharma Ji")
+        self.md_client.post("/api/v1/contacts/", {"name": "Sharma", "note": "CA, Indore"}, format="json")  # same person: note updated
+        mine = self.md_client.get("/api/v1/contacts/").json()["results"]
+        self.assertEqual([(c["name"], c["note"]) for c in mine], [("Sharma Ji", "CA, Indore")])
+        self.assertEqual(self.pa_client.get("/api/v1/contacts/").json()["results"], [])
+        self.assertEqual(self.pa_client.delete(f"/api/v1/contacts/{cid}/").status_code, 404)
+        self.assertEqual(self.md_client.post("/api/v1/contacts/", {"name": "  "}, format="json").status_code, 422)
+        self.assertEqual(self.md_client.delete(f"/api/v1/contacts/{cid}/").status_code, 204)
+        self.assertEqual(services.list_contacts(self.md), [])
+
+
+class ListViewTests(BaseCase):
+    """Any list he asks for: the people themselves, and anybody's tasks for any day. Fixed templates, real data."""
+
+    def ask(self, client, text, **fields):
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", **fields)):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _give(self, name, title, day=None, key="g1"):
+        staff = StaffMember.objects.get(name=name)
+        body = {"title": title, "staff_id": staff.id, "priority": "NORMAL"}
+        if day:
+            body["due_date"] = day.isoformat()
+        r = self.md_client.post("/api/v1/delegations/", body, format="json", HTTP_IDEMPOTENCY_KEY=key)
+        self.assertEqual(r.status_code, 201, r.content)
+        return r.json()["id"]
+
+    # ---------------------------------------------------------------- the people
+    def test_staff_list_is_the_people_not_their_work(self):
+        self._give("Ramesh Kumar", "GST reconciliation")
+        d = self.ask(self.md_client, "meri staff ki list dikhao", view_kind="people")
+        view = d["view"]
+        self.assertEqual((view["kind"], view["layout"]), ("people", "people"))
+        names = [r["title"] for r in view["rows"]]
+        self.assertIn("Neha Gupta", names)
+        self.assertNotIn("GST reconciliation", names)                 # people, not the work given to them
+        self.assertEqual(len(names), StaffMember.objects.filter(active=True).count())
+        ramesh = next(r for r in view["rows"] if r["title"] == "Ramesh Kumar")
+        self.assertEqual((ramesh["who"], ramesh["kind"], ramesh["assigned"]), ("Accounts", "Senior Accountant", 1))
+        self.assertEqual([s["label"] for s in view["stats"]], ["People", "Teams", "On leave", "With work"])
+        self.assertEqual(sum(p["value"] for p in view["series"]), len(names))   # head-count chart, team by team
+        # The sentence comes from the real numbers, not from the model.
+        self.assertEqual(d["spoken_reply"], view["summary"])
+        self.assertTrue(d["spoken_reply"].startswith(f"Sir, you have {len(names)} staff in {len(view['series'])} teams"))
+        # The words alone are enough when the model names no template.
+        self.assertEqual(self.ask(self.md_client, "show me the list of my staff")["view"]["kind"], "people")
+        self.assertEqual(self.ask(self.md_client, "staff ko kya kya diya hai")["view"]["kind"], "staff")
+        # Mansi can ask too; nothing of Sir's is in it.
+        r = self.pa_client.get("/api/v1/views/people/")
+        self.assertEqual(r.status_code, 200)
+        self.assert_no_secret(r)
+
+    def test_people_by_team_on_leave_and_details_the_list_does_not_have(self):
+        d = self.ask(self.md_client, "Accounts team mein kaun hai", view_kind="people", view_group="accounts team")
+        self.assertEqual(d["view"]["title"], "Accounts team")
+        self.assertEqual({r["who"] for r in d["view"]["rows"]}, {"Accounts"})
+        self.assertIn("Accounts has", d["spoken_reply"])
+        self.assertIn("Ramesh Kumar", d["spoken_reply"])
+        # Who is on leave.
+        StaffMember.objects.filter(name="Neha Gupta").update(on_leave=True, leave_until=tu.today_local() + timedelta(days=3))
+        d = self.ask(self.md_client, "kaun chhutti par hai", view_kind="people", view_filter="on_leave")
+        self.assertIn("Neha Gupta", [r["title"] for r in d["view"]["rows"]])
+        self.assertTrue(all(r["on_leave"] for r in d["view"]["rows"]))
+        self.assertIn("on leave: ", d["spoken_reply"])
+        # "Show me the females": the list has no such detail. JARVIS says so and never guesses from names.
+        d = self.ask(self.md_client, "staff mein females kaun hain", view_kind="people", view_missing="gender",
+                     reply_language="hi", spoken_reply="Sir, ye rahi 3 mahilayen.", spoken_reply_hi="सर, ये रहीं तीन महिलाएँ।")
+        self.assertIn("the staff list has no gender detail", d["spoken_reply"])
+        self.assertNotIn("mahilayen", d["spoken_reply"])              # the model's own guess is not used
+        self.assertEqual(len(d["view"]["rows"]), StaffMember.objects.filter(active=True).count())
+        self.assertEqual(d["speak_lang"], "hi")
+        self.assertIn("gender की जानकारी नहीं है", d["speak_text"])
+        d = self.ask(self.md_client, "Marketing team dikhao", view_kind="people", view_group="Marketing")
+        self.assertIn("couldn't find a team called Marketing", d["spoken_reply"])
+
+    # ---------------------------------------------------------------- anybody's tasks, any day
+    def test_anyones_tasks_for_any_day_come_from_one_template(self):
+        today = tu.today_local()
+        tomorrow = today + timedelta(days=1)
+        self._give("Ramesh Kumar", "GST reconciliation", tomorrow, "g1")
+        self._give("Neha Gupta", "Send offer letters", today + timedelta(days=3), "g2")
+        one = self.ask(self.md_client, "Ramesh Kumar kal kya kar raha hai", view_kind="tasks", view_who="Ramesh Kumar",
+                       view_from=tomorrow.isoformat(), view_to=tomorrow.isoformat())
+        self.assertEqual(one["view"]["kind"], "tasks")
+        self.assertEqual(one["view"]["title"], "Ramesh Kumar · Tomorrow")
+        self.assertEqual([r["title"] for r in one["view"]["rows"]], ["GST reconciliation"])
+        self.assertEqual(one["spoken_reply"], "Sir, Ramesh Kumar has 1 item tomorrow: 0 done, 1 open.")
+        # Another person, another period: the same template (same numbers row, a bar for each day), other data.
+        week = self.ask(self.md_client, "Neha is hafte kya kar rahi hai", view_kind="tasks", view_who="Neha",
+                        view_from=today.isoformat(), view_to=(today + timedelta(days=6)).isoformat())
+        self.assertEqual([r["title"] for r in week["view"]["rows"]], ["Send offer letters"])
+        self.assertEqual([s["label"] for s in week["view"]["stats"]], [s["label"] for s in one["view"]["stats"]])
+        self.assertEqual((len(week["view"]["series"]), sum(p["value"] for p in week["view"]["series"])), (7, 1))
+        # "What did I give Ramesh today / yesterday": the day the work was assigned, not the day it is due.
+        given = self.ask(self.md_client, "aaj maine Ramesh Kumar ko kya diya", view_kind="tasks", view_who="Ramesh Kumar",
+                         view_from=today.isoformat(), view_to=today.isoformat(), view_by="given")
+        self.assertEqual(len(given["view"]["rows"]), 1)
+        self.assertIn("Ramesh Kumar was given 1 item today", given["spoken_reply"])
+        before = today - timedelta(days=1)
+        none = self.ask(self.md_client, "kal kya diya tha", view_kind="tasks", view_who="Ramesh Kumar",
+                        view_from=before.isoformat(), view_to=before.isoformat(), view_by="given")
+        self.assertEqual(none["view"]["rows"], [])
+        self.assertEqual(none["spoken_reply"], "Sir, I found no items for Ramesh Kumar yesterday.")
+        # All staff together: each row says whose it is. A standard view asked "for staff" lands on the same template.
+        everyone = self.ask(self.md_client, "staff ke saare kaam", view_kind="tasks", view_who="staff")
+        self.assertEqual({r["who"] for r in everyone["view"]["rows"]}, {"Ramesh Kumar", "Neha Gupta"})
+        team = self.ask(self.md_client, "Accounts team ka kaam", view_kind="staff", view_who="Accounts team")
+        self.assertEqual((team["view"]["title"], len(team["view"]["rows"])), ("Accounts team", 1))
+        # One person's report: the same template again, with the on-time share.
+        report = self.ask(self.md_client, "Neha ka performance", view_kind="performance", view_who="Neha")
+        self.assertTrue(report["view"]["title"].startswith("Neha Gupta"))
+        self.assertEqual([s["label"] for s in report["view"]["stats"]], ["Given", "Done", "Late", "On time"])
+        self.assertIn("in the last 30 days", report["spoken_reply"])
+        self.assertEqual(self.ask(self.md_client, "staff performance", view_kind="performance")["view"]["kind"], "performance")
+        # Two people called Ramesh: ask which. Nobody by that name: say so and show who there is.
+        which = self.ask(self.md_client, "Ramesh ke tasks", view_kind="tasks", view_who="Ramesh")
+        self.assertTrue(which["needs_clarification"])
+        self.assertIsNone(which["view"])
+        self.assertEqual(which["question"], "Sir, which Ramesh: Ramesh Kumar from Accounts or Ramesh Yadav from Logistics?")
+        self.assertEqual(self.md_client.get("/api/v1/views/tasks/?who=Ramesh").status_code, 422)
+        nobody = self.ask(self.md_client, "Zubin ke tasks", view_kind="tasks", view_who="Zubin")
+        self.assertEqual(nobody["view"]["kind"], "people")
+        self.assertIn("I couldn't find Zubin on the staff list", nobody["spoken_reply"])
+
+    def test_own_and_pa_lists_keep_the_privacy_wall(self):
+        day = tu.to_local(self.private.due_at).date()
+        span = {"view_from": day.isoformat(), "view_to": day.isoformat()}
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Book flights for Pune visit", "due_date": day.isoformat()},
+                            format="json", HTTP_IDEMPOTENCY_KEY="lv-1")
+        # Sir's own day: his personal meeting is there for him, not in the official-only list, not on a locked phone.
+        mine = self.ask(self.md_client, "us din mera kya hai", view_kind="tasks", view_who="me", **span)
+        self.assertEqual(mine["view"]["title"].split(" · ")[0], "My tasks")
+        self.assertIn(SECRET, [r["title"] for r in mine["view"]["rows"]])
+        official = self.ask(self.md_client, "official kaam", view_kind="tasks", view_who="me", view_filter="official", **span)
+        self.assertNotIn(SECRET, json.dumps(official))
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="tasks", view_who="me", **span)):
+            r = self.md_client.post("/api/v1/assistant/turn/", {"text": "mera kya hai", "locked": True, "private_ok": False}, format="json")
+        self.assertNotIn(SECRET, json.dumps(r.json()))
+        r = self.md_client.get(f"/api/v1/views/tasks/?who=me&from={day.isoformat()}&private=0")
+        self.assertNotIn(SECRET, json.dumps(r.json()))
+        # Mansi's list, as Sir sees it.
+        hers = self.ask(self.md_client, "Priya us din kya kar rahi hai", view_kind="tasks", view_who="pa", **span)
+        self.assertEqual(hers["view"]["title"].split(" · ")[0], "Priya's tasks")
+        self.assertEqual([r["title"] for r in hers["view"]["rows"]], ["Book flights for Pune visit"])
+        # Mansi asking: her own list; about Sir only his official work; "everyone" never opens his personal items.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="tasks", view_who="me", **span)):
+            r = self.pa_client.post("/api/v1/assistant/interpret/", {"text": "us din mera kya hai"}, format="json")
+        self.assertEqual([x["title"] for x in r.json()["view"]["rows"]], ["Book flights for Pune visit"])
+        for who in ("sir", "all", "md", "boss"):
+            with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="tasks", view_who=who, **span)):
+                r = self.pa_client.post("/api/v1/assistant/interpret/", {"text": "Sir us din kya kar rahe hain"}, format="json")
+            self.assertEqual(r.status_code, 200, who)
+            self.assert_no_secret(r)
+            self.assert_no_secret(self.pa_client.get(f"/api/v1/views/tasks/?who={who}&from={day.isoformat()}"))
+        self.assertEqual(self.pa_client.get(f"/api/v1/views/private/?from={day.isoformat()}").status_code, 404)
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="tasks", view_who="sir", **span)):
+            r = self.pa_client.post("/api/v1/assistant/interpret/", {"text": "Sir ka kya hai"}, format="json")
+        self.assertEqual(r.json()["view"]["title"].split(" · ")[0], "Sir's official tasks")
+
+
+class PersonAndScreenTests(BaseCase):
+    """One person's own card (even when the name is heard a little wrong), and voice working the screen."""
+
+    def ask(self, client, text, intent="query", **fields):
+        extra = {k: fields.pop(k) for k in ("screen", "history") if k in fields}
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent=intent, **fields)) as fake:
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json(), fake
+
+    def _give(self, name, title, key):
+        staff = StaffMember.objects.get(name=name)
+        r = self.md_client.post("/api/v1/delegations/", {"title": title, "staff_id": staff.id, "priority": "NORMAL"},
+                                format="json", HTTP_IDEMPOTENCY_KEY=key)
+        self.assertEqual(r.status_code, 201, r.content)
+
+    def test_details_of_one_person_is_their_own_card_not_the_whole_list(self):
+        self._give("Kavita Singh", "Call the Pune franchise owner", "pk-1")
+        d, _ = self.ask(self.md_client, "Kavita Singh ki detail do", view_kind="person", view_who="Kavita Singh")
+        view = d["view"]
+        self.assertEqual((view["kind"], view["title"]), ("person", "Kavita Singh"))
+        self.assertEqual(view["profile"], {"name": "Kavita Singh", "department": "Franchise",
+                                           "designation": "Franchise Coordinator", "on_leave": False, "leave": ""})
+        self.assertEqual([r["title"] for r in view["rows"]], ["Call the Pune franchise owner"])
+        self.assertEqual([s["label"] for s in view["stats"]], ["Open", "Done", "Late", "On time"])
+        self.assertEqual(d["spoken_reply"], "Sir, Kavita Singh is Franchise Coordinator in Franchise. 1 open; 0 done.")
+        # The microphone heard the name a little wrong: still her, and the reply says whose card it is.
+        for heard in ("Avitha Singh", "kavitha sinngh", "Kavitha"):
+            d, _ = self.ask(self.md_client, f"give me detail of {heard}", view_kind="person", view_who=heard)
+            self.assertEqual(d["view"]["title"], "Kavita Singh", heard)
+        # The model filed it under "people" (the bug he hit): the person named still gets their own card.
+        d, _ = self.ask(self.md_client, "give me detail of Kavita Singh", view_kind="people", view_who="Kavita Singh")
+        self.assertEqual(d["view"]["kind"], "person")
+        # A team name there is the team's list; no name at all is everyone.
+        d, _ = self.ask(self.md_client, "Accounts ki detail", view_kind="person", view_who="Accounts")
+        self.assertEqual((d["view"]["kind"], d["view"]["title"]), ("people", "Accounts team"))
+        self.assertEqual(self.ask(self.md_client, "staff", view_kind="person")[0]["view"]["kind"], "people")
+        # Someone on leave: said, and shown.
+        d, _ = self.ask(self.md_client, "Nikki ke baare mein batao", view_kind="person", view_who="Nikki")
+        self.assertTrue(d["view"]["profile"]["on_leave"])
+        self.assertIn("on leave until", d["spoken_reply"])
+        # Two people called Ramesh: which one. Nobody like that: the list, with a note.
+        d, _ = self.ask(self.md_client, "Ramesh ki detail", view_kind="person", view_who="Ramesh")
+        self.assertIn("which Ramesh", d["question"])
+        d, _ = self.ask(self.md_client, "Zubin ki detail", view_kind="person", view_who="Zubin")
+        self.assertEqual(d["view"]["kind"], "people")
+        self.assertIn("couldn't find Zubin", d["spoken_reply"])
+        # A tap on a name in the app asks the same thing.
+        r = self.md_client.get("/api/v1/views/person/?who=Kavita%20Singh")
+        self.assertEqual(r.json()["profile"]["designation"], "Franchise Coordinator")
+        # Mansi's own card for Sir: her staff entry, and the work he gave her.
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Book flights for Pune visit"}, format="json", HTTP_IDEMPOTENCY_KEY="pk-2")
+        d, _ = self.ask(self.md_client, "Priya ki detail", view_kind="person", view_who="pa")
+        self.assertEqual(d["view"]["kind"], "person")
+        self.assertEqual([r["title"] for r in d["view"]["rows"]], ["Book flights for Pune visit"])
+
+    def test_voice_works_the_screen(self):
+        screen = {"kind": "people", "title": "Your staff", "items": [{"id": "7", "title": "Kavita Singh"}], "junk": "x" * 50}
+        # What is on screen reaches the model (so "is list ka PDF" or a bare name makes sense), cleaned up.
+        d, fake = self.ask(self.md_client, "is list ka PDF bana do", intent="screen_action", screen_action="export_pdf",
+                           spoken_reply="Ji Sir, PDF bana raha hoon.", screen=screen)
+        self.assertEqual(fake.call_args.args[1]["on_screen"], {"kind": "people", "title": "Your staff", "items": [{"id": "7", "title": "Kavita Singh"}]})
+        self.assertEqual((d["action"], d["screen_action"]), ("screen", "export_pdf"))
+        self.assertFalse(d["needs_clarification"])
+        for act in ("export_csv", "share"):
+            d, _ = self.ask(self.md_client, "share karo", intent="screen_action", screen_action=act, screen=screen)
+            self.assertEqual((d["action"], d["screen_action"]), ("screen", act))
+        # Nothing on screen: nothing to download, and JARVIS says so.
+        d, _ = self.ask(self.md_client, "PDF bana do", intent="screen_action", screen_action="export_pdf")
+        self.assertEqual((d["action"], d["screen_action"]), ("answer", ""))
+        self.assertIn("no list on screen", d["spoken_reply"])
+        # Going somewhere needs no card.
+        d, _ = self.ask(self.md_client, "settings kholo", intent="screen_action", screen_action="open_settings")
+        self.assertEqual((d["action"], d["screen_action"]), ("screen", "open_settings"))
+        # "Open that one": only a task that really exists for him can be opened.
+        d, _ = self.ask(self.md_client, "wo meeting kholo", intent="screen_action", screen_action="open_item",
+                        target_ref=str(self.private.id))
+        self.assertEqual((d["action"], d["screen_action"], d["target"]["id"]), ("screen", "open_item", str(self.private.id)))
+        d, _ = self.ask(self.md_client, "wo kholo", intent="screen_action", screen_action="open_item", target_ref="made-up-id")
+        self.assertEqual(d["action"], "answer")
+        d, _ = self.ask(self.pa_client, "wo kholo", intent="screen_action", screen_action="open_item", target_ref=str(self.private.id))
+        self.assertEqual(d["action"], "answer")                  # Sir's personal item is not hers to open
+        self.assertNotIn(SECRET, json.dumps(d))
+        # An action the app does not have is refused politely, never guessed.
+        d, _ = self.ask(self.md_client, "screen ghumao", intent="screen_action", screen_action="")
+        self.assertEqual(d["action"], "answer")
+        # With the app closed (voice only) there is no screen to work.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="screen_action", screen_action="open_settings")):
+            r = self.md_client.post("/api/v1/assistant/turn/", {"text": "settings kholo"}, format="json")
+        self.assertIn("please open JARVIS", r.json()["show"])
+
+from django.utils import timezone  # noqa: E402
+
+
+class ToldOnceTests(BaseCase):
+    """Every message is told once, then tracked until seen: the rules both the app and the background part follow."""
+
+    def _request(self, key="to-1"):
+        r = self.pa_client.post("/api/v1/requests/", {"title": "Sign Indore vendor agreement"}, format="json", HTTP_IDEMPOTENCY_KEY=key)
+        self.assertEqual(r.status_code, 201, r.content)
+        return r.json()["id"]
+
+    def test_alert_told_once_and_old_news_is_not_news(self):
+        self._request()
+        a = self.md_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertEqual((a["kind"], a["fresh"], a["delivered_at"]), ("NEW_REQUEST", True, None))
+        # The phone says it and reports so: it stays in the list, but nobody announces it again.
+        r = self.md_client.post("/api/v1/told/", {"ids": [a["id"]]}, format="json")
+        self.assertEqual(r.json()["alerts"], 1)
+        again = self.md_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertEqual(again["id"], a["id"])
+        self.assertFalse(again["fresh"])
+        self.assertIsNotNone(again["delivered_at"])
+        self.assertEqual(self.md_client.post("/api/v1/told/", {"ids": [a["id"]]}, format="json").json()["alerts"], 0)
+        # Mansi cannot mark Sir's alerts as told.
+        Alert.objects.filter(id=a["id"]).update(delivered_at=None)
+        self.assertEqual(self.pa_client.post("/api/v1/told/", {"ids": [a["id"]]}, format="json").json()["alerts"], 0)
+        # Older than a day: never news. Older than a week: not even listed.
+        Alert.objects.filter(id=a["id"]).update(created_at=timezone.now() - timedelta(hours=30))
+        self.assertFalse(self.md_client.get("/api/v1/alerts/").json()["results"][0]["fresh"])
+        Alert.objects.filter(id=a["id"]).update(created_at=timezone.now() - timedelta(days=8))
+        self.assertEqual(self.md_client.get("/api/v1/alerts/").json()["results"], [])
+
+    def test_reminder_told_once(self):
+        when = tu.now_local() + timedelta(minutes=20)
+        services.create_private_task(self.md, {"title": "Call the bank", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                               "due_date": when.date(), "due_time": when.time().replace(second=0, microsecond=0)})
+        rems = self.md_client.get("/api/v1/reminders/").json()["reminders"]
+        due = next(r for r in rems if r["label"] == "due" and r["title"] == "Call the bank")
+        self.assertIsNone(due["told_at"])
+        self.assertEqual(self.md_client.post("/api/v1/told/", {"keys": [due["key"]]}, format="json").json()["reminders"], 1)
+        rems = self.md_client.get("/api/v1/reminders/").json()["reminders"]
+        again = next(r for r in rems if r["key"] == due["key"])
+        self.assertIsNotNone(again["told_at"])             # still listed (not seen), but marked as told
+        self.md_client.post("/api/v1/reminders/ack/", {"key": due["key"]}, format="json")
+        self.assertNotIn(due["key"], [r["key"] for r in self.md_client.get("/api/v1/reminders/").json()["reminders"]])
+
+    def test_no_reminder_for_a_time_already_past_when_the_task_was_made(self):
+        # "Kal 4 baje" said at 3:55: no "15 minutes before" (it is already gone), only "it's time" and the check-in.
+        when = tu.now_local() + timedelta(minutes=5)
+        services.create_private_task(self.md, {"title": "Review the deck", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                               "due_date": when.date(), "due_time": when.time().replace(second=0, microsecond=0)})
+        labels = [r["label"] for r in self.md_client.get("/api/v1/reminders/").json()["reminders"] if r["title"] == "Review the deck"]
+        self.assertNotIn("before", labels)
+        self.assertIn("due", labels)
+        # A task written down after its time has passed is not "missed": no reminder at all for that moment.
+        gone = tu.now_local() - timedelta(minutes=30)
+        services.create_private_task(self.md, {"title": "Already Done Meeting", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                               "due_date": gone.date(), "due_time": gone.time().replace(second=0, microsecond=0)})
+        labels = [r["label"] for r in self.md_client.get("/api/v1/reminders/").json()["reminders"] if r["title"] == "Already Done Meeting"]
+        self.assertNotIn("due", labels)
+        self.assertNotIn("before", labels)
+
+    def test_check_in_once_after_a_timed_task_is_still_open(self):
+        # Due 45 minutes ago in working hours: one check-in, worded as a choice. Mansi gets it for her own tasks;
+        # Sir does not get it about her tasks (only about his, and about meetings with her).
+        at = tu.now_local().replace(hour=11, minute=0, second=0, microsecond=0)
+        if at > tu.now_local():
+            at -= timedelta(days=1)
+        services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                               "due_date": at.date(), "due_time": at.time()})
+        rems = self.md_client.get("/api/v1/reminders/?hours=48").json()["reminders"]
+        check = [r for r in rems if r["label"] == "checkin" and r["title"] == "Call Mehta ji"]
+        self.assertEqual(len(check), 1)
+        self.assertEqual(datetime.fromisoformat(check[0]["fire_at"]), at + timedelta(minutes=45))
+        self.assertEqual(check[0]["spoken"], "Sir, your call Call Mehta ji was due at 11 AM and is still open. Done, move it, or leave it?")
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Book flights", "due_date": at.date().isoformat(), "due_time": "11:00"},
+                            format="json", HTTP_IDEMPOTENCY_KEY="ci-1")
+        hers = [r["label"] for r in self.pa_client.get("/api/v1/reminders/?hours=48").json()["reminders"] if r["title"] == "Book flights"]
+        self.assertIn("checkin", hers)
+        his = [r for r in self.md_client.get("/api/v1/reminders/?hours=48").json()["reminders"] if "Book flights" in r["title"]]
+        self.assertNotIn("checkin", [r["label"] for r in his])
+        # No check-in in the evening or at night (left to the summary and the morning briefing).
+        late = tu.now_local().replace(hour=19, minute=30, second=0, microsecond=0)
+        if late > tu.now_local():
+            late -= timedelta(days=1)
+        services.create_private_task(self.md, {"title": "Night Thing", "kind": Kind.TASK, "priority": Priority.NORMAL,
+                                               "due_date": late.date(), "due_time": late.time()})
+        rems = self.md_client.get("/api/v1/reminders/?hours=48").json()["reminders"]
+        self.assertEqual([r["label"] for r in rems if r["title"] == "Night Thing" and r["label"] == "checkin"], [])
+
+    def test_finishing_a_task_clears_everything_about_it(self):
+        r = self.md_client.post("/api/v1/pa-tasks/", {"title": "Book flights for Pune visit"}, format="json", HTTP_IDEMPOTENCY_KEY="cl-1")
+        task_id, version = r.json()["id"], r.json()["version"]
+        self.assertEqual(Alert.objects.filter(recipient=self.pa, ref_id=task_id, acknowledged_at__isnull=True).count(), 1)
+        self.pa_client.post(f"/api/v1/shared-tasks/{task_id}/complete/", {"expected_version": version}, format="json")
+        # Her "new task for you" alert is gone (nothing left to do), while his "Mansi has completed" news stays.
+        left = list(Alert.objects.filter(ref_id=task_id, acknowledged_at__isnull=True))
+        self.assertEqual([(a.recipient_id, a.kind) for a in left], [(self.md.id, "STAFF_UPDATE")])
+        self.assertEqual([a for a in self.pa_client.get("/api/v1/alerts/").json()["results"] if a["ref_id"] == task_id], [])
+        self.assertTrue(any(a["ref_id"] == task_id and a["fresh"] for a in self.md_client.get("/api/v1/alerts/").json()["results"]))
+
+    def test_evening_summary_and_weekly_no_date_note_for_both(self):
+        from core import followups
+        yesterday = tu.today_local() - timedelta(days=1)
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Chase the courier", "due_date": yesterday.isoformat()},
+                            format="json", HTTP_IDEMPOTENCY_KEY="ev-1")
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Someday file"}, format="json", HTTP_IDEMPOTENCY_KEY="ev-2")
+        services.create_private_task(self.md, {"title": "No date yet", "kind": Kind.TASK, "priority": Priority.NORMAL})
+        evening = tu.now_local().replace(hour=18, minute=45)
+        # Make the evening fall on a Monday so the weekly note runs in the same pass.
+        while evening.weekday() != 0:
+            evening += timedelta(days=1)
+        followups.run(evening)
+        texts = [a.spoken_text for a in Alert.objects.filter(recipient=self.pa, ref_type="followup")]
+        self.assertTrue(any("slipped today: Chase the courier" in t for t in texts), texts)
+        self.assertTrue(any("no date: Someday file" in t for t in texts), texts)
+        mine = [a.spoken_text for a in Alert.objects.filter(recipient=self.md, ref_type="followup")]
+        self.assertTrue(any("no date" in t and "private" in t for t in mine), mine)
+        self.assertNotIn("No date yet", " ".join(mine))         # a private title is never written into an alert
+        # Run again: nothing is raised twice.
+        before = Alert.objects.filter(ref_type="followup").count()
+        followups.run(evening + timedelta(minutes=5))
+        self.assertEqual(Alert.objects.filter(ref_type="followup").count(), before)

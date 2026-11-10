@@ -81,8 +81,28 @@ object TtsEngine {
         tts = engine
     }
 
-    /** Queues the sentence. The result arrives through [callback] as done / error / stopped. */
+    /**
+     * Queues the sentence. The result arrives through [callback] as done / error / stopped.
+     * JARVIS speaks in the Grok voice; if that cannot be reached before any sound has played (offline, voice off,
+     * daily limit), the phone's own voice says this sentence instead.
+     */
     fun speak(req: Request) {
+        Log.i(TAG, "speak(${req.lang}): ${req.text.take(140)}")  // one line per sentence, so a test can see what was said
+        val ctx = appContext
+        if (ctx != null && GrokVoice.enabled(ctx)) {
+            GrokVoice.speak(ctx, req.id, req.text) { result ->
+                when (result) {
+                    "done" -> finished(req.id, "done")
+                    "stopped" -> finished(req.id, "stopped")
+                    else -> speakWithPhoneVoice(req)
+                }
+            }
+            return
+        }
+        speakWithPhoneVoice(req)
+    }
+
+    private fun speakWithPhoneVoice(req: Request) {
         synchronized(lock) {
             if (tts == null) create()
             if (!ready) {
@@ -134,6 +154,7 @@ object TtsEngine {
     }
 
     fun stop() {
+        GrokVoice.stop()
         synchronized(lock) {
             pending.clear()
             try {

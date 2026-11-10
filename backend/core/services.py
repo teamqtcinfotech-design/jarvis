@@ -5,6 +5,7 @@ Privacy rules enforced in this module:
 - Nothing derived from a PrivateTask reaches a PA except anonymous busy windows.
 - PA changes to MD work are TaskRequests; nothing changes until the MD accepts.
 """
+import difflib
 import hashlib
 import json
 import logging
@@ -24,6 +25,7 @@ from .models import (
     PRIORITY_RANK,
     Alert,
     AuditLog,
+    Contact,
     DueKind,
     IntegrationCommand,
     Kind,
@@ -253,6 +255,34 @@ def request_item(req: TaskRequest) -> dict:
     }
 
 
+def mark_alerts_told(user: User, ids: list) -> int:
+    """The phone (app or background part) spoke or showed these: nobody announces them again."""
+    clean = [str(i)[:64] for i in ids if i][:100]
+    if not clean:
+        return 0
+    return Alert.objects.filter(recipient=user, id__in=clean, delivered_at__isnull=True).update(delivered_at=timezone.now())
+
+
+def mark_reminders_told(user: User, keys: list) -> int:
+    from .models import ReminderTold
+
+    n = 0
+    for key in [str(k)[:200] for k in keys if k][:100]:
+        _, made = ReminderTold.objects.get_or_create(user=user, key=key)
+        n += int(made)
+    return n
+
+
+def close_task_alerts(task) -> int:
+    """A task that is finished or cancelled has nothing left to announce: its alerts count as seen."""
+    return Alert.objects.filter(ref_type="shared_task", ref_id=str(task.id), acknowledged_at__isnull=True) \
+        .update(acknowledged_at=timezone.now())
+
+
+ALERT_FRESH_FOR = timedelta(hours=24)   # older than this it is history, never news
+ALERT_LIST_FOR = timedelta(days=7)      # and older than this it is not even listed
+
+
 def alert_item(alert: Alert) -> dict:
     return {
         "id": str(alert.id),
@@ -264,6 +294,9 @@ def alert_item(alert: Alert) -> dict:
         "ref_type": alert.ref_type,
         "ref_id": alert.ref_id,
         "created_at": alert.created_at.isoformat(),
+        "delivered_at": alert.delivered_at.isoformat() if alert.delivered_at else None,
+        # Worth announcing: not told yet, and recent. Everything else is only for the list.
+        "fresh": alert.delivered_at is None and alert.created_at >= timezone.now() - ALERT_FRESH_FOR,
     }
 
 
@@ -363,6 +396,33 @@ def busy_windows(day: date, include_titles_for: User | None = None) -> list[dict
     for w in merged:
         w["label"] = f"Busy {tu.fmt_time(datetime.fromisoformat(w['start']))}–{tu.fmt_time(datetime.fromisoformat(w['end']))}"
     return merged
+
+
+def pending_split(user: User, dash: dict, include_private: bool = True) -> dict:
+    """Everything still open on the speaker's own list, split the way they think about it.
+
+    Sir has OFFICIAL work (shared: his PA can see it) and PERSONAL items (private: only he can). Personal ones
+    are listed and counted only when include_private is true. A PA's dashboard holds no private items at all,
+    so nothing of his can reach her through this. Mansi's split is what Sir gave her and what is her own.
+    Returns {"items": late first, then today, then the rest; "counts": {...}}.
+    """
+    def keep(item):
+        return include_private or item.get("scope") != "private"
+    late = [i for i in dash["overdue"] if keep(i)]
+    today = [i for i in dash["today"] if keep(i)]
+    later = [i for i in dash["upcoming"] + dash["anytime"] if keep(i)]
+    items = late + today + later
+    counts = {"total": len(items), "late": len(late), "due_today": len(today), "later_or_no_date": len(later)}
+    if user.is_md:
+        personal = sum(1 for i in items if i.get("scope") == "private")
+        counts["official"] = len(items) - personal
+        if include_private:
+            counts["personal"] = personal
+    else:
+        own = sum(1 for i in items if i.get("origin") == SharedTask.Origin.PA_SELF)
+        counts["from_sir"] = len(items) - own
+        counts["own"] = own
+    return {"items": items, "counts": counts}
 
 
 def dashboard(user: User) -> dict:
@@ -526,6 +586,39 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
     return task
 
 
+@transaction.atomic
+def create_pa_self_task(pa: User, data: dict) -> SharedTask:
+    """Mansi's own task or reminder ("mere liye", "mujhe yaad dilana"). Sir can see it in her list; it is not
+    sent to him for approval and he is not nagged about it."""
+    if not pa.is_pa:
+        raise ServiceError("forbidden", "Only the PA keeps her own tasks here.", 403)
+    task = SharedTask(
+        title=data["title"].strip(), notes=data.get("notes", ""), kind=data.get("kind", Kind.TASK),
+        priority=data.get("priority", Priority.NORMAL), assignee_type=SharedTask.Assignee.PA,
+        origin=SharedTask.Origin.PA_SELF, created_by=pa, description=(data.get("description") or "").strip()[:5000],
+        sync_state=SharedTask.Sync.NOT_REQUIRED,
+    )
+    apply_schedule(task, data, creating=True)
+    task.announcement = data.get("announcement") or default_announcement(task.title, task.kind, pa.spoken_name)
+    task.save()
+    audit(pa, "pa_self_task.create", "shared_task", task.id)
+    return task
+
+
+@transaction.atomic
+def update_pa_self_task(pa: User, task_id, changes: dict, expected_version: int) -> SharedTask:
+    """Mansi changes, moves or cancels a task that is her own (never one Sir gave her)."""
+    if not pa.is_pa:
+        raise ServiceError("forbidden", "Not allowed.", 403)
+    task = SharedTask.objects.select_for_update().get(id=task_id, assignee_type=SharedTask.Assignee.PA,
+                                                      origin=SharedTask.Origin.PA_SELF, created_by=pa)
+    _check_version(task, expected_version)
+    _apply_changes(task, changes)
+    task.save()
+    audit(pa, "pa_self_task.update", "shared_task", task.id, "fields: " + ",".join(sorted(changes)))
+    return task
+
+
 PA_SETTABLE_STATUSES = {Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED, Status.COMPLETED}
 
 
@@ -538,7 +631,8 @@ def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: 
         raise ServiceError("invalid_status", "Choose Not started, Working, Hold or Done.", 422)
     task = SharedTask.objects.select_for_update().get(id=task_id, assignee_type=SharedTask.Assignee.PA)
     if task.status == Status.CANCELLED:
-        raise ServiceError("cancelled", "Sir has cancelled this task.", 409)
+        own = task.origin == SharedTask.Origin.PA_SELF
+        raise ServiceError("cancelled", "This task was cancelled." if own else "Sir has cancelled this task.", 409)
     _check_version(task, expected_version)
     if new_status == Status.BLOCKED and not note.strip():
         raise ServiceError("reason_required", "Please give a reason for putting this on hold.", 422)
@@ -549,7 +643,7 @@ def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: 
     task.version += 1
     task.save()
     md = get_md()
-    if md and new_status != old:
+    if md and new_status != old and task.origin != SharedTask.Origin.PA_SELF:
         name = pa.spoken_name
         if new_status == Status.COMPLETED:
             title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"Sir, {name} has completed: {task.title}."
@@ -939,7 +1033,10 @@ def ai_context(user: User, include_private: bool = True) -> dict:
     pa = get_pa()
     if user.is_md:
         ctx["pa_name"] = pa.spoken_name if pa else ""
-        ctx["tasks_given_to_pa"] = [brief(i) | {"status_label": i["status_label"]} for i in dash.get("pa_tasks", [])[:10]]
+        ctx["tasks_given_to_pa"] = [
+            brief(i) | {"status_label": i["status_label"]}
+            | ({"her_own_task": True} if i.get("origin") == SharedTask.Origin.PA_SELF else {})
+            for i in dash.get("pa_tasks", [])[:10]]
     else:
         ctx["md_tasks_from_my_requests"] = [brief(i) for i in dash.get("md_tasks", [])[:10]]
     if user.is_md:
@@ -953,6 +1050,16 @@ def ai_context(user: User, include_private: bool = True) -> dict:
         ctx["my_requests"] = [{"title": r["title"], "state": r["state"]} for r in dash["requests"][:10]]
     # Only the speaker's own remembered facts (the MD's never reach a PA context and vice versa).
     ctx["memories"] = [m.text for m in Memory.objects.filter(owner=user)[:MEMORY_LIMIT]]
+    # People outside the staff list that the speaker has told JARVIS about (owner-only, like memories).
+    ctx["contacts"] = [{"name": c.name, "who": c.note} for c in Contact.objects.filter(owner=user)[:60]]
+    # How much is waiting, split the way the speaker thinks about it. Sir has official work and personal items;
+    # personal ones exist only in his own context (and not at all on a locked phone).
+    ctx["pending_summary"] = dict(pending_split(user, dash, include_private)["counts"])
+    if user.is_md:
+        closed = (Status.COMPLETED, Status.CANCELLED)
+        ctx["pending_summary"]["with_pa_open"] = len([
+            t for t in dash.get("pa_tasks", []) if t["status"] not in closed and t.get("origin") != SharedTask.Origin.PA_SELF])
+        ctx["pending_summary"]["with_staff_open"] = len([t for t in dash["delegated"] if t["status"] not in closed])
     # JARVIS settings the speaker may change by voice.
     current = get_prefs(user)
     def allowed(v):
@@ -1302,6 +1409,110 @@ def delete_memory(user: User, memory_id) -> None:
     m = Memory.objects.get(id=memory_id, owner=user)  # someone else's note -> not found
     m.delete()
     audit(user, "memory.delete", "memory", memory_id)
+
+
+# ------------------------------------------------------------------ people JARVIS knows
+CONTACT_LIMIT = 200
+_HONORIFICS = {"ji", "jee", "sir", "madam", "maam", "mam", "sahab", "saab", "sahib", "bhai", "bhaiya", "didi",
+               "mr", "mrs", "ms", "dr", "shri", "smt", "miss", "the"}
+
+
+def norm_person(name: str) -> str:
+    """'Sharma ji' -> 'sharma'; 'Mr. Anil Verma' -> 'anil verma'."""
+    tokens = [t for t in re.findall(r"[^\W\d_]+", (name or "").lower()) if t not in _HONORIFICS]
+    return " ".join(tokens)
+
+
+def contact_item(c: Contact) -> dict:
+    return {"id": c.id, "name": c.name, "note": c.note, "created_at": c.created_at.isoformat()}
+
+
+def list_contacts(user: User) -> list[dict]:
+    return [contact_item(c) for c in Contact.objects.filter(owner=user)[:CONTACT_LIMIT]]
+
+
+def add_contact(user: User, name: str, note: str = "") -> dict:
+    """Remember an outside person for this user. The same name again only updates the note."""
+    name = " ".join((name or "").split())[:60]
+    note = " ".join((note or "").split())[:120]
+    key = norm_person(name)
+    if not key:
+        raise ServiceError("invalid", "Tell me the person's name.", 422)
+    if name == name.lower():
+        name = name.title()
+    for c in Contact.objects.filter(owner=user)[:CONTACT_LIMIT]:
+        if norm_person(c.name) == key:
+            if note and note != c.note:
+                c.note = note
+                c.save(update_fields=["note"])
+            return contact_item(c)
+    if Contact.objects.filter(owner=user).count() >= CONTACT_LIMIT:
+        raise ServiceError("contacts_full", "My contact list is full. Please remove someone in Settings first.", 409)
+    c = Contact.objects.create(owner=user, name=name, note=note)
+    audit(user, "contact.add", "contact", c.id)
+    return contact_item(c)
+
+
+def delete_contact(user: User, contact_id) -> None:
+    c = Contact.objects.get(id=contact_id, owner=user)  # someone else's contact -> not found
+    c.delete()
+    audit(user, "contact.delete", "contact", contact_id)
+
+
+def resolve_person(user: User, name: str) -> dict:
+    """Does JARVIS know this person, for this user?
+
+    Checked in order: Sir / the PA, the staff directory, the user's saved contacts, then names already in the
+    user's own tasks. Returns {"status": "known" | "ambiguous" | "unknown", "who", "options", "suggestions"}.
+    The MD's private titles are only ever read for the MD himself.
+    """
+    key = norm_person(name)
+    known = {"status": "known", "who": "", "options": [], "suggestions": []}
+    if not key or key in {"md", "boss", "managing director", "me", "myself", "main", "mujhe", "mere"}:
+        return known
+    pa = get_pa()
+    if pa:
+        pa_names = {norm_person(n) for n in (pa.display_name, pa.first_name, pa.username, pa.get_full_name()) if n}
+        if key in pa_names or key in {"pa", "assistant", "personal assistant"}:
+            return {**known, "who": "PA"}
+    matches, partial = resolve_staff(key)
+    if len(matches) == 1:
+        return {**known, "who": f"{matches[0].name} ({matches[0].department})"}
+    if len(matches) > 1:
+        return {"status": "ambiguous", "who": "", "suggestions": [],
+                "options": [f"{m.name} from {m.department}" for m in matches[:3]]}
+    contacts = list(Contact.objects.filter(owner=user)[:CONTACT_LIMIT])
+    for c in contacts:
+        cn = norm_person(c.name)
+        if cn and (cn == key or key in cn.split() or cn in key.split() or cn in key):
+            return {**known, "who": f"{c.name}{' – ' + c.note if c.note else ''}"}
+    # Already in his own diary ("Meeting with Sharma ji" exists): he clearly knows who that is.
+    dash = dashboard(user)
+    titles = [i["title"].lower() for bucket in ("overdue", "today", "upcoming", "anytime") for i in dash[bucket]]
+    titles += [i["title"].lower() for i in dash.get("pa_tasks", []) + dash.get("md_tasks", []) + dash["delegated"]]
+    main = max(key.split(), key=len)
+    if len(main) >= 3 and any(re.search(rf"\b{re.escape(main)}\b", t) for t in titles):
+        return {**known, "who": "seen in your tasks"}
+    # Unknown: offer the nearest names we do know.
+    pool: dict[str, str] = {}
+    for s in StaffMember.objects.filter(active=True)[:200]:
+        label = f"{s.name} from {s.department}" if s.department else s.name
+        pool[norm_person(s.name)] = label
+        first = norm_person(s.name).split()[:1]
+        if first:
+            pool.setdefault(first[0], label)
+    for c in contacts:
+        pool[norm_person(c.name)] = c.name
+    close = difflib.get_close_matches(key, list(pool), n=2, cutoff=0.72)
+    suggestions = []
+    for k in close:
+        if pool[k] not in suggestions:
+            suggestions.append(pool[k])
+    for s in partial[:2]:
+        label = f"{s.name} from {s.department}" if s.department else s.name
+        if label not in suggestions:
+            suggestions.append(label)
+    return {"status": "unknown", "who": "", "options": [], "suggestions": suggestions[:2]}
 
 
 def briefing_facts(user: User, kind: str, conceal_private: bool = False) -> tuple[dict, str]:

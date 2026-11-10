@@ -35,6 +35,35 @@ class WakeDetector(context: Context) : AutoCloseable {
     private val melBuf = ArrayDeque<FloatArray>().apply { repeat(76) { add(FloatArray(32) { 1f }) } }
     private val featBuf = ArrayDeque<FloatArray>().apply { repeat(16) { add(FloatArray(96)) } }
 
+    // What the buffers look like after two seconds of a quiet room. The classifier judges the last 1.3 s of
+    // sound; starting it from blank buffers (all zeros) leaves it unable to recognise the phrase for the first
+    // second and a half after the microphone comes back. Starting from "a quiet room" makes it ready at once.
+    private val quietMel = ArrayList<FloatArray>()
+    private val quietFeat = ArrayList<FloatArray>()
+
+    init {
+        val noise = java.util.Random(7)
+        val chunk = ShortArray(CHUNK)
+        repeat(WARM_CHUNKS) {
+            for (i in chunk.indices) chunk[i] = (noise.nextInt(241) - 120).toShort()
+            process(chunk)
+        }
+        melBuf.toList().takeLast(76).forEach { quietMel.add(it.copyOf()) }
+        featBuf.toList().takeLast(16).forEach { quietFeat.add(it.copyOf()) }
+    }
+
+    /**
+     * Forget what was heard before (after the microphone was handed to someone else and came back) and be ready
+     * for "Hey JARVIS" straight away: the buffers go back to the quiet-room state, not to blank.
+     */
+    fun reset() {
+        raw.fill(0f)
+        melBuf.clear()
+        quietMel.forEach { melBuf.add(it.copyOf()) }
+        featBuf.clear()
+        quietFeat.forEach { featBuf.add(it.copyOf()) }
+    }
+
     /** Feed one 80 ms chunk (1280 samples of 16 kHz PCM16). Returns the wake-word score for this moment. */
     fun process(chunk: ShortArray): Float {
         require(chunk.size == CHUNK) { "chunk must be $CHUNK samples" }
@@ -97,5 +126,6 @@ class WakeDetector(context: Context) : AutoCloseable {
         private const val RAW_LEN = CHUNK + 160 * 3
         private const val MEL_MAX = 970
         private const val FEAT_MAX = 120
+        private const val WARM_CHUNKS = 24  // about 2 s of quiet-room noise, run once when the detector is loaded
     }
 }

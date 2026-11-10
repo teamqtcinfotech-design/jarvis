@@ -1,7 +1,8 @@
 import { dayLabel } from './format';
 import type { Draft, DraftAction } from './types';
 
-export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delegation', 'team_delegation', 'pa_task', 'pa_meeting'];
+export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delegation', 'team_delegation', 'pa_task', 'pa_meeting',
+  'pa_self_task'];
 
 /** Cards that end with a question ("shall I save it?") and wait for a yes / no / change. */
 export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'accept_request', 'decline_request', 'complete', 'remember',
@@ -38,6 +39,8 @@ export function draftHeading(d: Draft): { title: string; detail: string; icon: s
       };
     case 'md_request':
       return { title: 'Request to Sir', detail: 'Sir will accept or decline it.', icon: 'paper-plane-outline' };
+    case 'pa_self_task':
+      return { title: 'Your own task', detail: 'On your list. Sir can see it; it is not sent to him.', icon: 'person-outline' };
     case 'accept_request':
       return { title: 'Accept request', detail: 'It will be added to your list.', icon: 'checkmark-circle-outline' };
     case 'decline_request':
@@ -53,7 +56,11 @@ export function draftHeading(d: Draft): { title: string; detail: string; icon: s
     case 'remember':
       return { title: 'Remember this', detail: 'Only you can see your notes. Delete them any time in Settings.', icon: 'bookmark-outline' };
     case 'choose_destination':
-      return { title: 'Where should this go?', detail: 'Say: personal, your PA, or a staff name.', icon: 'help-circle-outline' };
+      return {
+        title: /don't know any/i.test(d.question ?? '') ? 'Who is this?' : 'Whose is this?',
+        detail: 'Just say it: JARVIS asks before it saves anything.',
+        icon: 'help-circle-outline',
+      };
     default:
       return { title: 'JARVIS', detail: '', icon: 'sparkles-outline' };
   }

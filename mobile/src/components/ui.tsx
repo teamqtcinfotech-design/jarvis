@@ -84,9 +84,10 @@ export function Button({
       {loading ? (
         <ActivityIndicator color={palette.fg} />
       ) : (
-        <View style={styles.row}>
+        <View style={[styles.row, { maxWidth: '100%' }]}>
           {icon ? <Icon name={icon} size={compact ? 16 : 18} color={palette.fg} /> : null}
-          <Text style={[styles.buttonText, compact && { fontSize: 14 }, { color: palette.fg, marginLeft: icon ? 8 : 0 }]}>
+          {/* one line always: a label never wraps or pushes its neighbours off a narrow card */}
+          <Text numberOfLines={1} style={[styles.buttonText, compact && { fontSize: 14 }, { color: palette.fg, marginLeft: icon ? 8 : 0, flexShrink: 1 }]}>
             {title}
           </Text>
         </View>
@@ -202,6 +203,6 @@ export const styles = StyleSheet.create({
   tag: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, marginRight: 6 },
   tagText: { fontSize: 11, fontFamily: fonts.semibold, letterSpacing: 0.3 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 22, marginBottom: 10 },
-  iconButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
+  iconButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22 },
   empty: { paddingVertical: 18, paddingHorizontal: 12, borderRadius: radius.md, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.line },
 });

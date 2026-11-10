@@ -12,8 +12,8 @@ from . import scheduling, services
 from . import timeutils as tu
 from .models import Kind, PrivateTask, SharedTask, Status
 
-VIEW_KINDS = ["today", "week", "late", "upcoming", "nodate", "stats", "private", "pa", "staff", "requests", "busy",
-              "performance", "done"]
+VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
+              "requests", "busy", "performance", "done", "people", "tasks", "person"]
 
 _PROGRESS = {Status.OPEN: 0, Status.IN_PROGRESS: 50, Status.BLOCKED: 50, Status.COMPLETED: 100, Status.CANCELLED: 0}
 _REMOTE_PROGRESS = {"todo": 0, "working": 50, "waiting": 50, "done": 100}
@@ -309,10 +309,88 @@ def _done_view(user, include_private: bool) -> dict:
     return view
 
 
-def build(user, kind: str, include_private: bool = True, day: date | None = None) -> dict | None:
-    """A data view for the phone, or None when that kind does not exist for this person."""
+def _pending_view(user, dash: dict, include_private: bool, official_only: bool = False) -> dict:
+    """Everything still open, late first. Sir's rows say Official or Personal (personal rows only when the phone
+    is unlocked, never in the official view); Mansi's say whether Sir gave it or it is her own. She has no
+    personal category, and her dashboard never holds his private items."""
+    split = services.pending_split(user, dash, include_private and not official_only)
+    counts = split["counts"]
+    rows = []
+    for item in split["items"][:60]:
+        row = _row(item, True)
+        if user.is_md:
+            row["who"] = "Personal" if row["private"] else "Official"
+        else:
+            row["who"] = "Your own" if item.get("origin") == SharedTask.Origin.PA_SELF else "From Sir"
+        row["day"] = row["day"] or "No date"
+        rows.append(row)
+    if user.is_md:
+        stats = [{"label": "Official", "value": counts["official"], "tone": "accent", "icon": "briefcase-outline"}]
+        if "personal" in counts:
+            stats.append({"label": "Personal", "value": counts["personal"], "tone": "info", "icon": "lock-closed-outline"})
+    else:
+        stats = [{"label": "From Sir", "value": counts["from_sir"], "tone": "accent", "icon": "briefcase-outline"},
+                 {"label": "Your own", "value": counts["own"], "tone": "info", "icon": "person-outline"}]
+    stats.append({"label": "Late", "value": counts["late"], "tone": "danger" if counts["late"] else "muted",
+                  "icon": "alert-circle-outline"})
+    stats.append({"label": "Due today", "value": counts["due_today"], "tone": "warn" if counts["due_today"] else "muted",
+                  "icon": "today-outline"})
+    kind = "official" if official_only else "pending"
+    title = "Official tasks" if official_only else "Pending"
+    view = _table(kind, title, rows, [("day", "Day"), ("when", "When"), ("title", "What"),
+                                      ("who", "Official / Personal" if user.is_md else "From")],
+                  subtitle="Nothing is pending." if not rows else f"{counts['total']} still open, late first")
+    view["stats"] = stats
+    return view
+
+
+# A standard view asked for a particular person or period becomes the generic "tasks" template with these
+# settings (the same table and chart for everybody: only the data changes).
+_AS_TASKS = {
+    "pa": {"who": "pa"}, "staff": {"who": "staff"}, "private": {"who": "me", "filter": "personal"},
+    "official": {"who": "me", "filter": "official"}, "done": {"filter": "done"}, "late": {"filter": "late"},
+    "pending": {"filter": "open"}, "upcoming": {"filter": "open"}, "today": {}, "week": {}, "tasks": {},
+}
+
+
+def build(user, kind: str, include_private: bool = True, day: date | None = None, params: dict | None = None,
+          missing: str = "") -> dict | None:
+    """A data view for the phone, or None when that kind does not exist for this person.
+
+    params (who / from / to / by / filter / group) come from the request form the AI fills in; see listviews.
+    The result may be {"ask": ...} when the person named fits more than one staff member.
+    """
     if kind not in VIEW_KINDS:
         return None
+    from . import listviews  # here, not at the top: listviews builds on this module
+
+    p = listviews.clean_params(params)
+    missing = listviews.clean_missing(missing)
+    one_named = bool(p["who"]) and p["who"].lower() not in listviews._STAFF | listviews._ALL | listviews._ME
+    if kind == "person" or (kind == "people" and one_named):
+        # "Details of Kavita Singh" (even when the model filed it under people): that one person's own card.
+        if not one_named:
+            return listviews.people_view(user, p, missing=missing)
+        if listviews.resolve_subject(user, p["who"])["type"] == "department":
+            p["group"] = p["group"] or p["who"]
+            return listviews.people_view(user, p, missing=missing)
+        return listviews.tasks_view(user, p, include_private, mode="person", missing=missing)
+    if kind == "people":
+        return listviews.people_view(user, p, missing=missing)
+    if kind == "performance" and p["who"] and p["who"].lower() not in listviews._STAFF | listviews._ALL:
+        return listviews.tasks_view(user, p, include_private, mode="performance", missing=missing)
+    if kind == "tasks" or (kind in _AS_TASKS and listviews.has_request(p)):
+        preset = _AS_TASKS[kind]
+        today = tu.today_local()
+        if kind == "week" and not p["from"]:
+            p["from"], p["to"] = today, today + timedelta(days=6)
+        if kind == "today" and not p["from"]:
+            p["from"] = p["to"] = today
+        if kind == "private" and not user.is_md:
+            return None
+        p["who"] = p["who"] or preset.get("who", "")
+        p["filter"] = p["filter"] or preset.get("filter", "")
+        return listviews.tasks_view(user, p, include_private, missing=missing)
     if kind == "private" and not user.is_md:
         return None
     if kind == "busy" and user.is_md:
@@ -325,6 +403,10 @@ def build(user, kind: str, include_private: bool = True, day: date | None = None
         return _week_view(user, dash, include_private, prefs)
     if kind == "stats":
         return _stats_view(user, dash, include_private)
+    if kind == "pending":
+        return _pending_view(user, dash, include_private)
+    if kind == "official":
+        return _pending_view(user, dash, include_private, official_only=True)
     if kind == "late":
         return _table("late", "Late", _rows(dash["overdue"], include_private), [("when", "Was due"), ("title", "What"), ("kind", "Type")],
                       subtitle="Nothing is late." if not dash["overdue"] else f"{len(dash['overdue'])} items")
@@ -344,8 +426,13 @@ def build(user, kind: str, include_private: bool = True, day: date | None = None
         items = dash.get("pa_tasks", []) if user.is_md else dash["overdue"] + dash["today"] + dash["upcoming"] + dash["anytime"]
         pa = services.get_pa()
         name = pa.spoken_name if pa else "your PA"
-        return _progress_table("pa", f"Given to {name}" if user.is_md else "My tasks from Sir", items, include_private,
-                               "Nothing given yet" if user.is_md else "Nothing from Sir yet")
+        view = _progress_table("pa", f"{name}'s tasks" if user.is_md else "My tasks", items, include_private,
+                               "Nothing given yet" if user.is_md else "Nothing on your list yet")
+        own_ids = {i["id"] for i in items if i.get("origin") == SharedTask.Origin.PA_SELF}
+        for row in view["rows"]:  # say which ones Sir gave and which are her own
+            row["who"] = (f"{name}'s own" if user.is_md else "Your own") if row["id"] in own_ids else \
+                ("Given by you" if user.is_md else "From Sir")
+        return view
     if kind == "staff":
         return _progress_table("staff", "Given to staff", dash["delegated"], include_private, "Nothing with staff")
     if kind == "requests":
@@ -364,10 +451,15 @@ _QUERY_HINTS = [
     ("done", ("completed", "finished", "ho gaya", "ho gaye", "khatam", "kya kya hua", "what got done")),
     ("requests", ("request", "approve", "approval", "ok karna", "waiting for", "pending request", "manzoori")),
     ("busy", ("busy", "free kab", "khaali", "khali", "free time")),
+    ("people", ("staff ki list", "staff list", "list of my staff", "list of staff", "list of the staff", "staff ke naam",
+                "staff members", "employees", "kaun kaun hai", "kitne log", "kitne staff", "chhutti par", "on leave",
+                "department wise", "who is in", "mein kaun hai")),
     ("staff", ("staff", "team", "ramesh", "delegat", "taskpanel", "kaun kar raha")),
     ("pa", ("mansi", "pa ke", "pa ko", "assistant")),
     ("private", ("private", "personal", "mere personal")),
-    ("late", ("late", "overdue", "pending", "baaki", "baki", "reh gay", "chhoot", "slipped")),
+    ("official", ("official", "office ke", "kaam ke", "work items")),
+    ("late", ("late", "overdue", "reh gay", "chhoot", "slipped")),
+    ("pending", ("pending", "baaki", "baki", "koi task", "kya karna", "to do", "todo")),
     ("week", ("week", "hafte", "hafta", "saptah", "7 din", "saat din", "is mahine")),
     ("upcoming", ("upcoming", "coming up", "aage", "next", "agle", "tomorrow", "kal", "parso")),
     ("nodate", ("no date", "bina date", "undated", "without date")),

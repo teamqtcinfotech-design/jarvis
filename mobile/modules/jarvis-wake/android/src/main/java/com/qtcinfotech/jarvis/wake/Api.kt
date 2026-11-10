@@ -19,6 +19,53 @@ object Api {
     fun post(context: Context, path: String, body: JSONObject, timeoutMs: Int = 40000): JSONObject? =
         call(context, "POST", path, body.toString(), timeoutMs)
 
+    /**
+     * A POST whose answer is a stream (JARVIS's voice). Returns the open connection with a 200 answer, or null
+     * (not signed in, server unreachable, voice off or over its limit) so the caller can fall back.
+     * The caller reads `inputStream` and must call `disconnect()`.
+     */
+    fun openStream(context: Context, path: String, body: JSONObject, connectMs: Int = 4000, readMs: Int = 8000): HttpURLConnection? {
+        val prefs = WakeBus.prefs(context)
+        val server = prefs.getString(WakeBus.KEY_SERVER, "") ?: ""
+        if (server.isEmpty()) return null
+        fun open(): HttpURLConnection? = try {
+            (URL("$server/api/v1$path").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = connectMs
+                readTimeout = readMs
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Authorization", "Bearer " + (prefs.getString(WakeBus.KEY_ACCESS, "") ?: ""))
+                outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "stream request failed: ${e.message}")
+            null
+        }
+        var conn = open() ?: return null
+        try {
+            var code = conn.responseCode
+            if (code == 401) {
+                conn.disconnect()
+                if (!refresh(context)) return null
+                conn = open() ?: return null
+                code = conn.responseCode
+            }
+            if (code != 200) {
+                conn.disconnect()
+                return null
+            }
+            return conn
+        } catch (e: Exception) {
+            Log.w(TAG, "stream request failed: ${e.message}")
+            try {
+                conn.disconnect()
+            } catch (_: Exception) {
+            }
+            return null
+        }
+    }
+
     private fun call(context: Context, method: String, path: String, body: String?, timeoutMs: Int): JSONObject? {
         val prefs = WakeBus.prefs(context)
         val server = prefs.getString(WakeBus.KEY_SERVER, "") ?: ""

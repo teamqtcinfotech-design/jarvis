@@ -23,7 +23,11 @@ urlpatterns = [
     path("shared-tasks/<uuid:task_id>/complete/", views.SharedTaskCompleteView.as_view()),
     # MD -> PA tasks (inside JARVIS)
     path("pa-tasks/", views.PaTaskListView.as_view()),
+    path("pa-tasks/self/", views.PaSelfTaskView.as_view()),
     path("pa-tasks/<uuid:task_id>/status/", views.PaTaskStatusView.as_view()),
+    # People JARVIS knows (owner-only)
+    path("contacts/", views.ContactListView.as_view()),
+    path("contacts/<int:contact_id>/", views.ContactDetailView.as_view()),
     # Staff + delegation to TaskPanel
     path("staff/", views.StaffListView.as_view()),
     path("staff/sync/", views.StaffSyncView.as_view()),
@@ -42,6 +46,7 @@ urlpatterns = [
     path("assistant/turn/", views.ConversationTurnView.as_view()),
     path("assistant/briefing/", views.BriefingView.as_view()),
     path("assistant/usage/", views.AiUsageView.as_view()),
+    path("assistant/speak/", views.SpeakView.as_view()),
     path("views/<str:kind>/", views.DataViewView.as_view()),
     # Things the user asked JARVIS to remember (owner-only)
     path("memories/", views.MemoryListView.as_view()),
@@ -49,6 +54,7 @@ urlpatterns = [
     # Reminders + alerts
     path("reminders/", views.ReminderListView.as_view()),
     path("reminders/ack/", views.ReminderAckView.as_view()),
+    path("told/", views.ToldView.as_view()),
     path("alerts/", views.AlertListView.as_view()),
     path("alerts/<uuid:alert_id>/ack/", views.AlertAckView.as_view()),
 ]

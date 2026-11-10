@@ -4,7 +4,7 @@
  * timeline / table, and every answer as a card with its Download button.
  */
 import { useRouter } from 'expo-router';
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -22,6 +22,7 @@ import { DataCard, StatTiles } from './DataCard';
 import { DraftCard } from './DraftCard';
 import { VIEW_FOR_KEY, navItems } from './nav';
 import { Orb } from './Orb';
+import { TaskSheet } from './TaskSheet';
 import { Icon, IconButton, Txt } from './ui';
 
 const DOT: Record<string, string> = { present: colors.success, away: colors.faint, facedown: colors.inkSoft, meeting: colors.gold, quiet: colors.inkSoft };
@@ -35,7 +36,13 @@ export function TabletHome({ user }: { user: SessionUser }) {
   const [section, setSection] = useState<string>('today');
   const [typed, setTyped] = useState('');
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
+  const workRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const sectionView = useDataView(VIEW_FOR_KEY[section] ?? null);
+  // A new answer: bring the data pane back to the top, where it has just appeared.
+  const newestAnswer = conv.answers[0]?.id;
+  useEffect(() => {
+    if (newestAnswer) workRef.current?.scrollTo({ y: 0, animated: true });
+  }, [newestAnswer]);
 
   const isMD = user.role === 'MD';
   const address = isMD ? 'Sir' : user.name;
@@ -66,8 +73,13 @@ export function TabletHome({ user }: { user: SessionUser }) {
     conv.send(t);
   };
   const recent = conv.messages.slice(-6);
+  // A task he asked to open by voice ("pehla wala kholo").
+  const voiceItem = conv.itemToOpen && data
+    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
+        .find((t) => t.id === conv.itemToOpen) ?? null
+    : null;
   const suggestions = isMD
-    ? ['Aaj ka plan kya hai?', 'Is hafte ka load dikhao', 'Staff ka status?', 'Kal 11 baje Sharma ji ke saath meeting']
+    ? ['Aaj ka plan kya hai?', 'Meri staff ki list dikhao', 'Staff ka status?', 'Kal 11 baje Sharma ji ke saath meeting']
     : ['Sir aaj free kab hain?', 'Mere tasks dikhao', 'Sir ke liye kal 3 baje bank meeting'];
 
   return (
@@ -142,7 +154,7 @@ export function TabletHome({ user }: { user: SessionUser }) {
                 ),
               )}
               {conv.draft ? (
-                <DraftCard draft={conv.draft} saving={conv.busy === 'saving'} listening={conv.listening} error={conv.draftError} onChange={conv.editDraft} onSave={conv.save} onCancel={conv.cancelDraft} />
+                <DraftCard draft={conv.draft} saving={conv.busy === 'saving'} listening={conv.listening} error={conv.draftError} onChange={conv.editDraft} onSave={conv.save} onCancel={conv.cancelDraft} onReply={conv.send} />
               ) : null}
               {conv.messages.length > 6 ? (
                 <Pressable onPress={() => router.push('/talk')} style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
@@ -167,6 +179,7 @@ export function TabletHome({ user }: { user: SessionUser }) {
 
         {/* ---------------------------------------------------------------- workspace */}
         <ScrollView
+          ref={workRef}
           style={{ flex: 1 }}
           contentContainerStyle={s.work}
           refreshControl={<RefreshControl refreshing={false} onRefresh={() => reload(true)} tintColor={colors.accent} />}
@@ -180,15 +193,7 @@ export function TabletHome({ user }: { user: SessionUser }) {
           </View>
           <StatTiles stats={stats} columns={Math.min(tileColumns, stats.length || 1)} />
 
-          {sectionView.view ? (
-            <View style={{ marginTop: 18 }}>
-              <Txt variant="label" style={{ marginBottom: 8 }}>{items.find((i) => i.key === section)?.label ?? 'List'}</Txt>
-              <DataCard view={sectionView.view} />
-            </View>
-          ) : sectionView.loading ? (
-            <Txt variant="small" style={{ marginTop: 18 }}>Loading…</Txt>
-          ) : null}
-
+          {/* What he just asked for comes first, right under the numbers: never below a long list. */}
           {conv.answers.length ? (
             <View style={{ marginTop: 8 }}>
               <View style={s.answersHead}>
@@ -203,8 +208,18 @@ export function TabletHome({ user }: { user: SessionUser }) {
               ))}
             </View>
           ) : null}
+
+          {sectionView.view ? (
+            <View style={{ marginTop: 18 }}>
+              <Txt variant="label" style={{ marginBottom: 8 }}>{items.find((i) => i.key === section)?.label ?? 'List'}</Txt>
+              <DataCard view={sectionView.view} />
+            </View>
+          ) : sectionView.loading ? (
+            <Txt variant="small" style={{ marginTop: 18 }}>Loading…</Txt>
+          ) : null}
         </ScrollView>
       </View>
+      {voiceItem ? <TaskSheet item={voiceItem} onClose={conv.clearItemToOpen} /> : null}
     </SafeAreaView>
   );
 }

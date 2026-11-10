@@ -29,6 +29,8 @@ interface Snapshot {
   idleMs: number;
   faceDown: boolean;
   z: number;
+  /** JARVIS is open on the screen in front of him: he is here, however still the phone lies. */
+  appActive: boolean;
 }
 
 function inQuietHours(now: Date, start: number, end: number) {
@@ -42,7 +44,7 @@ export function usePresence(inputs: PresenceInputs) {
   const lastSample = useRef<{ x: number; y: number; z: number } | null>(null);
   const faceDownCount = useRef(0);
   const zRef = useRef(0);
-  const [snap, setSnap] = useState<Snapshot>({ now: 0, idleMs: 0, faceDown: false, z: 0 });
+  const [snap, setSnap] = useState<Snapshot>({ now: 0, idleMs: 0, faceDown: false, z: 0, appActive: false });
   const [sensorAvailable, setSensorAvailable] = useState(true);
 
   const takeSnapshot = useCallback(() => {
@@ -53,9 +55,11 @@ export function usePresence(inputs: PresenceInputs) {
       idleMs: now - lastMove.current,
       faceDown: faceDownCount.current >= FACE_DOWN_SAMPLES,
       z: Math.round(zRef.current * 100) / 100,
+      appActive: AppState.currentState === 'active',
     };
     setSnap((prev) =>
       prev.faceDown === next.faceDown && Math.abs(prev.idleMs - next.idleMs) < SNAPSHOT_MS * 0.5 && prev.z === next.z
+        && prev.appActive === next.appActive
         ? prev
         : next,
     );
@@ -104,7 +108,8 @@ export function usePresence(inputs: PresenceInputs) {
     now > 0 && now >= (inputs.busyOverrideUntil ?? 0) &&
     inputs.busyWindows.some((w) => new Date(w.start).getTime() <= now && now < new Date(w.end).getTime());
   const inMeeting = inputs.meetingMode || diaryMeeting;
-  const away = snap.idleMs > inputs.awayAfterMinutes * 60_000;
+  // Not moving does not mean gone: with JARVIS open on the screen in front of him, he is here.
+  const away = snap.idleMs > inputs.awayAfterMinutes * 60_000 && !snap.appActive;
   const quiet = now > 0 && inputs.quietHoursEnabled && inQuietHours(new Date(now), inputs.quietStartHour, inputs.quietEndHour);
 
   // Order matters: face down is an explicit "silence"; a meeting beats "away" because he is in the room.

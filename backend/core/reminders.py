@@ -11,13 +11,17 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 
 from . import timeutils as tu
-from .models import Kind, Priority, PrivateTask, ReminderAck, SharedTask, Status, User
+from .models import Kind, Priority, PrivateTask, ReminderAck, ReminderTold, SharedTask, Status, User
 from .services import (
     busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs, md_private_qs,
     meeting_override_until, pa_tasks_qs, shared_md_tasks_qs,
 )
 
 LOOKBACK = timedelta(hours=12)
+# A timed task still open this long after its time gets one gentle check-in ("done, move it, or leave it?"),
+# in working hours only. After that it is left to the evening summary and the next morning's briefing.
+CHECKIN_AFTER = timedelta(minutes=45)
+CHECKIN_HOURS = range(9, 20)
 
 
 def _lead_phrase(minutes: int) -> str:
@@ -34,7 +38,7 @@ def lead_for(task, prefs: dict) -> int:
     return default_remind_before(task.kind, task.priority, prefs)
 
 
-def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dict) -> list[dict]:
+def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dict, checkin: bool = True) -> list[dict]:
     out = []
     base = {
         "priority": task.priority,
@@ -44,28 +48,46 @@ def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dic
         "ref": {"scope": scope, "id": str(task.id), "version": task.version},
     }
     key_prefix = f"{scope}:{task.id}:v{task.version}"
+    # A reminder whose time had already passed when the task was written down is not a reminder he missed:
+    # "kal 4 baje" said at 3:55 gets no "15 minutes before", only the "it's time".
+    born = (task.created_at or timezone.now()) - timedelta(minutes=1)
     start = task.scheduled_start or task.due_at
     if start:
         lead = lead_for(task, prefs)
-        if lead > 0:
+        before_at = start - timedelta(minutes=lead)
+        if lead > 0 and before_at >= born:
             spoken = task.announcement or f"{address}, {task.title} {_lead_phrase(lead)}."
             if task.kind == Kind.MEETING and "minute" not in spoken and "hour" not in spoken:
                 spoken = f"{address}, your meeting {task.title} starts {_lead_phrase(lead)}."
             out.append({**base, "key": f"{key_prefix}:before", "label": "before",
-                        "fire_at": (start - timedelta(minutes=lead)).isoformat(), "spoken": spoken})
+                        "fire_at": before_at.isoformat(), "spoken": spoken})
         if task.kind == Kind.MEETING:
             due_spoken = f"{address}, your meeting {task.title} is starting now."
         elif task.kind == Kind.CALL:
             due_spoken = f"{address}, it's time for your call: {task.title}."
         else:
             due_spoken = f"{address}, it's time: {task.title}."
-        out.append({**base, "key": f"{key_prefix}:due", "label": "due", "fire_at": start.isoformat(),
-                    "spoken": due_spoken})
+        if start >= born:
+            out.append({**base, "key": f"{key_prefix}:due", "label": "due", "fire_at": start.isoformat(),
+                        "spoken": due_spoken})
+        # Still open well after its time: one check-in, in working hours, then it is left to the evening summary.
+        at = start + CHECKIN_AFTER
+        if checkin and tu.to_local(at).hour in CHECKIN_HOURS:
+            what = {Kind.MEETING: "your meeting", Kind.CALL: "your call"}.get(task.kind, "")
+            out.append({**base, "key": f"{key_prefix}:checkin", "label": "checkin", "fire_at": at.isoformat(),
+                        "priority": Priority.NORMAL if task.priority == Priority.LOW else task.priority,
+                        "spoken": f"{address}, {_join(what, task.title)} was due at {tu.fmt_time(start)} and is still open. "
+                                  f"Done, move it, or leave it?"})
     elif task.due_date:
         fire = tu.combine_local(task.due_date, day_reminder_time(prefs))
-        out.append({**base, "key": f"{key_prefix}:day", "label": "day", "fire_at": fire.isoformat(),
-                    "spoken": f"{address}, today's reminder: {task.title}."})
+        if fire >= born:
+            out.append({**base, "key": f"{key_prefix}:day", "label": "day", "fire_at": fire.isoformat(),
+                        "spoken": f"{address}, today's reminder: {task.title}."})
     return out
+
+
+def _join(*parts: str) -> str:
+    return " ".join(p for p in parts if p)
 
 
 def reminders_for(user: User, hours: int = 48) -> dict:
@@ -83,9 +105,10 @@ def reminders_for(user: User, hours: int = 48) -> dict:
         # Anything involving the PA is for both: the MD is reminded too.
         pa = get_pa()
         pa_name = pa.spoken_name if pa else "your PA"
-        for task in pa_tasks_qs().filter(**open_filter):
+        for task in pa_tasks_qs().filter(**open_filter).exclude(origin=SharedTask.Origin.PA_SELF):
             meeting = task.origin == SharedTask.Origin.MD_MEET_PA
-            for item in _task_reminders(task, "shared", False, "Sir", prefs):
+            # The check-in on her tasks is hers, not his (he is told once that it is due, and in the evening).
+            for item in _task_reminders(task, "shared", False, "Sir", prefs, checkin=meeting):
                 lead = _lead_phrase(lead_for(task, prefs))
                 if meeting:
                     item["title"] = f"Meeting with {pa_name}: {task.title}"
@@ -118,13 +141,16 @@ def reminders_for(user: User, hours: int = 48) -> dict:
                 "spoken": f"{name}, {task.staff.name}'s task is due now: {task.title}. Please follow up.",
             })
 
-    acked = set(ReminderAck.objects.filter(user=user, key__in=[i["key"] for i in items]).values_list("key", flat=True))
+    keys = [i["key"] for i in items]
+    acked = set(ReminderAck.objects.filter(user=user, key__in=keys).values_list("key", flat=True))
+    told = dict(ReminderTold.objects.filter(user=user, key__in=keys).values_list("key", "told_at"))
     result = []
     for item in items:
         fire = datetime.fromisoformat(item["fire_at"])
         if item["key"] in acked or not (window_start <= fire <= window_end):
             continue
         item["fire_at_label"] = f"{tu.fmt_day(tu.to_local(fire).date())} {tu.fmt_time(fire)}"
+        item["told_at"] = told[item["key"]].isoformat() if item["key"] in told else None
         result.append(item)
     result.sort(key=lambda r: r["fire_at"])
 

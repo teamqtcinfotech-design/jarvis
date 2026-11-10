@@ -10,7 +10,7 @@ import { say } from '@/lib/speech';
 import { colors, kindLabel, radius } from '@/lib/theme';
 import type { TaskItem } from '@/lib/types';
 
-import { Button, PriorityTag, Tag, Txt } from './ui';
+import { Button, Icon, PriorityTag, Tag, Txt } from './ui';
 
 function shiftDay(item: TaskItem, days: number) {
   const base = item.due_date ? new Date(`${item.due_date}T00:00:00`) : new Date();
@@ -37,6 +37,8 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
   const isMD = user?.role === 'MD';
   const isStaff = item.assignee?.type === 'STAFF';
   const isPaTask = item.assignee?.type === 'PA';
+  const ownPaTask = isPaTask && item.origin === 'PA_SELF'; // Mansi's own task: Sir can see it but is not told about each step
+  const toldSir = ownPaTask ? '' : " I've told Sir,";
   const paStatus = (status: string, note = '') =>
     api(`/pa-tasks/${item.id}/status/`, { method: 'POST', body: { status, expected_version: item.version, note } });
   const base = item.scope === 'private' ? `/private-tasks/${item.id}/` : `/shared-tasks/${item.id}/`;
@@ -72,7 +74,11 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
       <Pressable style={s.backdrop} onPress={onClose} />
       <View style={[s.sheet, { paddingBottom: insets.bottom + 16 }]}>
         <View style={s.grabber} />
-        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+        {/* always one obvious way out, within thumb reach */}
+        <Pressable onPress={onClose} accessibilityLabel="Close" hitSlop={10} style={({ pressed }) => [s.closeBtn, pressed && { opacity: 0.6 }]}>
+          <Icon name="close" size={20} color={colors.inkSoft} />
+        </Pressable>
+        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', paddingRight: 48 }}>
           <PriorityTag priority={item.priority} />
           <Tag label={kindLabel[item.kind]} />
           {item.scope === 'private' ? <Tag label="Private · only you" icon="lock-closed" color={colors.inkSoft} /> : null}
@@ -101,9 +107,15 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
           </View>
         ) : isPaTask ? (
           <View style={s.box}>
-            <Txt variant="small">
-              Given by Sir to <Txt variant="heading" style={{ fontSize: 13 }}>{item.assignee.staff_name}</Txt> · {item.status_label}
-            </Txt>
+            {ownPaTask ? (
+              <Txt variant="small">
+                {isMD ? `${item.assignee.staff_name}'s own task` : 'Your own task'} · {item.status_label}
+              </Txt>
+            ) : (
+              <Txt variant="small">
+                Given by Sir to <Txt variant="heading" style={{ fontSize: 13 }}>{item.assignee.staff_name}</Txt> · {item.status_label}
+              </Txt>
+            )}
             {item.hold_reason ? <Txt variant="small" style={{ marginTop: 2 }}>On hold: {item.hold_reason}</Txt> : null}
           </View>
         ) : item.created_by ? (
@@ -129,7 +141,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                     kind="danger"
                     loading={busy === 'hold'}
                     disabled={!holdReason.trim()}
-                    onPress={() => run('hold', () => paStatus('BLOCKED', holdReason.trim()), `On hold. I've told Sir, ${address}.`)}
+                    onPress={() => run('hold', () => paStatus('BLOCKED', holdReason.trim()), `On hold.${toldSir} ${address}.`)}
                     style={{ marginTop: 8 }}
                   />
                 </>
@@ -139,7 +151,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                     title="Done"
                     icon="checkmark-done"
                     loading={busy === 'done'}
-                    onPress={() => run('done', () => paStatus('COMPLETED'), `Done. I've told Sir, ${address}.`)}
+                    onPress={() => run('done', () => paStatus('COMPLETED'), `Done.${toldSir} ${address}.`)}
                   />
                   <View style={{ flexDirection: 'row', marginTop: 8 }}>
                     <Button
@@ -203,6 +215,7 @@ const s = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: colors.overlay },
   sheet: { backgroundColor: colors.bg, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, paddingHorizontal: 20, paddingTop: 10 },
   grabber: { alignSelf: 'center', width: 44, height: 5, borderRadius: 3, backgroundColor: colors.line, marginBottom: 14 },
+  closeBtn: { position: 'absolute', top: 14, right: 14, zIndex: 2, width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   box: { marginTop: 12, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
   actions: { marginTop: 20 },
   input: {
