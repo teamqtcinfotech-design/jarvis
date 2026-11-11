@@ -10,7 +10,7 @@ follow-ups that narrow a list ("sirf meetings"). It costs a few paise per questi
 """
 from django.core.management.base import BaseCommand
 
-from core import ai_brain, services
+from core import ai_brain, lang, services
 from core import timeutils as tu
 from core.models import User
 
@@ -60,7 +60,7 @@ BENCH = [
     # --- the usual lists still work
     ("md", "Ramesh Kumar ke tasks dikhao", {"intent": "query", "view_kind": "tasks", "view_who": "Ramesh Kumar"}),
     ("md", "meri staff ki list", {"intent": "query", "view_kind": "people"}),
-    ("md", "Neha ka performance", {"intent": "query", "view_kind": "performance", "view_who": "Neha"}),
+    ("md", "Neha ka performance", {"intent": "query", "view_kind": "performance", "view_who": ["Neha", "Neha Gupta"]}),
     ("md", "kal kya kya complete hua", {"intent": "query", "view_kind": ["tasks", "done"], "view_by": "done"}),
     ("md", "kitna pending hai", {"intent": "query", "view_kind": ["pending", "stats"]}),
     ("md", "mere personal tasks", {"intent": "query", "view_kind": ["private", "tasks"]}),
@@ -68,10 +68,28 @@ BENCH = [
     ("pa", "Sir kab busy hain aaj", {"intent": "query", "view_kind": ["busy", "today"]}),
     # --- not lists
     ("md", "kal 4 baje Sharma ji ke saath meeting", {"intent": "create_task", "kind": "MEETING"}),
-    ("md", "Mansi ko bolo kal tak hotel book kare", {"intent": "assign_to_pa"}),
+    ("md", "{pa} ko bolo kal tak hotel book kare", {"intent": "assign_to_pa"}),
     ("pa", "Sir ke liye kal 11 baje bank wali meeting", {"intent": "request_for_md"}),
     ("md", "Indore mein aaj mausam kaisa hai", {"intent": "general_question"}),
     ("md", "bas thank you", {"intent": "end_conversation"}),
+    # --- version 2: exact "in N minutes", snooze, questions, history, cancelled, names and habits by voice
+    ("md", "5 minute baad yaad dilana files lene hain", {"intent": "create_task", "due_in_minutes": 5}),
+    ("md", "remind me in 2 hours to call Mehta ji", {"intent": "create_task", "due_in_minutes": 120, "kind": "CALL"}),
+    ("md", "kal 11 baje Sharma ji ke saath meeting", {"intent": "create_task", "kind": "MEETING", "duration_minutes": 0}),
+    ("md", "aadhe ghante ki meeting kal 3 baje Mehta ji ke saath", {"intent": "create_task", "kind": "MEETING", "duration_minutes": 30}),
+    ("md", "10 minute baad yaad dilana", {"intent": "snooze", "snooze_minutes": 10},
+     {"awaiting": 'JARVIS asked: "Done, or remind you later?" about "Call the bank"'}),
+    ("md", "baad mein", {"intent": "snooze"}, {"awaiting": 'JARVIS asked: "Done, or remind you later?" about "Call the bank"'}),
+    ("md", "ho gaya", {"intent": "confirm_pending"}, {"awaiting": 'JARVIS asked: "Done, or remind you later?" about "Call the bank"'}),
+    ("md", "haan accept karo", {"intent": "confirm_pending"}, {"awaiting": 'JARVIS asked: "Accept it?" about "Sign the vendor agreement"'}),
+    ("md", "nahi rehne do", {"intent": "cancel_pending"}, {"awaiting": 'JARVIS asked: "Shall I move Pay the vendor to tomorrow?" about "Good morning, here is your day"'}),
+    ("md", "Sharma ji se pichhli baar kab mila tha", {"intent": "query", "view_kind": "history", "view_words": "Sharma"}),
+    ("md", "when did I last meet Sharma ji", {"intent": "query", "view_kind": "history", "view_words": "Sharma"}),
+    ("md", "cancel kiye hue tasks dikhao", {"intent": "query", "view_kind": "cancelled"}),
+    ("md", "meri PA ka naam Suraj hai", {"intent": "set_setting", "setting_key": "paName", "setting_value": "Suraj"}),
+    ("md", "mujhe Ma'am bolo", {"intent": "set_setting", "setting_key": "addressAs"}),
+    ("pa", "mujhe Mansi bulao", {"intent": "set_setting", "setting_key": "myName", "setting_value": "Mansi"}),
+    ("md", "meri meetings aam taur par 30 minute ki hoti hain", {"intent": "set_setting", "setting_key": "meetingMinutes", "setting_value": "30"}),
 ]
 
 
@@ -90,6 +108,8 @@ def _ok(got, want) -> bool:
         return got in want            # any of these kinds is right
     if isinstance(want, list):
         return set(got or []) == set(want)
+    if isinstance(want, int) and not isinstance(want, bool):
+        return int(got or 0) == want  # a wanted 0 ("no length said") is a real answer, not "empty"
     return (got or "") == want
 
 
@@ -110,10 +130,11 @@ class Command(BaseCommand):
                  "yesterday": (today - timedelta(days=1)).isoformat(), "week_end": (today + timedelta(days=6)).isoformat()}
         users = {"md": User.objects.filter(role=User.Role.MD, is_active=True).first(),
                  "pa": User.objects.filter(role=User.Role.PA, is_active=True).first()}
+        dates["pa"] = users["pa"].spoken_name if users["pa"] else "PA"  # the PA's real name in the sentences
         contexts = {}
         passed = failed = 0
         for entry in BENCH:
-            role, text, want = entry[0], entry[1], _fill(entry[2], dates)
+            role, text, want = entry[0], entry[1].format(**dates), _fill(entry[2], dates)
             after = _fill(entry[3], dates) if len(entry) > 3 else None
             if opts["role"] != "all" and role != opts["role"]:
                 continue
@@ -127,18 +148,24 @@ class Command(BaseCommand):
                 contexts[role] = services.ai_context(user)
             ctx = dict(contexts[role])
             ctx["conversation"] = []
-            if after:
+            ctx["reply_language"] = lang.lang_for(user, text)  # as build_draft tells the model
+            if after and "awaiting" in after:
+                # JARVIS just asked a question (about a reminder, an alert, the briefing): the text is the answer.
+                ctx["awaiting_confirmation"] = {"draft": after["awaiting"], "original_sentence": ""}
+                ctx["conversation"] = [{"role": "jarvis", "text": after["awaiting"]}]
+            elif after:
                 ctx["last_list"] = {"filters": after, "jarvis_said": "…"}
                 ctx["conversation"] = [{"role": "user", "text": "aaj kya hai"}, {"role": "jarvis", "text": "Here is the list."}]
             staff_names = [s["name"] for s in ctx["staff"]]
             cmd = ai_brain.interpret(text, ctx, staff_names, has_pending_requests=bool(ctx.get("pending_requests")), user=user)
             misses = {k: cmd.get(k) for k, v in want.items() if not _ok(cmd.get(k), v)}
             chosen = ", ".join(f"{k}={cmd.get(k)!r}" for k in ("intent", "view_kind", "view_who", "view_from", "view_to", "view_by",
-                                                              "view_filter", "view_types", "view_from_whom", "view_priority", "view_words")
+                                                              "view_filter", "view_types", "view_from_whom", "view_priority", "view_words",
+                                                              "due_in_minutes", "snooze_minutes", "duration_minutes", "setting_key", "setting_value")
                                if cmd.get(k))
             if misses:
                 failed += 1
-                self.stdout.write(self.style.ERROR(f"FAIL [{role}] {text}\n      got  {chosen}\n      want {want}"))
+                self.stdout.write(self.style.ERROR(f"FAIL [{role}] {text}\n      got  {chosen}\n      miss {misses}\n      want {want}"))
             else:
                 passed += 1
                 self.stdout.write(self.style.SUCCESS(f"ok   [{role}] {text}\n      {chosen}"))
