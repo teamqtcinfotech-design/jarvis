@@ -66,18 +66,38 @@ def _text(title: str, rows: list[dict], keys: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _summ(view: dict, address: str, address_hi: str, en: str, hi: str) -> dict:
+    """The sentence JARVIS speaks for this card, written here from the real numbers (never by the model)."""
+    view["summary"] = f"{address}, {en}"
+    view["summary_hi"] = f"{address_hi}, {hi}"
+    return view
+
+
+def _addr(user) -> tuple[str, str]:
+    return services.address_of(user), services.address_hi_of(user)
+
+
+def _late_tail(n: int) -> tuple[str, str]:
+    if not n:
+        return "", ""
+    return (f" {n} late from before." if n > 1 else " 1 late from before.", f" पहले के {n} काम लेट हैं।" if n > 1 else " पहले का 1 काम लेट है।")
+
+
 def _day_view(user, dash: dict, include_private: bool, prefs: dict, day: date) -> dict:
-    items = dash["today"] + [i for i in dash["overdue"]]
+    """The day's plan: what is due THAT day, in time order, with the free time. Late items from earlier days are
+    not mixed in (he asked about the day); they are counted in the Late tile and said in one short tail."""
+    visible = [i for i in dash["today"] if include_private or i.get("scope") != "private"]
+    late_count = len([i for i in dash["overdue"] if include_private or i.get("scope") != "private"])
     timeline, anytime = [], []
+    hi_times: dict[str, str] = {}  # item id -> "4 बजे", for the Hindi sentence
     o_start, o_end = scheduling.office_hours(prefs, day)
-    for item in items:
-        if item.get("scope") == "private" and not include_private:
-            continue
+    for item in visible:
         start = item.get("scheduled_start") or item.get("due_at")
         if start:
             s = datetime.fromisoformat(start)
             if tu.to_local(s).date() != day:
                 continue
+            hi_times[item["id"]] = tu.fmt_time_hi(s)
             end_iso = item.get("scheduled_end")
             e = datetime.fromisoformat(end_iso) if end_iso else s + timedelta(minutes=scheduling.minutes_for(item.get("kind"), item.get("estimated_minutes")))
             timeline.append({
@@ -98,21 +118,23 @@ def _day_view(user, dash: dict, include_private: bool, prefs: dict, day: date) -
         })
     timeline.sort(key=lambda t: t["start_min"])
     meetings = sum(1 for t in timeline if t["kind"] == "Meeting")
-    free = scheduling.free_slots(user, day, 30, prefs)
+    is_today = day == tu.today_local()
+    # Free time still ahead today (not the morning that has passed), or the whole office day for another day.
+    free = scheduling.free_slots(user, day, 30, prefs, not_before=tu.now_local() if is_today else None)
     free_minutes = sum(int((e - s).total_seconds() // 60) for s, e in free)
     load = scheduling.day_load(user, day, prefs)
     label = tu.fmt_day(day)
-    title = f"{label[:1].upper()}{label[1:]}, {day.strftime('%a %d %b')}" if day != tu.today_local() else f"Today, {day.strftime('%a %d %b')}"
+    title = f"{label[:1].upper()}{label[1:]}, {day.strftime('%a %d %b')}" if not is_today else f"Today, {day.strftime('%a %d %b')}"
     rows = [{"id": t["id"], "scope": t["scope"], "title": t["title"], "when": f"{t['start']}–{t['end']}", "kind": t["kind"],
              "priority": t["priority"], "private": t["private"], "status": "", "who": "", "progress": 0, "overdue": t["overdue"],
-             "day": label, "version": t["version"], "hold_reason": ""} for t in timeline] + anytime
+             "day": label, "version": t["version"], "hold_reason": ""} for t in timeline if not t["routine"]] + anytime
     stats = [
         {"label": "Items", "value": len(rows), "tone": "accent"},
         {"label": "Meetings", "value": meetings, "tone": "info"},
-        {"label": "Late", "value": len([i for i in dash["overdue"] if include_private or i.get("scope") != "private"]), "tone": "danger"},
+        {"label": "Late", "value": late_count, "tone": "danger" if late_count else "muted"},
         {"label": "Free", "value": f"{free_minutes // 60}h {free_minutes % 60:02d}m" if free_minutes else "0h", "tone": "success"},
     ]
-    return {
+    view = {
         "kind": "today", "layout": "timeline", "title": title,
         "subtitle": ("A full day" if load["heavy"] else "Office " + tu.fmt_time(o_start) + " – " + tu.fmt_time(o_end)),
         "columns": [{"key": "when", "label": "When"}, {"key": "title", "label": "What"}, {"key": "kind", "label": "Type"}],
@@ -121,6 +143,35 @@ def _day_view(user, dash: dict, include_private: bool, prefs: dict, day: date) -
         "file_name": f"jarvis-day-{day.isoformat()}",
         "text": _text(title, rows, ["when", "title", "kind"]),
     }
+
+    # The spoken answer: the day's items by name (up to three), the free time, then the late tail.
+    address, address_hi = _addr(user)
+    day_en, day_hi = tu.fmt_day(day), tu.fmt_day_hi(day)
+    timed = [t for t in timeline if not t["routine"]]
+    named_en = [f"{t['title']} at {t['start']}" for t in timed] + [r["title"] for r in anytime]
+    named_hi = [f"{t['title']} {hi_times.get(t['id'], '')}".strip() for t in timed] + [r["title"] for r in anytime]
+    n = len(rows)
+    off = scheduling.is_off_day(prefs, day)
+    if free and free_minutes >= 60:
+        big = max(free, key=lambda se: se[1] - se[0])
+        free_en = f" You're free {tu.fmt_time(big[0])} to {tu.fmt_time(big[1])}."
+        free_hi = f" {tu.fmt_time_hi(big[0])} से {tu.fmt_time_hi(big[1])} तक आप खाली हैं।"
+    elif free_minutes:
+        free_en = f" {free_minutes} minutes free."
+        free_hi = f" {free_minutes} मिनट खाली हैं।"
+    else:
+        free_en, free_hi = ("", "") if off or not n else (" No free time left.", " अब खाली समय नहीं है।")
+    tail_en, tail_hi = _late_tail(late_count)
+    if not n:
+        en = f"nothing is scheduled {day_en}" + ("; it's your day off." if off else "; you're free all day." if is_today or not off else ".")
+        hi = f"{day_hi} कुछ भी तय नहीं है" + ("; आज छुट्टी है।" if off else "; आप पूरे दिन खाली हैं।")
+    else:
+        more = n - 3
+        en = (f"{n} {'item' if n == 1 else 'items'} {day_en}: " + ", ".join(named_en[:3])
+              + (f" and {more} more" if more > 0 else "") + "." + free_en)
+        hi = (f"{day_hi} {n} काम {'है' if n == 1 else 'हैं'}: " + ", ".join(named_hi[:3])
+              + (f" और {more} और" if more > 0 else "") + "।" + free_hi)
+    return _summ(view, address, address_hi, en + tail_en, hi + tail_hi)
 
 
 def _week_view(user, dash: dict, include_private: bool, prefs: dict) -> dict:
@@ -161,11 +212,11 @@ def _stats_view(user, dash: dict, include_private: bool) -> dict:
         {"label": "Today", "value": len(keep(dash["today"])), "tone": "accent"},
         {"label": "Late", "value": len(keep(dash["overdue"])), "tone": "danger"},
         {"label": "Done today", "value": dash["completed_today"], "tone": "success"},
-        {"label": "Need your OK" if user.is_md else "Waiting for Sir", "value": len(pending), "tone": "warn"},
+        {"label": "Need your OK" if user.is_md else f"Waiting for {services.md_address()}", "value": len(pending), "tone": "warn"},
     ]
     if user.is_md:
         open_pa = [t for t in dash.get("pa_tasks", []) if t["status"] not in (Status.COMPLETED, Status.CANCELLED)]
-        stats.append({"label": "With Mansi", "value": len(open_pa), "tone": "info"})
+        stats.append({"label": f"With {dash.get('pa_name') or 'your PA'}", "value": len(open_pa), "tone": "info"})
     staff_open = [t for t in dash["delegated"] if t["status"] not in (Status.COMPLETED, Status.CANCELLED)]
     stats.append({"label": "With staff", "value": len(staff_open), "tone": "info"})
     rows = _rows(keep(dash["overdue"]) + keep(dash["today"]), include_private)
@@ -188,7 +239,7 @@ def _requests_view(user, dash: dict) -> dict:
              "status": r["state"].title(), "priority": r["priority"], "kind": "Change" if r["kind"] == "CHANGE" else "New task",
              "reason": r["reason"], "target": r.get("target_title") or "", "private": False, "progress": 0, "overdue": False,
              "day": "", "version": None, "hold_reason": ""} for r in reqs]
-    title = "Need your OK" if user.is_md else "Waiting for Sir"
+    title = "Need your OK" if user.is_md else f"Waiting for {services.md_address()}"
     return _table("requests", title, rows, [("title", "What"), ("who", "From"), ("when", "Due"), ("status", "Status")],
                   subtitle=(f"{len(rows)} waiting" if rows else "Nothing waiting"), layout="requests")
 
@@ -198,8 +249,9 @@ def _busy_view(dash: dict) -> dict:
     rows = [{"id": w["start"], "scope": "", "title": "Busy", "when": w["label"].replace("Busy ", ""), "status": "", "who": "", "kind": "",
              "priority": "NORMAL", "private": False, "progress": 0, "overdue": False, "day": "today", "version": None, "hold_reason": ""}
             for w in windows]
-    view = _table("busy", "When Sir is busy today", rows, [("when", "When")],
-                  subtitle=("Sir's own plans stay private; only the time is shown." if rows else "No busy times today."), layout="busy")
+    sir = services.md_address()
+    view = _table("busy", f"When {sir} is busy today", rows, [("when", "When")],
+                  subtitle=(f"{sir}'s own plans stay private; only the time is shown." if rows else "No busy times today."), layout="busy")
     view["timeline"] = [{"id": "", "scope": "", "title": "Busy", "kind": "Busy", "priority": "NORMAL",
                          "start": tu.fmt_time(datetime.fromisoformat(w["start"])), "end": tu.fmt_time(datetime.fromisoformat(w["end"])),
                          "start_min": _minutes(datetime.fromisoformat(w["start"])), "end_min": _minutes(datetime.fromisoformat(w["end"])),
@@ -290,7 +342,7 @@ def _done_view(user, include_private: bool) -> dict:
             status=Status.COMPLETED, completed_at__gte=since, origin=SharedTask.Origin.PA_REQUEST).select_related("staff")
     pa = services.get_pa()
     for t in shared.distinct():
-        who = t.staff.name if t.staff else (pa.spoken_name if pa and t.assignee_type == SharedTask.Assignee.PA else "Sir" if user.is_pa else "You")
+        who = t.staff.name if t.staff else (pa.spoken_name if pa and t.assignee_type == SharedTask.Assignee.PA else services.md_address() if user.is_pa else "You")
         items.append((t.completed_at, t.title, who, "shared", str(t.id), t.version))
     items.sort(key=lambda x: x[0], reverse=True)
     today = tu.today_local()
@@ -315,13 +367,14 @@ def _pending_view(user, dash: dict, include_private: bool, official_only: bool =
     personal category, and her dashboard never holds his private items."""
     split = services.pending_split(user, dash, include_private and not official_only)
     counts = split["counts"]
+    sir = services.md_address()
     rows = []
     for item in split["items"][:60]:
         row = _row(item, True)
         if user.is_md:
             row["who"] = "Personal" if row["private"] else "Official"
         else:
-            row["who"] = "Your own" if item.get("origin") == SharedTask.Origin.PA_SELF else "From Sir"
+            row["who"] = "Your own" if item.get("origin") == SharedTask.Origin.PA_SELF else f"From {sir}"
         row["day"] = row["day"] or "No date"
         rows.append(row)
     if user.is_md:
@@ -329,7 +382,7 @@ def _pending_view(user, dash: dict, include_private: bool, official_only: bool =
         if "personal" in counts:
             stats.append({"label": "Personal", "value": counts["personal"], "tone": "info", "icon": "lock-closed-outline"})
     else:
-        stats = [{"label": "From Sir", "value": counts["from_sir"], "tone": "accent", "icon": "briefcase-outline"},
+        stats = [{"label": f"From {sir}", "value": counts["from_sir"], "tone": "accent", "icon": "briefcase-outline"},
                  {"label": "Your own", "value": counts["own"], "tone": "info", "icon": "person-outline"}]
     stats.append({"label": "Late", "value": counts["late"], "tone": "danger" if counts["late"] else "muted",
                   "icon": "alert-circle-outline"})
@@ -357,15 +410,44 @@ def build(user, kind: str, include_private: bool = True, day: date | None = None
           missing: str = "") -> dict | None:
     """A data view for the phone, or None when that kind does not exist for this person.
 
-    params (who / from / to / by / filter / group) come from the request form the AI fills in; see listviews.
-    The result may be {"ask": ...} when the person named fits more than one staff member.
+    params (who / from / to / by / filter / group, plus the narrowing filters) come from the request form the AI
+    fills in; see listviews. The result may be {"ask": ...} when the person named fits more than one staff member.
+    Every view carries ``summary`` / ``summary_hi`` (the sentence JARVIS speaks, written from the real numbers)
+    and ``request`` (the form as answered, so a follow-up can narrow or widen the same list).
     """
     if kind not in VIEW_KINDS:
         return None
     from . import listviews  # here, not at the top: listviews builds on this module
 
     p = listviews.clean_params(params)
-    missing = listviews.clean_missing(missing)
+    view = _build(user, kind, include_private, day, p, listviews.clean_missing(missing), listviews)
+    if view and not view.get("ask"):
+        # The request as answered, with the period the standard day / week views imply, so a follow-up
+        # ("sirf meetings") can ask for the same days with one more filter.
+        answered = dict(p)
+        today = tu.today_local()
+        if view.get("kind") == "today" and not answered["from"]:
+            answered["from"] = answered["to"] = day or today
+        elif view.get("kind") == "week" and not answered["from"]:
+            answered["from"], answered["to"] = today, today + timedelta(days=6)
+        view.setdefault("request", listviews.request_of(view.get("kind") or kind, answered))
+        if not view.get("summary"):
+            address, address_hi = _addr(user)
+            n = len(view.get("rows") or [])
+            _summ(view, address, address_hi, f"here is {view.get('title', 'the list').lower()}: {n} {'item' if n == 1 else 'items'}.",
+                  f"ये रही {view.get('title', 'लिस्ट')}: {n} काम।")
+    return view
+
+
+def _first_two(rows: list[dict], key: str = "when") -> tuple[str, str]:
+    """'A (10 AM), B (tomorrow)' in English and Hindi for the first two rows of a table."""
+    def one(r, hindi):
+        when = r.get(key) or ""
+        return f"{r['title']} ({when})" if when and not hindi else r["title"]
+    return ", ".join(one(r, False) for r in rows[:2]), ", ".join(one(r, True) for r in rows[:2])
+
+
+def _build(user, kind: str, include_private: bool, day: date | None, p: dict, missing: str, listviews) -> dict | None:
     one_named = bool(p["who"]) and p["who"].lower() not in listviews._STAFF | listviews._ALL | listviews._ME
     if kind == "person" or (kind == "people" and one_named):
         # "Details of Kavita Singh" (even when the model filed it under people): that one person's own card.
@@ -397,31 +479,88 @@ def build(user, kind: str, include_private: bool = True, day: date | None = None
         kind = "today"
     dash = services.dashboard(user)
     prefs = services.get_prefs(user)
+    address, address_hi = _addr(user)
+    sir, sir_hi = services.md_address(), services.md_address_hi()
     if kind == "today":
         return _day_view(user, dash, include_private, prefs, day or tu.today_local())
     if kind == "week":
-        return _week_view(user, dash, include_private, prefs)
+        view = _week_view(user, dash, include_private, prefs)
+        n = sum(s["value"] for s in view["series"])
+        heavy = [s["label"] for s in view["series"] if s["heavy"]]
+        en = f"{n} {'item' if n == 1 else 'items'} this week" + (f"; {', '.join(heavy)} {'is' if len(heavy) == 1 else 'are'} full." if heavy else "; no day is overloaded.")
+        hi = f"इस हफ़्ते {n} काम हैं" + (f"; {', '.join(heavy)} भरा हुआ है।" if len(heavy) == 1 else f"; {', '.join(heavy)} भरे हुए हैं।" if heavy else "; कोई दिन ओवरलोड नहीं है।")
+        return _summ(view, address, address_hi, en, hi)
     if kind == "stats":
-        return _stats_view(user, dash, include_private)
-    if kind == "pending":
-        return _pending_view(user, dash, include_private)
-    if kind == "official":
-        return _pending_view(user, dash, include_private, official_only=True)
+        view = _stats_view(user, dash, include_private)
+        by = {s["label"]: s["value"] for s in view["stats"]}
+        waiting = by.get("Need your OK", by.get(f"Waiting for {sir}", 0))
+        en = f"{by['Today']} today, {by['Late']} late, {by['Done today']} done today" + (f", {waiting} {'waiting for your OK' if user.is_md else f'waiting for {sir}'}." if waiting else ".")
+        hi = f"आज {by['Today']} काम, {by['Late']} लेट, {by['Done today']} आज पूरे हुए" + (f", {waiting} {'आपकी मंज़ूरी के इंतज़ार में' if user.is_md else f'{sir_hi} के इंतज़ार में'}।" if waiting else "।")
+        return _summ(view, address, address_hi, en, hi)
+    if kind in ("pending", "official"):
+        view = _pending_view(user, dash, include_private, official_only=kind == "official")
+        counts = services.pending_split(user, dash, include_private and kind != "official")["counts"]
+        total = counts["total"]
+        if not total:
+            return _summ(view, address, address_hi, "nothing is pending." if kind == "pending" else "no official work is pending.",
+                         "कुछ भी बाकी नहीं है।" if kind == "pending" else "कोई ऑफ़िशियल काम बाकी नहीं है।")
+        if user.is_md:
+            if kind == "official":
+                split_en, split_hi = f"{counts['official']} official pending", f"{counts['official']} ऑफ़िशियल काम बाकी हैं"
+            elif "personal" in counts:
+                split_en = f"{total} pending: {counts['official']} official and {counts['personal']} personal"
+                split_hi = f"{total} काम बाकी हैं: {counts['official']} ऑफ़िशियल और {counts['personal']} पर्सनल"
+            else:
+                split_en, split_hi = f"{total} official pending", f"{total} ऑफ़िशियल काम बाकी हैं"
+        else:
+            split_en = f"{total} pending: {counts['from_sir']} from {sir} and {counts['own']} your own"
+            split_hi = f"{total} काम बाकी हैं: {counts['from_sir']} {sir_hi} के दिए हुए और {counts['own']} आपके अपने"
+        extra_en = "; ".join(x for x in (f"{counts['late']} late" if counts["late"] else "", f"{counts['due_today']} due today" if counts["due_today"] else "") if x)
+        extra_hi = "; ".join(x for x in (f"{counts['late']} लेट" if counts["late"] else "", f"{counts['due_today']} आज के" if counts["due_today"] else "") if x)
+        first = view["rows"][0]["title"] if view["rows"] else ""
+        en = split_en + (f"; {extra_en}" if extra_en else "") + (f". First: {first}." if first else ".")
+        hi = split_hi + (f"; {extra_hi}" if extra_hi else "") + (f"। सबसे पहले {first}।" if first else "।")
+        return _summ(view, address, address_hi, en, hi)
     if kind == "late":
-        return _table("late", "Late", _rows(dash["overdue"], include_private), [("when", "Was due"), ("title", "What"), ("kind", "Type")],
-                      subtitle="Nothing is late." if not dash["overdue"] else f"{len(dash['overdue'])} items")
+        rows = _rows(dash["overdue"], include_private)
+        view = _table("late", "Late", rows, [("when", "Was due"), ("title", "What"), ("kind", "Type")],
+                      subtitle="Nothing is late." if not rows else f"{len(rows)} items")
+        if not rows:
+            return _summ(view, address, address_hi, "nothing is late.", "कुछ भी लेट नहीं है।")
+        first_en, first_hi = _first_two(rows)
+        n = len(rows)
+        return _summ(view, address, address_hi, f"{n} {'item is' if n == 1 else 'items are'} late: {first_en}" + (f" and {n - 2} more." if n > 2 else "."),
+                     f"{n} काम लेट {'है' if n == 1 else 'हैं'}: {first_hi}" + (f" और {n - 2} और।" if n > 2 else "।"))
     if kind == "upcoming":
         rows = _rows(dash["upcoming"], include_private)
-        return _table("upcoming", "Coming up", rows, [("day", "Day"), ("when", "When"), ("title", "What")],
-                      subtitle="Next 7 days")
+        view = _table("upcoming", "Coming up", rows, [("day", "Day"), ("when", "When"), ("title", "What")], subtitle="Next 7 days")
+        if not rows:
+            return _summ(view, address, address_hi, "nothing is coming up in the next 7 days.", "अगले 7 दिन में कुछ नहीं है।")
+        n = len(rows)
+        r = rows[0]
+        return _summ(view, address, address_hi, f"{n} coming up in the next 7 days; first {r['title']} {r['day']}" + (f" at {r['when']}." if r["when"] and r["when"] != r["day"] else "."),
+                     f"अगले 7 दिन में {n} काम हैं; सबसे पहले {r['title']} {r['day']}।")
     if kind == "nodate":
         rows = _rows(dash["anytime"], include_private)
-        return _table("nodate", "No date yet", rows, [("title", "What"), ("kind", "Type"), ("priority", "Priority")],
+        view = _table("nodate", "No date yet", rows, [("title", "What"), ("kind", "Type"), ("priority", "Priority")],
                       subtitle=f"{len(rows)} items" if rows else "Everything has a date.")
+        if not rows:
+            return _summ(view, address, address_hi, "everything has a date.", "हर काम की तारीख़ तय है।")
+        first_en, first_hi = _first_two(rows)
+        return _summ(view, address, address_hi, f"{len(rows)} without a date: {first_en}" + (" and more." if len(rows) > 2 else "."),
+                     f"{len(rows)} काम बिना तारीख़ के: {first_hi}" + (" और बाकी।" if len(rows) > 2 else "।"))
     if kind == "private":
         items = [i for i in dash["overdue"] + dash["today"] + dash["upcoming"] + dash["anytime"] if i.get("scope") == "private"]
-        return _table("private", "Private reminders", _rows(items, include_private), [("day", "Day"), ("when", "When"), ("title", "What")],
+        rows = _rows(items, include_private)
+        view = _table("private", "Private reminders", rows, [("day", "Day"), ("when", "When"), ("title", "What")],
                       subtitle="Only you can see these")
+        if not include_private:
+            return _summ(view, address, address_hi, "your personal items show once the phone is unlocked.", "फ़ोन अनलॉक होने पर आपके पर्सनल काम दिखेंगे।")
+        if not rows:
+            return _summ(view, address, address_hi, "no personal items are open.", "कोई पर्सनल काम बाकी नहीं है।")
+        first_en, first_hi = _first_two(rows, "day")
+        return _summ(view, address, address_hi, f"{len(rows)} personal {'item' if len(rows) == 1 else 'items'}: {first_en}" + (" and more." if len(rows) > 2 else "."),
+                     f"{len(rows)} पर्सनल काम: {first_hi}" + (" और बाकी।" if len(rows) > 2 else "।"))
     if kind == "pa":
         items = dash.get("pa_tasks", []) if user.is_md else dash["overdue"] + dash["today"] + dash["upcoming"] + dash["anytime"]
         pa = services.get_pa()
@@ -429,20 +568,69 @@ def build(user, kind: str, include_private: bool = True, day: date | None = None
         view = _progress_table("pa", f"{name}'s tasks" if user.is_md else "My tasks", items, include_private,
                                "Nothing given yet" if user.is_md else "Nothing on your list yet")
         own_ids = {i["id"] for i in items if i.get("origin") == SharedTask.Origin.PA_SELF}
-        for row in view["rows"]:  # say which ones Sir gave and which are her own
+        for row in view["rows"]:  # say which ones the MD gave and which are the PA's own
             row["who"] = (f"{name}'s own" if user.is_md else "Your own") if row["id"] in own_ids else \
-                ("Given by you" if user.is_md else "From Sir")
-        return view
+                ("Given by you" if user.is_md else f"From {sir}")
+        open_rows = [r for r in view["rows"] if r["progress"] < 100]
+        if not open_rows:
+            return _summ(view, address, address_hi, f"{name} has nothing open." if user.is_md else "nothing is open on your list.",
+                         f"{name} के पास कोई काम बाकी नहीं है।" if user.is_md else "आपकी लिस्ट में कुछ बाकी नहीं है।")
+        first_en, first_hi = _first_two(open_rows)
+        n = len(open_rows)
+        en = (f"{name} has {n} open" if user.is_md else f"you have {n} open") + f": {first_en}" + (f" and {n - 2} more." if n > 2 else ".")
+        hi = (f"{name} के पास {n} काम बाकी हैं" if user.is_md else f"आपके {n} काम बाकी हैं") + f": {first_hi}" + (f" और {n - 2} और।" if n > 2 else "।")
+        return _summ(view, address, address_hi, en, hi)
     if kind == "staff":
-        return _progress_table("staff", "Given to staff", dash["delegated"], include_private, "Nothing with staff")
+        view = _progress_table("staff", "Given to staff", dash["delegated"], include_private, "Nothing with staff")
+        open_rows = [r for r in view["rows"] if r["progress"] < 100]
+        late_rows = [r for r in open_rows if r["overdue"]]
+        if not open_rows:
+            return _summ(view, address, address_hi, "nothing is open with the staff.", "स्टाफ़ के पास कोई काम बाकी नहीं है।")
+        n = len(open_rows)
+        en = f"{n} open with staff" + (f", {len(late_rows)} late" if late_rows else "") + f"; first {open_rows[0]['title']} with {open_rows[0]['who']}."
+        hi = f"स्टाफ़ के पास {n} काम बाकी हैं" + (f", {len(late_rows)} लेट" if late_rows else "") + f"; सबसे पहले {open_rows[0]['title']}, {open_rows[0]['who']} के पास।"
+        return _summ(view, address, address_hi, en, hi)
     if kind == "requests":
-        return _requests_view(user, dash)
+        view = _requests_view(user, dash)
+        rows = view["rows"]
+        waiting = [r for r in rows if r["status"] == "Pending"]
+        if user.is_md:
+            if not waiting:
+                return _summ(view, address, address_hi, "no requests are waiting for you.", "कोई रिक्वेस्ट आपके इंतज़ार में नहीं है।")
+            n = len(waiting)
+            r = waiting[0]
+            return _summ(view, address, address_hi, f"{n} {'request' if n == 1 else 'requests'} waiting: {r['title']} from {r['who']}" + (f" and {n - 1} more." if n > 1 else "."),
+                         f"{n} रिक्वेस्ट इंतज़ार में: {r['who']} की {r['title']}" + (f" और {n - 1} और।" if n > 1 else "।"))
+        if not waiting:
+            return _summ(view, address, address_hi, f"nothing of yours is waiting for {sir}.", f"आपकी कोई रिक्वेस्ट {sir_hi} के पास बाकी नहीं है।")
+        return _summ(view, address, address_hi, f"{len(waiting)} of your {'request is' if len(waiting) == 1 else 'requests are'} waiting for {sir}: {waiting[0]['title']}.",
+                     f"आपकी {len(waiting)} रिक्वेस्ट {sir_hi} के इंतज़ार में: {waiting[0]['title']}।")
     if kind == "busy":
-        return _busy_view(dash)
+        view = _busy_view(dash)
+        labels = [r["when"] for r in view["rows"]]
+        if not labels:
+            return _summ(view, address, address_hi, f"{sir} has no busy time today.", f"आज {sir_hi} का कोई समय व्यस्त नहीं है।")
+        return _summ(view, address, address_hi, f"{sir} is busy {', '.join(labels[:3])}" + (" and later." if len(labels) > 3 else "; free otherwise."),
+                     f"{sir_hi} {', '.join(labels[:3])} व्यस्त हैं" + ("।" if len(labels) > 3 else "; बाकी समय खाली हैं।"))
     if kind == "performance":
-        return _performance_view(user)
+        view = _performance_view(user)
+        rows = view["rows"]
+        if not rows:
+            return _summ(view, address, address_hi, "no staff work in the last 30 days to report on.", "पिछले 30 दिन में स्टाफ़ का कोई काम नहीं है।")
+        by = {s["label"]: s["value"] for s in view["stats"]}
+        late_people = [r["title"] for r in rows if r["late"]]
+        en = f"last 30 days: {by['Assigned']} given, {by['Done']} done, {by['On time']} on time" + (f"; late: {', '.join(late_people[:3])}." if late_people else "; nobody is late.")
+        hi = f"पिछले 30 दिन: {by['Assigned']} दिए, {by['Done']} पूरे, {by['On time']} समय पर" + (f"; लेट: {', '.join(late_people[:3])}।" if late_people else "; कोई लेट नहीं है।")
+        return _summ(view, address, address_hi, en, hi)
     if kind == "done":
-        return _done_view(user, include_private)
+        view = _done_view(user, include_private)
+        by = {s["label"]: s["value"] for s in view["stats"]}
+        rows = view["rows"]
+        if not rows:
+            return _summ(view, address, address_hi, "nothing was finished in the last 14 days.", "पिछले 14 दिन में कुछ पूरा नहीं हुआ।")
+        en = f"{by['Today']} finished today, {by['This week']} this week; latest {rows[0]['title']}" + (f" by {rows[0]['who']}." if rows[0]["who"] not in ("You", "") else ".")
+        hi = f"आज {by['Today']} पूरे हुए, इस हफ़्ते {by['This week']}; सबसे ताज़ा {rows[0]['title']}।"
+        return _summ(view, address, address_hi, en, hi)
     return None
 
 

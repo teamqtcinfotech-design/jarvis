@@ -54,7 +54,7 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
                 val fireAtSec = parseIsoSeconds(r.optString("fire_at")) ?: continue
                 val age = nowSec - fireAtSec
                 // Due within the hour: fetch its voice now, so it speaks instantly (and even offline) at its time.
-                if (age < 0 && age > -3600) soon.add(r.optString("spoken"))
+                if (age < 0 && age > -3600) soon.add(TtsEngine.forSpeech(r.optString("spoken")))  // as it will be spoken
                 if (age < 0 || age > 180) continue // not due yet, or too old (the app will show it as held)
                 if (!r.isNull("told_at")) {       // the app said it already: remember, do not repeat
                     spoken.add(key)

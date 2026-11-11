@@ -12,6 +12,7 @@ import { useAlertEngine } from '@/lib/alertEngine';
 import { useConversation } from '@/lib/conversation';
 import { greeting } from '@/lib/format';
 import { useLayout } from '@/lib/layout';
+import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, radius, shadow } from '@/lib/theme';
 import type { SessionUser } from '@/lib/types';
@@ -45,7 +46,8 @@ export function TabletHome({ user }: { user: SessionUser }) {
   }, [newestAnswer]);
 
   const isMD = user.role === 'MD';
-  const address = isMD ? 'Sir' : user.name;
+  const address = addressOf(user);
+  const md = mdWord(data);
   const presence = engine.presence.state;
   const items = navItems(user, data, engine);
   const pending = data?.requests.filter((r) => r.state === 'PENDING').length ?? 0;
@@ -54,8 +56,8 @@ export function TabletHome({ user }: { user: SessionUser }) {
         { label: 'Today', value: data.today.length, tone: 'accent' },
         { label: 'Late', value: data.overdue.length, tone: data.overdue.length ? 'danger' : 'muted' },
         { label: 'Done today', value: data.completed_today, tone: 'success' },
-        { label: isMD ? 'Need your OK' : 'Waiting for Sir', value: pending, tone: pending ? 'warn' : 'muted' },
-        ...(isMD ? [{ label: 'With Mansi', value: (data.pa_tasks ?? []).filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED').length, tone: 'info' }] : []),
+        { label: isMD ? 'Need your OK' : `Waiting for ${md}`, value: pending, tone: pending ? 'warn' : 'muted' },
+        ...(isMD ? [{ label: `With ${data.pa_name || 'your PA'}`, value: (data.pa_tasks ?? []).filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED').length, tone: 'info' }] : []),
         { label: 'With staff', value: data.delegated.filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED').length, tone: 'info' },
       ]
     : [];
@@ -79,8 +81,8 @@ export function TabletHome({ user }: { user: SessionUser }) {
         .find((t) => t.id === conv.itemToOpen) ?? null
     : null;
   const suggestions = isMD
-    ? ['Aaj ka plan kya hai?', 'Meri staff ki list dikhao', 'Staff ka status?', 'Kal 11 baje Sharma ji ke saath meeting']
-    : ['Sir aaj free kab hain?', 'Mere tasks dikhao', 'Sir ke liye kal 3 baje bank meeting'];
+    ? ['Aaj ka plan kya hai?', 'Meri staff ki list dikhao', `${data?.pa_name || 'PA'} ke tasks dikhao`, 'Kal 11 baje Sharma ji ke saath meeting']
+    : [`${md} aaj free kab hain?`, 'Mere tasks dikhao', `${md} ke liye kal 3 baje bank meeting`];
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>

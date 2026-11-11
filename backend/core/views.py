@@ -87,6 +87,8 @@ class MeView(APIView):
             "username": u.username,
             "role": u.role,
             "name": u.spoken_name,
+            "address": services.address_of(u),
+            "address_hi": services.address_hi_of(u),
             "features": {
                 "ai": ai_brain.ai_available(),
                 "taskpanel": {**tp_client().describe(), "linked": services.user_link(u) is not None},
@@ -212,7 +214,7 @@ class SharedTaskDetailView(APIView):
             task = services.update_pa_self_task(request.user, task_id, s.changes(), version)  # her own task
             return Response(services.shared_item(task))
         if SharedTask.objects.filter(id=task_id, assignee_type=SharedTask.Assignee.PA).exists():
-            return error("forbidden", "Only Sir can change this task. You can update its status.", 403)
+            return error("forbidden", f"Only {services.md_address()} can change this task. You can update its status.", 403)
         req = services.propose_change(request.user, task_id, s.changes(), version, s.validated_data.get("reason", ""))
         return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
 
@@ -250,7 +252,7 @@ class PaTaskListView(APIView):
     @idempotent("pa_tasks.create")
     def post(self, request):
         if not request.user.is_md:
-            return error("forbidden", "Only Sir can assign tasks to the PA.", 403)
+            return error("forbidden", f"Only {services.md_address()} can assign tasks to the PA.", 403)
         s = PaTaskInputSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         task = services.create_pa_task(request.user, s.validated_data,
@@ -549,7 +551,7 @@ class AskView(APIView):
         user = request.user
         result = ai_brain.answer(
             s.validated_data["question"], s.validated_data["history"], user=user,
-            address="Sir" if user.is_md else user.spoken_name,
+            address=services.address_of(user),
             reader="the Managing Director" if user.is_md else f"{user.spoken_name}, the MD's personal assistant,",
             lang=s.validated_data["lang"],
         )
@@ -742,4 +744,8 @@ class AlertAckView(APIView):
         if not alert.acknowledged_at:
             alert.acknowledged_at = timezone.now()
             alert.save(update_fields=["acknowledged_at"])
-        return Response({"acknowledged": str(alert.id)})
+        told = None
+        if request.data.get("seen") in (True, "true", 1, "1"):
+            # "Shall I tell Sir you've seen it?" — yes: he learns that it was seen (no task goes unseen).
+            told = services.tell_sender_seen(request.user, alert)
+        return Response({"acknowledged": str(alert.id), "told": str(told.id) if told else None})

@@ -15,7 +15,9 @@ import { router } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Animated, AppState } from 'react-native';
 
-import { type HeldOffer, useAlertEngine } from './alertEngine';
+import { type AlertQuestion, type EngineItem, type HeldOffer, questionFor, useAlertEngine } from './alertEngine';
+import { addressHiOf, addressOf, mdHe, mdWord, mdWordHi } from './names';
+import { useDashboard } from './useDashboard';
 import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
 import { downloadCsv, downloadPdf, shareText } from './download';
@@ -26,7 +28,7 @@ import { useSession } from './session';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang } from './speech';
 import type { AskAnswer, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
-import { onWake, pushToken, wakeConsumePending, wakePause, wakeResume, wakeStart, wakeStatus, wakeSupported } from './wake';
+import { onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeStart, wakeStatus, wakeSupported } from './wake';
 
 export interface Msg {
   id: string;
@@ -104,6 +106,14 @@ const NUDGE_AFTER_ROUNDS = 2;
 const REST_AFTER_ROUNDS = 3;
 // "Hey JARVIS" as the phone's speech recogniser writes it, at the start of what was heard.
 const WAKE_PHRASE = /^\s*(?:(?:hey|hi|hello|ok|okay|he|hay|hai|a|oh|हे|हाय|हेलो)[\s,]+)?(?:jarvis|jarwis|jarvish|jervis|jarves|javis|jarbis|जार्विस|जारविस)[\s,.!?]*/i;
+// Words the room says on its own. Heard right after a wake, with nothing else, they mean the wake was false.
+const FILLER = new Set(['ok', 'okay', 'k', 'haan', 'ha', 'han', 'hmm', 'hm', 'mm', 'yes', 'no', 'nah', 'hello', 'hi', 'hey', 'achha', 'accha',
+  'acha', 'theek', 'thik', 'hai', 'ji', 'kya', 'what', 'oh', 'ah', 'um', 'uh', 'yeah', 'yep', 'huh', 'so', 'ठीक', 'हाँ', 'हां', 'जी',
+  'अच्छा', 'क्या', 'हैं', 'है', 'नहीं']);
+const isFiller = (text: string) => {
+  const words = text.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, ' ').split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.length <= 2 && words.every((w) => FILLER.has(w));
+};
 
 let seq = 0;
 const newId = () => `m${Date.now()}-${seq++}`;
@@ -112,9 +122,14 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { user } = useSession();
   const { prefs, applyServerPrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
-    setHeldVisible, held } = useAlertEngine();
+    setHeldVisible, held, setPresenter, answerQuestion } = useAlertEngine();
+  const { data: dash } = useDashboard();
+  const paName = dash?.pa_name ?? '';
   const isMD = user?.role === 'MD';
-  const address = isMD ? 'Sir' : user?.name ?? '';
+  const address = addressOf(user);
+  const addressHi = addressHiOf(user);
+  const md = mdWord(dash);            // how the MD is referred to on the PA's side ("Sent to Ma'am")
+  const mdHi = mdWordHi(dash);
 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [draft, setDraftState] = useState<Draft | null>(null);
@@ -142,6 +157,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const presentedOffer = useRef(0);
   const wokeAtRef = useRef(0);
   const calledRef = useRef(false); // he has just called JARVIS ("Ji Sir?") and has not said anything yet
+  // JARVIS just spoke an alert and asked its question ("Accept it?", "Done, or later?"): the next words answer it.
+  const questionRef = useRef<{ item: EngineItem; q: AlertQuestion; spoken: string } | null>(null);
   // JARVIS just asked "which one?": the options, so the next words are matched against them by the AI.
   const choicesRef = useRef<{
     intent: 'complete_task' | 'accept_request' | 'decline_request' | 'change_task' | 'delete_task';
@@ -151,8 +168,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     heard: (t: string) => void;
     voiceError: (m: string, c: string) => void;
     presentOffer: (o: HeldOffer, greetFirst: boolean) => void;
+    presentAlert: (item: EngineItem, spoken: string) => void;
     wake: () => void;
-  }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, wake: () => undefined });
+  }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, presentAlert: () => undefined,
+    wake: () => undefined });
 
   const voice = useVoiceCapture(prefs.listenLang, {
     hints,
@@ -215,6 +234,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       kind: top.view.kind,
       title: top.view.title,
       items: top.view.rows.slice(0, 15).filter((r) => r.id && r.title).map((r) => ({ id: r.id, title: r.title })),
+      // The request this card answered, so "sirf meetings" / "sab dikhao" start from the same list.
+      filters: top.view.request ?? null,
     };
   };
   const showView = async (kind: string, label: string, query = '') => {
@@ -240,6 +261,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     expectingRef.current = false;
     silenceRef.current = 0;
     calledRef.current = false;
+    questionRef.current = null; // an unanswered alert question stays on its banner, nothing more is asked
     cancelVoice();
     stopSpeaking();
   };
@@ -283,12 +305,26 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       greet();
       return;
     }
+    // Just called, and all that followed was a stray word from the room ("okay", "haan"): the wake was false.
+    // Close quietly instead of answering it.
+    if (calledRef.current && !questionRef.current && isFiller(text)) {
+      calledRef.current = false;
+      expectingRef.current = false;
+      wakeNoteEmpty();
+      return;
+    }
     calledRef.current = false;
     push('user', text);
     lastQuestion.current = text;
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
       interpret(text, '', `JARVIS asked: "${pendingOffer.text}" (${pendingOffer.count} alerts kept while away)`);
+      return;
+    }
+    const pq = questionRef.current;
+    if (pq) {
+      // The answer to the alert's question; anything else he says is understood as itself (the banner stays).
+      interpret(text, '', `JARVIS asked: "${pq.q.en || pq.spoken}" about "${pq.item.title}"`);
       return;
     }
     const card = waitingCard();
@@ -301,9 +337,31 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (SILENCE_CODES.has(code)) {
       if (!expectingRef.current) return; // the user tapped once and said nothing: just rest
       silenceRef.current += 1;
-      // Is JARVIS waiting on him (a card, a question, a "which one?", an offer, or he has only just called)?
-      const waiting = !!draftRef.current || !!offerRef.current || !!choicesRef.current || !!previousRef.current
-        || calledRef.current;
+      // An alert's question with no answer: one more listen, then it stays on its banner, nothing more is said.
+      if (questionRef.current) {
+        if (silenceRef.current < 2) listen();
+        else {
+          questionRef.current = null;
+          silenceRef.current = 0;
+          expectingRef.current = false;
+        }
+        return;
+      }
+      // Woken by "Hey JARVIS", greeted, and nothing said (most likely a false wake): two quiet rounds, then rest
+      // without a word. No "Sir?" nudge for a call that never had anything behind it.
+      const calledOnly = calledRef.current && !draftRef.current && !offerRef.current && !choicesRef.current && !previousRef.current;
+      if (calledOnly) {
+        if (silenceRef.current < 2) listen();
+        else {
+          silenceRef.current = 0;
+          expectingRef.current = false;
+          calledRef.current = false;
+          wakeNoteEmpty();
+        }
+        return;
+      }
+      // Is JARVIS waiting on him (a card, a question, a "which one?", an offer)?
+      const waiting = !!draftRef.current || !!offerRef.current || !!choicesRef.current || !!previousRef.current;
       if (!waiting) {
         // He got his answer and said nothing more: stop here so "Hey JARVIS" is listening again straight away.
         silenceRef.current = 0;
@@ -313,7 +371,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       if (silenceRef.current < NUDGE_AFTER_ROUNDS) {
         listen(); // he may be thinking: keep listening quietly
       } else if (silenceRef.current === NUDGE_AFTER_ROUNDS) {
-        const hi = hiLine(`${address}?`, isMD ? 'सर?' : `${address}?`);
+        const hi = hiLine(`${address}?`, `${addressHi}?`);
         if (hi) say(hi.speak, { interrupt: true, lang: 'hi', fallback: hi.show, onDone: listen });
         else say(`${address}?`, { interrupt: true, onDone: listen });
       } else if (silenceRef.current < REST_AFTER_ROUNDS) {
@@ -339,12 +397,33 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     offerRef.current = o;
     openTalk();
     const hi = langRef.current === 'hi';
-    const show = (greetFirst ? (isMD ? 'Ji Sir? ' : 'Ji? ') : '') + o.text;
-    const speak = (greetFirst ? (isMD ? 'जी सर? ' : 'जी? ') : '') + (hi ? o.textHi : o.text);
+    const show = (greetFirst ? `Ji ${address}? ` : '') + o.text;
+    const speak = (greetFirst ? `जी ${isMD ? addressHi : ''}? `.replace(' ?', '?') : '') + (hi ? o.textHi : o.text);
     push('jarvis', show);
     expectingRef.current = true;
     silenceRef.current = 0;
     say(speak, { interrupt: true, lang: hi || greetFirst ? 'hi' : 'en', fallback: show, onDone: listen });
+  };
+
+  // An alert JARVIS brings to him by voice (a tapped notification, or one that is due while he is here): come to
+  // the orb screen, say it, ask its one question, and listen once for the answer.
+  const presentAlert = (item: EngineItem, spoken: string) => {
+    const q = questionFor(item, isMD, { en: md, hi: mdHi });
+    questionRef.current = q ? { item, q, spoken } : null;
+    offerRef.current = null;
+    setHeldVisible(false);
+    openTalk();
+    try {
+      router.navigate('/');
+    } catch {
+      // not mounted yet; the voice still works
+    }
+    const line = q?.en ? `${spoken} ${q.en}` : spoken;
+    push('jarvis', line);
+    expectingRef.current = !!q;
+    silenceRef.current = 0;
+    calledRef.current = false;
+    say(line, { interrupt: true, onDone: q ? listen : undefined });
   };
 
   // Woken by "Hey JARVIS": come to the orb screen, greet (and offer held alerts in the same breath), listen.
@@ -408,12 +487,29 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       }
       if (d.action === 'cancel_pending') {
         declineOffer();
-        const hi = hiLine(`Okay ${address}, they're in your list.`, `ठीक है${isMD ? ' सर' : ''}, वो आपकी लिस्ट में हैं।`);
+        const hi = hiLine(`Okay ${address}, they're in your list.`, `ठीक है${isMD ? ` ${addressHi}` : ''}, वो आपकी लिस्ट में हैं।`);
         if (hi) reply(hi.show, hi.speak, 'hi', false);
         else reply(`Okay ${address}, they're in your list.`, undefined, 'en', false);
         return;
       }
       declineOffer(); // he asked for something else: leave them in the list and carry on
+    }
+
+    const pq = questionRef.current;
+    if (pq) {
+      // His answer to the alert's question. A yes or no in any words is carried out here; a real instruction
+      // instead is handled as itself below, and the alert stays on its banner.
+      questionRef.current = null;
+      const sameItem = !d.target || d.target.id === pq.item.ref?.id || d.target.id === pq.item.requestId;
+      const yes = d.action === 'confirm_pending'
+        || (pq.q.kind === 'accept' && d.action === 'accept_request' && sameItem)
+        || (pq.q.kind === 'done' && d.action === 'complete' && sameItem);
+      const no = d.action === 'cancel_pending' || (pq.q.kind === 'accept' && d.action === 'decline_request' && sameItem);
+      if (yes || no) {
+        expectingRef.current = false;
+        answerQuestion(pq.item, pq.q, yes).catch(() => undefined);
+        return;
+      }
     }
 
     if (d.action === 'ask') {
@@ -629,7 +725,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           : `Given to ${who}, ${address}. I'll remind you both and tell you when it's done.`;
       } else if (d.action === 'md_request') {
         await api('/requests/', { method: 'POST', body, idempotencyKey: key });
-        spoken = `Sent to Sir, ${address}. I'll tell you when he answers.`;
+        spoken = `Sent to ${md}, ${address}. I'll tell you when ${mdHe(dash)} answers.`;
       } else if (d.action === 'pa_self_task') {
         // Mansi's own task: straight onto her list, nothing is sent to Sir for approval.
         await api('/pa-tasks/self/', { method: 'POST', body: { ...body, description: d.transcript }, idempotencyKey: key });
@@ -656,8 +752,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           if (res.status === 202) sentToSir += 1;
         }
         spoken = list.length === 1
-          ? (sentToSir ? `Sent to Sir to confirm, ${address}.` : `Marked as done, ${address}.`)
-          : `Marked ${list.length} as done, ${address}.` + (sentToSir ? ` ${sentToSir} sent to Sir to confirm.` : '');
+          ? (sentToSir ? `Sent to ${md} to confirm, ${address}.` : `Marked as done, ${address}.`)
+          : `Marked ${list.length} as done, ${address}.` + (sentToSir ? ` ${sentToSir} sent to ${md} to confirm.` : '');
       } else if (d.action === 'remember') {
         await api('/memories/', { method: 'POST', body: { text: d.memory_text }, idempotencyKey: key });
         spoken = `Done, ${address}. I'll remember that.`;
@@ -672,7 +768,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           if (res.status === 202) sentToSir += 1;
         }
         const what = d.action === 'change_task' ? 'Changed' : 'Deleted';
-        spoken = sentToSir ? `Sent to Sir to confirm, ${address}.`
+        spoken = sentToSir ? `Sent to ${md} to confirm, ${address}.`
           : list.length === 1 ? `${what}, ${address}.${d.action === 'delete_task' ? " It's cancelled, not erased." : ''}`
           : `${what} ${list.length}, ${address}.`;
       }
@@ -743,17 +839,25 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   const greet = () => {
-    const show = isMD ? 'Ji Sir?' : `Ji ${user?.name ?? ''}?`;
+    const show = `Ji ${address}?`;
     push('jarvis', show);
     expectingRef.current = true;
     calledRef.current = true; // he called: wait for him through the quiet rounds
     silenceRef.current = 0;
-    say(isMD ? 'जी सर?' : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
+    say(isMD ? `जी ${addressHi}?` : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
   };
 
   useEffect(() => {
-    fns.current = { heard, voiceError, presentOffer, wake };
+    fns.current = { heard, voiceError, presentOffer, presentAlert, wake };
   });
+  // The alert engine hands alerts that carry a question to this conversation (voice and ear live here).
+  useEffect(() => {
+    setPresenter((item, spoken) => {
+      fns.current.presentAlert(item, spoken);
+      return true;
+    });
+    return () => setPresenter(null);
+  }, [setPresenter]);
   useEffect(() => {
     answersRef.current = answers;
   }, [answers]);
@@ -836,6 +940,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     let cancelled = false;
     let pushRegistered = false;
     let configured = false;
+    let configuredPaName = '';
     const ensure = () => {
       wakeStatus()
         .then(async (st) => {
@@ -843,19 +948,23 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           const wantListening = prefs.wakeWordEnabled && st.micAllowed;
           // Always hand the background part this session's server and login once per app start: after an
           // update or a server switch it may still be holding the previous ones (and would then fetch
-          // reminders and JARVIS's voice from the wrong place).
-          if (!configured || !st.running || st.listening !== wantListening) {
+          // reminders and JARVIS's voice from the wrong place). The PA's name goes along once it is known.
+          if (!configured || !st.running || st.listening !== wantListening || (paName && configuredPaName !== paName)) {
             const tokens = await deviceTokens();
             if (cancelled) return;
             await wakeStart({
               serverUrl: currentServer(),
               accessToken: tokens.access,
               refreshToken: tokens.refresh,
-              address: user.role === 'MD' ? 'Sir' : user.name,
+              address: addressOf(user),
+              addressHi: addressHiOf(user),
+              isMd: user.role === 'MD',
+              paName,
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
             });
             configured = true;
+            configuredPaName = paName;
           }
           // Live push: the server learns this phone's token once per app session (Firebase rotations are
           // re-registered natively).
@@ -875,7 +984,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       clearTimeout(kick);
       sub.remove();
     };
-  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, user]);
+  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, user, paName]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

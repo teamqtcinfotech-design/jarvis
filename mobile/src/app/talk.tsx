@@ -9,15 +9,21 @@ import { useConversation } from '@/lib/conversation';
 import { useSession } from '@/lib/session';
 import { colors, fonts, radius } from '@/lib/theme';
 
-/** The whole conversation, for reading back. The orb screen is the main way to talk. */
+/** Signed out (by hand, or the login expired) while this screen is open: go to the login page before the screen
+ *  below runs, because the conversation it depends on is gone the moment the user is. */
 export default function Talk() {
   const { user } = useSession();
+  if (!user) return <Redirect href="/login" />;
+  return <TalkScreen />;
+}
+
+/** The whole conversation, for reading back. The orb screen is the main way to talk. */
+function TalkScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const conv = useConversation();
   const [typed, setTyped] = useState('');
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
-  if (!user) return <Redirect href="/login" />;
 
   const send = () => {
     const t = typed.trim();

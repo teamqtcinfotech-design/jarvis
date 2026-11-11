@@ -17,8 +17,8 @@ export function describeChanges(changes: Record<string, string> | undefined): st
     .join(', ');
 }
 
-/** Plain-English heading and "who sees it" line for each kind of draft. */
-export function draftHeading(d: Draft): { title: string; detail: string; icon: string } {
+/** Plain-English heading and "who sees it" line for each kind of draft. `md` = how the MD is referred to. */
+export function draftHeading(d: Draft, md = 'Sir', him = 'him'): { title: string; detail: string; icon: string } {
   const pa = d.pa_name || 'your PA';
   switch (d.action) {
     case 'private_task':
@@ -38,9 +38,9 @@ export function draftHeading(d: Draft): { title: string; detail: string; icon: s
         icon: 'people-circle-outline',
       };
     case 'md_request':
-      return { title: 'Request to Sir', detail: 'Sir will accept or decline it.', icon: 'paper-plane-outline' };
+      return { title: `Request to ${md}`, detail: `${md} will accept or decline it.`, icon: 'paper-plane-outline' };
     case 'pa_self_task':
-      return { title: 'Your own task', detail: 'On your list. Sir can see it; it is not sent to him.', icon: 'person-outline' };
+      return { title: 'Your own task', detail: `On your list. ${md} can see it; it is not sent to ${him}.`, icon: 'person-outline' };
     case 'accept_request':
       return { title: 'Accept request', detail: 'It will be added to your list.', icon: 'checkmark-circle-outline' };
     case 'decline_request':
@@ -67,11 +67,11 @@ export function draftHeading(d: Draft): { title: string; detail: string; icon: s
 }
 
 /** Short description of a waiting card, so the AI can tell yes / no / a change / something else apart. */
-export function describeDraft(d: Draft): string {
+export function describeDraft(d: Draft, md = 'Sir'): string {
   const what = d.action === 'remember' ? d.memory_text
     : d.targets?.length ? d.targets.map((t) => t.title).join(' + ')
     : d.target ? d.target.title : d.title;
   const when = d.due_date ? `, ${dayLabel(d.due_date)}${d.due_time ? ` ${d.due_time}` : ''}` : '';
   const who = d.action === 'delegation' && d.staff ? `, for ${d.staff.name}` : '';
-  return `${draftHeading(d).title}: ${what}${when}${who}`.slice(0, 400);
+  return `${draftHeading(d, md).title}: ${what}${when}${who}`.slice(0, 400);
 }

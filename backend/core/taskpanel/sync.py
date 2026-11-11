@@ -102,8 +102,10 @@ def _alert_status_change(task: SharedTask, old_status: str, snap: dict):
     md = User.objects.filter(role=User.Role.MD).first()
     if md and new == "done":
         recipients.add(md)
+    from .. import services  # local import: services imports this module
+
     for user in recipients:
-        address = "Sir" if user.is_md else user.spoken_name
+        address = services.address_of(user)
         Alert.objects.create(
             recipient=user, kind=Alert.Kind.STAFF_UPDATE, priority=priority, title=title, body=task.title,
             spoken_text=f"{address}, {spoken}"[:400] if spoken else "", ref_type="shared_task", ref_id=str(task.id),

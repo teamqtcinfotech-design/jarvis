@@ -10,7 +10,10 @@ class LoginSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
         user = self.user
-        data["user"] = {"username": user.username, "role": user.role, "name": user.spoken_name}
+        from . import services  # how this person is addressed ("Sir", "Ma'am", a name) comes with the login
+
+        data["user"] = {"username": user.username, "role": user.role, "name": user.spoken_name,
+                        "address": services.address_of(user), "address_hi": services.address_hi_of(user)}
         return data
 
 

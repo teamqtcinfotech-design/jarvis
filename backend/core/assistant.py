@@ -387,10 +387,11 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     prefs = services.get_prefs(subject)
     review = scheduling.review(subject, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes, prefs=prefs,
                                exclude_ids=exclude)
-    anonymous = whose == "md"  # Mansi only ever hears that Sir is busy, never with what
+    anonymous = whose == "md"  # the PA only ever hears that the MD is busy, never with what
     pa = services.get_pa()
     pa_name = pa.spoken_name if pa else "your PA"
-    address_hi = "सर" if user.is_md else user.spoken_name
+    address_hi = services.address_hi_of(user)
+    sir, sir_hi = services.md_address(), services.md_address_hi()
     item = (draft.get("targets") or [{}])[0].get("title", "") if draft["action"] == "change_task" else draft.get("title", "")
     item = item or "this"
     if whose == "pa" and draft["action"] != "change_task":
@@ -413,7 +414,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     load = review.get("load") or {}
     if load.get("heavy"):
         n = load["count"]
-        who = {"self": "", "pa": f"{pa_name} ", "md": "Sir "}[whose]
+        who = {"self": "", "pa": f"{pa_name} ", "md": f"{sir} "}[whose]
         notes_en.append(f"{who}{day_en if who else day_cap} already has {n} items.")
         notes_hi.append(f"{day_hi} पहले से {n} काम हैं।")
         warnings.append(f"{day_cap} already has {n} items")
@@ -434,9 +435,9 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         c = clashes[0]
         span = f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"
         if anonymous:
-            head_en = f"{address}, {item} {when_en}: Sir is busy then ({span})."
-            head_hi = f"{address_hi}, {when_hi} {item}: सर उस समय बिज़ी हैं।"
-            warnings.append(f"Sir is busy {span}")
+            head_en = f"{address}, {item} {when_en}: {sir} is busy then ({span})."
+            head_hi = f"{address_hi}, {when_hi} {item}: {sir_hi} उस समय बिज़ी हैं।"
+            warnings.append(f"{sir} is busy {span}")
         else:
             has = {"self": "you already have", "pa": f"{pa_name} already has"}.get(whose, "there is already")
             head_en = f"{address}, {item} {when_en}: {has} {c['title']} then."
@@ -450,8 +451,8 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         s_en, e_en = tu.fmt_time(sug["start"]), tu.fmt_time(sug["end"])
         s_hi, e_hi = tu.fmt_time_hi(sug["start"]), tu.fmt_time_hi(sug["end"])
         s_day = tu.to_local(sug["start"]).date()
-        free = {"self": "you're free", "pa": f"{pa_name} is free", "md": "Sir is free"}[whose]
-        free_hi = {"self": "आप", "pa": pa_name, "md": "सर"}[whose]
+        free = {"self": "you're free", "pa": f"{pa_name} is free", "md": f"{sir} is free"}[whose]
+        free_hi = {"self": "आप", "pa": pa_name, "md": sir_hi}[whose]
         if d:
             head_en = f"{address}, {item} {day_en}: {free} {s_en}–{e_en}. Shall I put it at {s_en}?"
             head_hi = f"{address_hi}, {day_hi} {free_hi} {s_hi} से {e_hi} तक फ्री हैं। {s_hi} रख दूँ?"
@@ -527,7 +528,8 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
     if draft["needs_clarification"] and draft["action"] != "choose_destination" and draft["question"] != model_question:
         return
     last_jarvis = " ".join(str(t.get("text", "")) for t in (history or [])[-3:] if t.get("role") == "jarvis").lower()
-    address_hi = "सर" if user.is_md else user.spoken_name
+    address_hi = services.address_hi_of(user)
+    sir, sir_hi = services.md_address(), services.md_address_hi()
     for name in names:
         label = _person_label(name)
         found = services.resolve_person(user, name)
@@ -553,9 +555,9 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
         whose = whose_hi = ""
         if draft["action"] == "choose_destination":
             whose = (" And should this go in your personal tasks, to your PA, or to the team?" if user.is_md
-                     else " And is this for Sir, for you, or for someone in the team?")
+                     else f" And is this for {sir}, for you, or for someone in the team?")
             whose_hi = (" और इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम को?" if user.is_md
-                        else " और ये सर के लिए है, आपके लिए, या टीम में किसी के लिए?")
+                        else f" और ये {sir_hi} के लिए है, आपके लिए, या टीम में किसी के लिए?")
         draft["needs_clarification"] = True
         draft["question"] = f"{address}, I don't know any {label}. Is {label} on the staff, or an outside contact?{hint}{whose}"
         draft["question_hi"] = (f"{address_hi}, मैं किसी {label} को नहीं जानता। क्या {label} स्टाफ़ में हैं, "
@@ -620,7 +622,8 @@ _SCREEN_ACTIONS = {"export_pdf", "export_csv", "share", "open_item", "open_setti
 
 
 def _clean_screen(screen) -> dict | None:
-    """What the app says is on its screen (a data card): untrusted, so only short plain fields are kept."""
+    """What the app says is on its screen (a data card): untrusted, so only short plain fields are kept. The
+    card's filters (the request it was built from) come along, so the next question can narrow the same list."""
     if not isinstance(screen, dict):
         return None
     items = []
@@ -630,7 +633,13 @@ def _clean_screen(screen) -> dict | None:
     kind = str(screen.get("kind") or "")[:20]
     if not kind:
         return None
-    return {"kind": kind, "title": str(screen.get("title") or "")[:80], "items": items}
+    out = {"kind": kind, "title": str(screen.get("title") or "")[:80], "items": items}
+    filters = screen.get("filters")
+    if isinstance(filters, dict):
+        from . import listviews
+        req_kind = str(filters.get("kind") or kind)[:20]
+        out["filters"] = listviews.request_of(req_kind if req_kind in datacards.VIEW_KINDS else kind, listviews.clean_params(filters))
+    return out
 
 
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
@@ -649,6 +658,11 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     on_screen = _clean_screen(screen)
     if on_screen:
         ctx["on_screen"] = on_screen
+    # The list JARVIS answered with last (its filters), so "sirf meetings" / "aur Sir ke diye hue" / "sab dikhao"
+    # start from the same list even when the phone sent no card.
+    last = services.last_view(user, include_private=include_private)
+    if last and not (on_screen or {}).get("filters"):
+        ctx["last_list"] = last
     model_text = full_text
     if choices and choices.get("items"):
         ctx["choices"] = {"intent": choices["intent"], "items": [{"id": i["id"], "title": i["title"]} for i in choices["items"][:10]]}
@@ -686,7 +700,9 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     # a side question or a brand-new topic stands on its own.
     if awaiting and cmd.get("intent") not in _TASK_INTENTS:
         full_text = text
-    address = "Sir" if user.is_md else user.spoken_name
+    address = services.address_of(user)
+    address_hi = services.address_hi_of(user)
+    sir, sir_hi = services.md_address(), services.md_address_hi()
     intent = _route_intent(user, cmd, full_text)
 
     due_date = _safe_date(cmd.get("due_date", ""))
@@ -777,10 +793,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         if not draft["question"]:
             if user.is_md:
                 draft["question"] = f"{address}, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?"
-                draft["question_hi"] = "सर, इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम में किसी को?"
+                draft["question_hi"] = f"{address_hi}, इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम में किसी को?"
             else:
-                draft["question"] = f"{address}, is this for Sir, for you, or for someone in the team?"
-                draft["question_hi"] = f"{address}, ये सर के लिए है, आपके लिए, या टीम में किसी के लिए?"
+                draft["question"] = f"{address}, is this for {sir}, for you, or for someone in the team?"
+                draft["question_hi"] = f"{address}, ये {sir_hi} के लिए है, आपके लिए, या टीम में किसी के लिए?"
     elif intent in {"accept_request", "decline_request"}:
         draft["action"] = intent
         ids = {r["id"]: r for r in pending}
@@ -943,8 +959,16 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             # The model only fills in a request form (which template, whose, which period); the server fills the
             # template from the database, so the same chart serves every person and every day.
             kind = cmd.get("view_kind") if cmd.get("view_kind") in datacards.VIEW_KINDS else datacards.guess_kind(full_text)
+            # The items he pointed at ("that meeting", "the second one"): only ids JARVIS itself has shown or listed.
+            known = {i["id"] for i in ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]}
+            known |= {i["id"] for i in (on_screen or {}).get("items", [])}
+            ids = [r for r in (cmd.get("target_refs") or []) if isinstance(r, str) and r in known]
+            if not ids and cmd.get("target_ref") in known:
+                ids = [cmd["target_ref"]]
             request = {"who": cmd.get("view_who"), "from": cmd.get("view_from"), "to": cmd.get("view_to"),
-                       "by": cmd.get("view_by"), "filter": cmd.get("view_filter"), "group": cmd.get("view_group")}
+                       "by": cmd.get("view_by"), "filter": cmd.get("view_filter"), "group": cmd.get("view_group"),
+                       "types": cmd.get("view_types"), "from_whom": cmd.get("view_from_whom"),
+                       "priority": cmd.get("view_priority"), "words": cmd.get("view_words"), "ids": ids}
             view = datacards.build(user, kind, include_private, params=request, missing=cmd.get("view_missing") or "")
             if view and view.get("ask"):
                 # "Ramesh" fits two people: ask which, show nothing yet.
@@ -954,6 +978,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             elif view and view.get("summary"):
                 # The sentence comes from the real numbers, never from the model's own counting.
                 draft["spoken_reply"], summary_hi = view["summary"], view.get("summary_hi", "")
+            if view:
+                names_private = any(r.get("private") for r in (view.get("rows") or [])) or any(
+                    t.get("private") for t in (view.get("timeline") or []))
+                services.remember_last_view(user, view.get("request") or {"kind": kind}, view.get("summary", ""), names_private)
             draft["view"] = view
         if not draft["spoken_reply"]:
             if intent == "query":
@@ -1031,9 +1059,9 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["done_speak"], draft["done_lang"] = (done_hi, "hi") if use_hi else (draft["done_reply"], "en")
     # Fixed Hindi lines for the two short replies the model sometimes leaves without a Devanagari version.
     if draft["reply_language"] == "hi" and draft["speak_lang"] != "hi":
-        sir = " सर" if user.is_md else ""
+        who = f" {address_hi}" if user.is_md else ""
         if draft["action"] == "ask":
-            draft["speak_text"], draft["speak_lang"] = f"एक सेकंड{sir}, देख रहा हूँ।", "hi"
+            draft["speak_text"], draft["speak_lang"] = f"एक सेकंड{who}, देख रहा हूँ।", "hi"
         elif draft["action"] == "end":
-            draft["speak_text"], draft["speak_lang"] = f"ठीक है{sir}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।", "hi"
+            draft["speak_text"], draft["speak_lang"] = f"ठीक है{who}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।", "hi"
     return draft

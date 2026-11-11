@@ -95,6 +95,7 @@ def run(now=None) -> int:
     if not md:
         return raised
     pa_name = pa.spoken_name if pa else "your PA"
+    sir = services.md_address()
 
     # 1) Staff tasks with no update for 2 days
     for task in delegated_qs().filter(status__in=OPEN):
@@ -105,7 +106,7 @@ def run(now=None) -> int:
         age = _days(now - last)
         key = f"stale:{task.id}"
         raised += _raise(md, key, f"{who}: no update for {age}", task.title,
-                         f"Sir, {who}'s task '{task.title}' has had no update for {age}. "
+                         f"{sir}, {who}'s task '{task.title}' has had no update for {age}. "
                          f"You can say: remind {pa_name}, or move the date.")
         if pa:
             raised += _raise(pa, key, f"{who}: no update for {age}", task.title,
@@ -116,14 +117,14 @@ def run(now=None) -> int:
         hours = int((now - req.created_at).total_seconds() // 3600)
         title = (req.payload or {}).get("title") or "a request"
         raised += _raise(md, f"request:{req.id}", "Request waiting for your decision", title,
-                         f"Sir, {req.requested_by.spoken_name}'s request '{title}' has been waiting {hours} hours. "
+                         f"{sir}, {req.requested_by.spoken_name}'s request '{title}' has been waiting {hours} hours. "
                          f"You can say: accept it, or decline it.", Priority.HIGH)
 
     # 3) Tasks Sir gave Mansi, not started after a day
     if pa:
         for task in pa_tasks_qs().filter(status=Status.OPEN, created_at__lte=now - PA_NOT_STARTED).exclude(origin=SharedTask.Origin.MD_MEET_PA):
             raised += _raise(pa, f"notstarted:{task.id}", "Not started yet", task.title,
-                             f"{pa_name}, Sir's task '{task.title}' is not started yet. You can say: start it, or put it on hold with a reason.")
+                             f"{pa_name}, {sir}'s task '{task.title}' is not started yet. You can say: start it, or put it on hold with a reason.")
 
     # 4) End of day: what slipped, for each of them about their own list
     if (local.hour, local.minute) >= DIGEST_AT:
@@ -143,7 +144,7 @@ def run(now=None) -> int:
                     parts.append("; ".join(slipped[:3]))
                 if private_count:
                     parts.append(f"{private_count} private")
-                spoken = (f"Sir, {total} thing{'s' if total > 1 else ''} slipped today: " + " and ".join(parts) +
+                spoken = (f"{sir}, {total} thing{'s' if total > 1 else ''} slipped today: " + " and ".join(parts) +
                           ". Tell me if you want them moved to tomorrow.")
                 raised += _raise(md, key, f"{total} slipped today", " · ".join(parts), spoken)
         if pa and not _already(key + f"@{pa.id}"):
@@ -163,7 +164,7 @@ def run(now=None) -> int:
             total = len(undated) + private_undated
             if total:
                 parts = ([f"{len(undated)} official" if undated else ""] + [f"{private_undated} private" if private_undated else ""])
-                spoken = (f"Sir, {total} task{'s' if total > 1 else ''} still {'have' if total > 1 else 'has'} no date: "
+                spoken = (f"{sir}, {total} task{'s' if total > 1 else ''} still {'have' if total > 1 else 'has'} no date: "
                           + " and ".join(p for p in parts if p) + ". Say a day for any of them whenever you like.")
                 raised += _raise(md, key, f"{total} without a date", "; ".join(undated[:3]) or f"{private_undated} private", spoken, Priority.LOW)
         if pa and not _already(key + f"@{pa.id}"):

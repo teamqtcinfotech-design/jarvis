@@ -32,11 +32,15 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     private var retries = 0
     /** JARVIS asked something (or was just woken) and is waiting; false after a plain answer or "saved". */
     private var patient = true
+    /** He has said something real in this conversation. Until then a quiet room ends it silently (a false wake). */
+    private var heardAnything = false
     /** Changes every time listening starts or ends, so a late safety timer knows it is out of date. */
     private var listenRound = 0
     private val prefs = WakeBus.prefs(context)
     private val address: String get() = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
-    private val isMd: Boolean get() = address == "Sir"
+    /** The same word in Devanagari ("सर", "मैम") for the Hindi lines. */
+    private val addressHi: String get() = prefs.getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
+    private val isMd: Boolean get() = prefs.getBoolean(WakeBus.KEY_IS_MD, address == "Sir")
     private val overlay = OverlayOrb(context) { end() }
 
     fun start() {
@@ -46,6 +50,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         silenceRounds = 0
         retries = 0
         patient = true
+        heardAnything = false
         overlay.show("…", "thinking")
         main.post {
             ensureRecognizer()
@@ -181,7 +186,9 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         putExtra("android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS", 1200L)
         putExtra("android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 1200L)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, arrayListOf("JARVIS", "Jarvis", "Mansi", "Sir"))
+            val names = arrayListOf("JARVIS", "Jarvis", "Sir")
+            prefs.getString(WakeBus.KEY_PA_NAME, null)?.takeIf { it.isNotBlank() }?.let { names.add(it) }
+            putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, names)
         }
     }
 
@@ -213,9 +220,18 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
             val text = WAKE_PHRASE.replaceFirst(heard, "").trim()
             if (text.isEmpty()) {
                 patient = true
-                speakThen(if (isMd) "जी सर?" else "जी?", "Ji $address?", "hi-IN") { listen() }
+                speakThen(if (isMd) "जी $addressHi?" else "जी?", "Ji $address?", "hi-IN") { listen() }
                 return
             }
+            // A stray word from the room right after a wake ("okay", "haan", "hmm") is not an instruction: the
+            // wake was most likely false. Close quietly rather than answer it.
+            if (!heardAnything && isFiller(text)) {
+                Log.i(TAG, "only a stray word after the wake; closing quietly")
+                WakeBus.countEmptyWake(context)
+                end()
+                return
+            }
+            heardAnything = true
             send(text)
         }
 
@@ -246,10 +262,21 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         silenceRounds += 1
         when {
             !patient -> end()
+            // Woken, greeted, and nothing said: most likely a false wake. Two quiet rounds, then close without a word.
+            !heardAnything -> if (silenceRounds < 2) listen() else {
+                WakeBus.countEmptyWake(context)
+                end()
+            }
             silenceRounds < 2 -> listen()
-            silenceRounds == 2 -> speakThen(if (isMd) "सर?" else "$address?", "$address?", "hi-IN") { listen() }
+            silenceRounds == 2 -> speakThen(if (isMd) "$addressHi?" else "$address?", "$address?", "hi-IN") { listen() }
             else -> end()
         }
+    }
+
+    /** One or two words that carry no instruction ("okay", "haan ji", "hmm"). */
+    private fun isFiller(text: String): Boolean {
+        val words = text.lowercase().replace(Regex("[^\\p{L}\\p{N} ]"), " ").split(Regex("\\s+")).filter { it.isNotBlank() }
+        return words.isNotEmpty() && words.size <= 2 && words.all { it in FILLER }
     }
 
     companion object {
@@ -258,6 +285,10 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         private const val SPEECH_TIMEOUT_MS = 30_000L   // he started talking: the longest one sentence may take
         /** Replies after which nothing is being asked of him. */
         private val RESTFUL = setOf("answer", "saved", "setting_applied", "dismiss", "briefing", "read_missed")
+        /** Words the room says on its own; never an instruction when they are all that was heard after a wake. */
+        private val FILLER = setOf("ok", "okay", "k", "haan", "ha", "han", "hmm", "hm", "mm", "yes", "no", "nah", "hello", "hi", "hey",
+            "achha", "accha", "acha", "theek", "thik", "hai", "ji", "kya", "what", "oh", "ah", "um", "uh", "yeah", "yep", "huh", "so",
+            "ok ok", "ठीक", "हाँ", "हां", "जी", "अच्छा", "क्या", "हैं", "है", "नहीं")
         /** "Hey JARVIS" as the phone's speech recogniser tends to write it, at the start of what was heard. */
         private val WAKE_PHRASE = Regex(
             "^\\s*(?:(?:hey|hi|hello|ok|okay|he|hay|hai|a|oh|हे|हाय|हेलो)[\\s,]+)?(?:jarvis|jarwis|jarvish|jervis|jarves|javis|jarbis|जार्विस|जारविस)[\\s,.!?]*",

@@ -29,13 +29,19 @@ class WakeNotifier(private val context: Context) {
         }
     }
 
-    private fun openApp(extra: String? = null): PendingIntent {
+    /**
+     * Opens the app. ``extra`` = a flag to set (woken by "Hey JARVIS"); ``openKey`` = the reminder / alert this
+     * notification is about, so the app comes up on it and asks its question. Each key gets its own pending
+     * intent (the request code), otherwise Android would hand every notification the last key.
+     */
+    private fun openApp(extra: String? = null, openKey: String? = null): PendingIntent {
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)!!.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             if (extra != null) putExtra(extra, true)
+            if (openKey != null) putExtra(WakeService.EXTRA_OPEN_KEY, openKey)
         }
-        return PendingIntent.getActivity(context, extra?.hashCode() ?: 0, launch,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val code = openKey?.hashCode() ?: extra?.hashCode() ?: 0
+        return PendingIntent.getActivity(context, code, launch, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
     private fun icon(): Int = context.applicationInfo.icon
@@ -63,7 +69,7 @@ class WakeNotifier(private val context: Context) {
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text)) // a morning briefing is a whole paragraph
-            .setContentIntent(openApp())
+            .setContentIntent(openApp(openKey = key))
             .setAutoCancel(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .apply { if (urgent) setDefaults(Notification.DEFAULT_ALL) else setDefaults(Notification.DEFAULT_VIBRATE) }

@@ -17,12 +17,14 @@ import { AppState, Platform } from 'react-native';
 
 import { ApiError, api, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
+import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { usePrefs } from './prefs';
 import { PresenceState, usePresence } from './presence';
 import { useSession } from './session';
+import { useDashboard } from './useDashboard';
 import { say } from './speech';
 import type { Priority, Reminder, ServerAlert } from './types';
-import { onPush, wakeSupported } from './wake';
+import { onPush, wakeConsumeOpenKey, wakeSupported } from './wake';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => {
@@ -48,6 +50,8 @@ export interface EngineItem {
   spoken: string;
   isPrivate: boolean;
   kind?: string;
+  /** Reminders: before / due / day / checkin / followup (what moment this reminder marks). */
+  label?: string;
   ref?: Reminder['ref'];
   alertId?: string;
   alertKind?: ServerAlert['kind'];
@@ -77,8 +81,40 @@ export interface HeldOffer {
   textHi: string; // Devanagari, for the Hindi voice
 }
 
+/** The one question JARVIS asks aloud right after an alert, and listens for the answer to. */
+export interface AlertQuestion {
+  kind: 'accept' | 'done' | 'seen';
+  /** Appended to the spoken line; empty when the line itself already asks (a check-in). */
+  en: string;
+  hi: string;
+}
+
+/**
+ * Which alerts get a question (kept tight, so JARVIS never nags): a request to Sir ("Accept it?"), a task or
+ * meeting Sir gave Mansi ("Shall I tell Sir you've seen it?"), a reminder at its time ("Done, or remind you
+ * later?"). Decisions, staff news and "starts in 15 minutes" are spoken only.
+ */
+export function questionFor(item: EngineItem, isMD: boolean, md: { en: string; hi: string } = { en: 'Sir', hi: 'सर' }): AlertQuestion | null {
+  if (item.alertKind === 'NEW_REQUEST' && isMD && item.requestId) return { kind: 'accept', en: 'Accept it?', hi: 'मंज़ूर करूँ?' };
+  if (item.alertKind === 'TASK_ASSIGNED' && !isMD && item.alertId) {
+    return { kind: 'seen', en: `Shall I tell ${md.en} you've seen it?`, hi: `${md.hi} को बता दूँ कि आपने देख लिया?` };
+  }
+  if (item.source === 'reminder' && item.ref && item.kind !== 'MEETING' && !item.concealed) {
+    if (item.label === 'checkin') return { kind: 'done', en: '', hi: '' }; // its own line already asks
+    if (item.label === 'due' || item.label === 'day') return { kind: 'done', en: 'Done, or remind you later?', hi: 'हो गया, या बाद में याद दिलाऊँ?' };
+  }
+  return null;
+}
+
+/** The conversation takes an alert over: speaks it, asks its question and listens. Returns true when it did. */
+export type AlertPresenter = (item: EngineItem, spoken: string) => boolean;
+
 interface EngineValue {
   presence: ReturnType<typeof usePresence>;
+  /** The conversation lends the engine its voice and ear for alerts that carry a question. */
+  setPresenter: (presenter: AlertPresenter | null) => void;
+  /** The answer he gave to the question (yes / no), carried out here: accept or decline, done or later, told or not. */
+  answerQuestion: (item: EngineItem, question: AlertQuestion, yes: boolean) => Promise<void>;
   meetingMode: boolean;
   setMeetingMode: (on: boolean) => void;
   offer: HeldOffer | null;
@@ -148,6 +184,7 @@ function fromReminder(r: Reminder): EngineItem {
     spoken: r.spoken,
     isPrivate: r.is_private,
     kind: r.kind,
+    label: r.label,
     ref: r.ref,
     fireAt: Date.parse(r.fire_at),
     followups: 0,
@@ -200,7 +237,7 @@ function combined(lines: string[], address: string): string {
 }
 
 /** "2 private reminders and 1 request from your PA" in English and Hindi. */
-function describeHeld(items: EngineItem[], isMD: boolean): { en: string; hi: string } {
+function describeHeld(items: EngineItem[], isMD: boolean, md: { en: string; hi: string }): { en: string; hi: string } {
   const n = (f: (i: EngineItem) => boolean) => items.filter(f).length;
   const privateRem = n((i) => i.source === 'reminder' && i.isPrivate);
   const otherRem = n((i) => i.source === 'reminder' && !i.isPrivate);
@@ -220,16 +257,16 @@ function describeHeld(items: EngineItem[], isMD: boolean): { en: string; hi: str
     hi.push(`${otherRem} रिमाइंडर`);
   }
   if (requests) {
-    en.push(`${plural(requests, 'request')} from ${isMD ? 'your PA' : 'Sir'}`);
-    hi.push(`${isMD ? 'आपकी PA' : 'सर'} की ${requests} रिक्वेस्ट`);
+    en.push(`${plural(requests, 'request')} from ${isMD ? 'your PA' : md.en}`);
+    hi.push(`${isMD ? 'आपकी PA' : md.hi} की ${requests} रिक्वेस्ट`);
   }
   if (assigned) {
-    en.push(`${plural(assigned, 'task')} from Sir`);
-    hi.push(`सर के ${assigned} टास्क`);
+    en.push(`${plural(assigned, 'task')} from ${md.en}`);
+    hi.push(`${md.hi} के ${assigned} टास्क`);
   }
   if (decided) {
-    en.push(`${plural(decided, 'answer')} from Sir`);
-    hi.push(`सर के ${decided} जवाब`);
+    en.push(`${plural(decided, 'answer')} from ${md.en}`);
+    hi.push(`${md.hi} के ${decided} जवाब`);
   }
   if (staff) {
     en.push(plural(staff, 'staff update'));
@@ -253,7 +290,10 @@ function refOf(item: EngineItem): { type: string; id: string } | null {
 export function AlertEngineProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const { prefs, update: updatePrefs } = usePrefs();
-  const address = user?.role === 'MD' ? 'Sir' : user?.name ?? '';
+  const { data: dash } = useDashboard();
+  const address = addressOf(user);
+  const addressHi = addressHiOf(user);
+  const md = { en: mdWord(dash), hi: mdWordHi(dash) };
 
   // Meeting mode is a shared setting (JARVIS can switch it by voice, even from the background listener).
   // A meeting in his diary also counts as "in a meeting"; switching the mode OFF during one (by hand or by
@@ -305,6 +345,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const offerSeq = useRef(0);
   const voiceProbe = useRef<(() => Promise<boolean>) | null>(null);
   const talkingRef = useRef(false);
+  const presenterRef = useRef<AlertPresenter | null>(null);
   const isMD = user?.role === 'MD';
 
   const currentRef = useRef<EngineItem | null>(null);
@@ -388,13 +429,38 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         Haptics.notificationAsync(
           item.priority === 'URGENT' ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success,
         ).catch(() => undefined);
-        say(spokenFor(item));
+        // An alert with a question is handed to the conversation: it says the line, asks, and listens once.
+        const presenter = presenterRef.current;
+        const asked = !!presenter && !!questionFor(item, isMD, md) && presenter(item, spokenFor(item));
+        if (!asked) say(spokenFor(item));
       } else {
         buzzSilently(item.priority === 'URGENT');
       }
       tell([item]);
     },
-    [show, spokenFor, tell],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- md is a fresh object each render; its two words are what matter
+    [show, spokenFor, tell, isMD, md.en, md.hi],
+  );
+
+  /**
+   * He tapped this alert's notification (or JARVIS is bringing it to him on return): put it on screen and start
+   * the conversation on it at once, speak it, ask its question, listen for the answer.
+   */
+  const presentItem = useCallback(
+    (item: EngineItem) => {
+      handled.current.add(item.key);
+      snoozed.current.delete(item.key);
+      followups.current.delete(item.key);
+      setHeld(heldRef.current.filter((h) => h.key !== item.key));
+      queueRef.current = queueRef.current.filter((q) => q.key !== item.key);
+      setQueued(queueRef.current.length);
+      if (currentRef.current && currentRef.current.key !== item.key) queueRef.current.unshift(currentRef.current);
+      setCurrent({ ...item, mode: 'silent' });
+      const presenter = presenterRef.current;
+      if (!presenter || !presenter(item, spokenFor(item))) say(spokenFor(item), { interrupt: true });
+      tell([item]);
+    },
+    [setCurrent, setHeld, spokenFor, tell],
   );
 
   /** Several things at the same moment: shown one by one, said as ONE sentence. */
@@ -429,22 +495,26 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     const items = heldRef.current;
     if (items.length <= announcedHeld.current) return;
     announcedHeld.current = items.length;
-    const what = describeHeld(items, isMD);
+    const what = describeHeld(items, isMD, md);
     const when = heldPhrase(items);
-    const sir = isMD ? 'Sir' : address;
     const them = items.length === 1 ? 'it' : 'them';
     offerSeq.current += 1;
     setOffer({
       id: offerSeq.current,
       count: items.length,
-      text: `${sir}, ${when.en}: ${what.en}. Shall I read ${them}?`,
-      textHi: `${isMD ? 'सर' : address}, ${when.hi}: ${what.hi}। पढ़ कर सुनाऊँ?`,
+      text: `${address}, ${when.en}: ${what.en}. Shall I read ${them}?`,
+      textHi: `${addressHi}, ${when.hi}: ${what.hi}। पढ़ कर सुनाऊँ?`,
     });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
-  }, [address, isMD]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- md is a fresh object each render; its two words are what matter
+  }, [address, addressHi, isMD, md.en, md.hi]);
 
   const setVoiceProbe = useCallback((probe: (() => Promise<boolean>) | null) => {
     voiceProbe.current = probe;
+  }, []);
+
+  const setPresenter = useCallback((presenter: AlertPresenter | null) => {
+    presenterRef.current = presenter;
   }, []);
 
   const setTalking = useCallback((talking: boolean) => {
@@ -670,22 +740,52 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     if (prev !== 'present' && presence.state === 'present') offerHeldIfBack();
   }, [presence.state, offerHeldIfBack]);
 
-  // Tapping an OS notification opens the app on that alert.
+  // Tapping a notification opens the app on that alert, and JARVIS starts talking about it at once.
   const markActive = presence.markActive;
+  const itemForKey = useCallback((key: string): EngineItem | null => {
+    const r = remindersRef.current.find((x) => x.key === key);
+    if (r) return fromReminder(r);
+    const a = alertsRef.current.find((x) => `alert:${x.id}` === key);
+    return a ? fromAlert(a) : null;
+  }, []);
   useEffect(() => {
+    // Notifications scheduled by the app itself (phones without the always-on part).
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       const key = response.notification.request.content.data?.key as string | undefined;
-      const r = remindersRef.current.find((x) => x.key === key);
-      if (!r) return;
+      const item = key ? itemForKey(key) : null;
+      if (!item) return;
       markActive();
-      handled.current.add(r.key);
-      setHeld(heldRef.current.filter((h) => h.key !== r.key));
-      const item = fromReminder(r);
-      if (currentRef.current) queueRef.current.unshift(currentRef.current);
-      setCurrent({ ...item, mode: 'silent' });
+      presentItem(item);
     });
     return () => sub.remove();
-  }, [markActive, setCurrent, setHeld]);
+  }, [markActive, itemForKey, presentItem]);
+  useEffect(() => {
+    // Notifications from the always-on part: the key rides on the intent that brought the app up. The app is
+    // told on return (and once at start), fetches the latest lists, then opens the conversation on that item.
+    if (!wakeSupported) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const check = () => {
+      const key = wakeConsumeOpenKey();
+      if (!key) return;
+      markActive();
+      poll()
+        .catch(() => undefined)
+        .then(() => {
+          const item = itemForKey(key);
+          if (item) presentItem(item);
+        });
+    };
+    timer = setTimeout(check, 400);
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s !== 'active') return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(check, 300);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      sub.remove();
+    };
+  }, [markActive, itemForKey, presentItem, poll]);
 
   const clearKey = useCallback(
     (item: EngineItem) => {
@@ -766,7 +866,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       try {
         const res = await api(path, { method: 'POST', body: { expected_version: item.ref.version } });
         await acknowledge(item);
-        say(res.status === 202 ? `${address}, sent to Sir for approval.` : `Done, ${address}.`, { interrupt: true });
+        say(res.status === 202 ? `${address}, sent to ${md.en} for approval.` : `Done, ${address}.`, { interrupt: true });
         dataChanged.emit();
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
@@ -778,7 +878,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         }
       }
     },
-    [acknowledge, address],
+    [acknowledge, address, md.en],
   );
 
   const decideRequest = useCallback(
@@ -805,8 +905,32 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     if (currentRef.current) setCurrent({ ...currentRef.current, concealed: false });
   }, [setCurrent]);
 
+  // What his yes or no to the alert's question does. Each path says one short line and clears the banner.
+  const answerQuestion = useCallback(
+    async (item: EngineItem, question: AlertQuestion, yes: boolean) => {
+      if (question.kind === 'accept') return decideRequest(item, yes);
+      if (question.kind === 'done') {
+        if (yes) return complete(item);
+        snooze(item, 15);
+        say(`Okay ${address}, I'll remind you in 15 minutes.`, { interrupt: true });
+        return;
+      }
+      // 'seen': yes = the MD is told the PA has seen it; no = it simply leaves the screen.
+      clearKey(item);
+      try {
+        if (item.alertId) await api(`/alerts/${item.alertId}/ack/`, { method: 'POST', body: { seen: yes } });
+        if (yes) say(`Told ${md.en}, ${address}.`, { interrupt: true });
+      } catch {
+        say(`Sorry ${address}, I couldn't reach the server.`, { interrupt: true });
+      }
+    },
+    [decideRequest, complete, snooze, clearKey, address, md.en],
+  );
+
   const value: EngineValue = {
     presence,
+    setPresenter,
+    answerQuestion,
     meetingMode,
     setMeetingMode,
     offer,

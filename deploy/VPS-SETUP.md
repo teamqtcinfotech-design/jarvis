@@ -84,7 +84,7 @@ chown root:jarvis .env && chmod 640 .env
 bash /srv/jarvis/deploy/deploy.sh
 cd /srv/jarvis/backend
 .venv/bin/python manage.py seed_demo --accounts-only      # prints the md / pa passwords once — save them
-.venv/bin/python manage.py set_name pa "Your PA's name"
+.venv/bin/python manage.py set_name pa Mansi      # her first name exactly as JARVIS should say it
 pm2 list                                                  # jarvis-api + jarvis-worker online; existing apps unchanged
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8010/api/v1/health/   # expect 401 (= running, login required)
 ```

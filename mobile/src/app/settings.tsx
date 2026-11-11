@@ -1,4 +1,4 @@
-import { useRouter } from 'expo-router';
+import { Redirect, useRouter } from 'expo-router';
 import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 import React, { useEffect, useState } from 'react';
 import { AppState, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
@@ -8,12 +8,14 @@ import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui'
 import { useAlertEngine } from '@/lib/alertEngine';
 import { api, currentServer, deviceTokens } from '@/lib/api';
 import { relativeAgo, timeLabel } from '@/lib/format';
+import { addressHiOf, addressOf, mdWord } from '@/lib/names';
 import { usePrefs } from '@/lib/prefs';
 import { presenceLabel } from '@/lib/presence';
 import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
 import type { AiUsageSummary, ContactItem, MemoryItem } from '@/lib/types';
+import { useDashboard } from '@/lib/useDashboard';
 import { type WakeStatus, wakeSetListening, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
 
 function Row({ title, detail, right }: { title: string; detail?: string; right: React.ReactNode }) {
@@ -35,11 +37,20 @@ interface Health {
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const dayNames = (days: number[]) => (days.length ? days.map((d) => WEEKDAYS[d] ?? '').filter(Boolean).join(', ') : 'none');
 
+/** Sign out (the button below, or an expired login) removes the user, and with it the alert engine this screen
+ *  reads. Going to the login page first is what keeps the release build from crashing at that moment. */
 export default function Settings() {
+  const { user } = useSession();
+  if (!user) return <Redirect href="/login" />;
+  return <SettingsScreen />;
+}
+
+function SettingsScreen() {
   const router = useRouter();
   const { user, server, signOut, biometricAvailable } = useSession();
   const { prefs, update } = usePrefs();
   const engine = useAlertEngine();
+  const { data: dash } = useDashboard();
   const p = engine.presence;
   const isMD = user?.role === 'MD';
   const [health, setHealth] = useState<Health | null>(null);
@@ -99,7 +110,10 @@ export default function Settings() {
         serverUrl: currentServer(),
         accessToken: tokens.access,
         refreshToken: tokens.refresh,
-        address: isMD ? 'Sir' : user?.name ?? '',
+        address: addressOf(user),
+        addressHi: addressHiOf(user),
+        isMd: isMD,
+        paName: dash?.pa_name ?? '',
         speakWhenLocked: prefs.privateAloudWhenLocked,
         wakeWord: true,
       });
@@ -124,10 +138,11 @@ export default function Settings() {
   };
 
   const testVoice = () => {
-    say(isMD ? 'नमस्ते सर, मैं जार्विस हूँ। बताइए, मैं क्या करूँ?' : `नमस्ते, मैं जार्विस हूँ।`, {
-      interrupt: true, lang: 'hi', fallback: isMD ? 'Namaste Sir, main JARVIS hoon. Bataiye, main kya karoon?' : 'Namaste, main JARVIS hoon.',
+    const address = addressOf(user);
+    say(isMD ? `नमस्ते ${addressHiOf(user)}, मैं जार्विस हूँ। बताइए, मैं क्या करूँ?` : `नमस्ते, मैं जार्विस हूँ।`, {
+      interrupt: true, lang: 'hi', fallback: isMD ? `Namaste ${address}, main JARVIS hoon. Bataiye, main kya karoon?` : 'Namaste, main JARVIS hoon.',
     });
-    say(isMD ? 'Good day, Sir. JARVIS is ready.' : `Hello ${user?.name}. JARVIS is ready.`);
+    say(isMD ? `Good day, ${address}. JARVIS is ready.` : `Hello ${address}. JARVIS is ready.`);
   };
 
   return (
@@ -175,7 +190,7 @@ export default function Settings() {
             title="Reminders and messages in the background"
             detail={
               !wakeSupported ? 'Not included in this build.'
-                : wake?.running ? 'On. Anything from Sir or Mansi reaches this phone within half a minute, spoken when it is unlocked.'
+                : wake?.running ? `On. Anything from ${isMD ? (dash?.pa_name || 'your PA') : mdWord(dash)} reaches this phone within half a minute, spoken when it is unlocked.`
                 : 'Starting… (open the app once after a restart).'
             }
             right={wake?.running ? <Tag label="On" color={colors.success} bg={colors.successSoft} /> : null}
@@ -213,6 +228,12 @@ export default function Settings() {
             After a phone restart, open JARVIS once (or tap the notification) to switch it on again.
             {xiaomi ? ' On Xiaomi, allow all three: Autostart, Battery, and Pop-ups from background.' : ''}
           </Txt>
+          {wake && prefs.wakeWordEnabled ? (
+            <Txt variant="caption" style={{ marginTop: 6 }}>
+              Heard “Hey JARVIS” {wake.wakesToday} {wake.wakesToday === 1 ? 'time' : 'times'} today
+              {wake.emptyWakesToday ? `, ${wake.emptyWakesToday} with nothing said after it` : ''}.
+            </Txt>
+          ) : null}
         </Card>
 
         <Txt variant="label" style={{ marginTop: 22 }}>What JARVIS remembers about you</Txt>
@@ -338,7 +359,7 @@ export default function Settings() {
           <Row title={isMD ? 'Managing Director' : `PA · ${user?.name}`} detail={`Signed in as ${user?.username}`} right={null} />
           <Row title="Server" detail={server} right={null} />
           <Row title="Fingerprint lock" detail={biometricAvailable ? 'On — needed after 1 minute away' : 'No fingerprint or face set up on this phone'} right={null} />
-          {!isMD ? <Txt variant="small" style={{ marginTop: 8 }}>Sir’s personal tasks are private and never shown in this app.</Txt> : null}
+          {!isMD ? <Txt variant="small" style={{ marginTop: 8 }}>{mdWord(dash)}’s personal tasks are private and never shown in this app.</Txt> : null}
           <Button title="Sign out" kind="danger" icon="log-out-outline" onPress={signOut} style={{ marginTop: 14 }} />
         </Card>
         <Txt variant="caption" style={{ textAlign: 'center', marginTop: 20 }}>JARVIS 1.1 · private build for QTC INFOTECH</Txt>

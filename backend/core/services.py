@@ -26,6 +26,7 @@ from .models import (
     Alert,
     AuditLog,
     Contact,
+    ConversationState,
     DueKind,
     IntegrationCommand,
     Kind,
@@ -80,6 +81,45 @@ def get_md() -> User | None:
 
 def get_pa() -> User | None:
     return User.objects.filter(role=User.Role.PA, is_active=True).first()
+
+
+# --------------------------------------------------------------------------- how people are addressed
+# The MD chooses how JARVIS addresses them, and the PA refers to the MD the same way: "Sir", "Ma'am", "Madam" or
+# the MD's own name. The PA is always addressed by first name. Nothing else in the code should spell "Sir".
+ADDRESS_HI = {"sir": "सर", "ma'am": "मैम", "maam": "मैम", "mam": "मैम", "madam": "मैडम", "madame": "मैडम", "boss": "बॉस"}
+FEMALE_ADDRESS = {"ma'am", "maam", "mam", "madam", "madame", "miss", "mrs", "ms"}
+
+
+def md_address() -> str:
+    """How the MD is addressed and referred to ("Sir", "Ma'am", or the MD's name): the MD's own setting."""
+    md = get_md()
+    if md is None:
+        return "Sir"
+    raw = " ".join(str(get_prefs(md).get("addressAs") or "").split())
+    if not raw:
+        return "Sir"
+    if raw.lower() in ("name", "naam", "my name", "mera naam", "by name"):
+        return md.spoken_name
+    return raw[:40]
+
+
+def md_address_hi() -> str:
+    word = md_address()
+    return ADDRESS_HI.get(word.lower(), word)
+
+
+def md_pronouns() -> tuple[str, str, str]:
+    """(he, him, his) or (she, her, her), from the form of address."""
+    return ("she", "her", "her") if md_address().lower() in FEMALE_ADDRESS else ("he", "him", "his")
+
+
+def address_of(user: User) -> str:
+    """How JARVIS addresses this person when speaking to them."""
+    return md_address() if user.is_md else user.spoken_name
+
+
+def address_hi_of(user: User) -> str:
+    return md_address_hi() if user.is_md else user.spoken_name
 
 
 # --------------------------------------------------------------------------- schedule helpers
@@ -452,8 +492,14 @@ def dashboard(user: User) -> dict:
         if i["status"] == Status.COMPLETED and i["completed_at"]
         and tu.to_local(datetime.fromisoformat(i["completed_at"])).date() == now.date()
     ]
+    pa_user, md_user = get_pa(), get_md()
     out = {
         "user": {"username": user.username, "role": user.role, "name": user.spoken_name},
+        # The two names as JARVIS says them, and how the MD is addressed, so no screen has to carry a typed-in word.
+        "pa_name": pa_user.spoken_name if pa_user else "",
+        "md_name": md_user.spoken_name if md_user else "",
+        "md_address": md_address(),
+        "md_address_hi": md_address_hi(),
         "server_time": now.isoformat(),
         "date_label": f"{now.strftime('%A')}, {now.day} {now.strftime('%B')}",
         **buckets,
@@ -482,7 +528,7 @@ def create_private_task(md: User, data: dict, source: str = PrivateTask.Source.M
         source=source,
     )
     apply_schedule(task, data, creating=True)
-    task.announcement = data.get("announcement") or default_announcement(task.title, task.kind)
+    task.announcement = data.get("announcement") or default_announcement(task.title, task.kind, md_address())
     task.save()
     audit(md, "private_task.create", "private_task", task.id)  # no title in audit, by design
     return task
@@ -559,21 +605,22 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
         sync_state=SharedTask.Sync.NOT_REQUIRED,
     )
     apply_schedule(task, {**data, "kind": task.kind}, creating=True)
-    task.announcement = (f"{pa.spoken_name}, your meeting with Sir is coming up: {task.title}." if meeting_with_pa
-                         else data.get("announcement") or f"{pa.spoken_name}, reminder for Sir's task: {task.title}.")
+    sir = md_address()
+    task.announcement = (f"{pa.spoken_name}, your meeting with {sir} is coming up: {task.title}." if meeting_with_pa
+                         else data.get("announcement") or f"{pa.spoken_name}, reminder for {sir}'s task: {task.title}.")
     task.save()
     when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
     if meeting_with_pa:
-        title = "Meeting with Sir"
-        spoken = f"{pa.spoken_name}, Sir has scheduled a meeting with you" + (f" {when}" if when else "") + f": {task.title}."
+        title = f"Meeting with {sir}"
+        spoken = f"{pa.spoken_name}, {sir} has scheduled a meeting with you" + (f" {when}" if when else "") + f": {task.title}."
     else:
-        title = "New task from Sir"
-        spoken = (f"{pa.spoken_name}, Sir has given you a new {task.priority.lower()} priority task: "
+        title = f"New task from {sir}"
+        spoken = (f"{pa.spoken_name}, {sir} has given you a new {task.priority.lower()} priority task: "
                   f"{task.title}" + (f", {when}" if when else "") + ".")
-    # A brief professional note in Sir's name (template above if the AI is unavailable).
+    # A brief professional note in the MD's name (template above if the AI is unavailable).
     from .compose import compose  # local import: compose depends on the AI client, services must not
     message = compose(
-        "meeting_with_pa" if meeting_with_pa else "task_for_pa", "Sir (the Managing Director)", pa.spoken_name,
+        "meeting_with_pa" if meeting_with_pa else "task_for_pa", f"{sir} (the Managing Director)", pa.spoken_name,
         {"title": task.title, "when": when, "priority": task.priority.lower(), "instruction": task.description,
          "notes": task.notes}, fallback=spoken, user=md,
     )
@@ -632,7 +679,7 @@ def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: 
     task = SharedTask.objects.select_for_update().get(id=task_id, assignee_type=SharedTask.Assignee.PA)
     if task.status == Status.CANCELLED:
         own = task.origin == SharedTask.Origin.PA_SELF
-        raise ServiceError("cancelled", "This task was cancelled." if own else "Sir has cancelled this task.", 409)
+        raise ServiceError("cancelled", "This task was cancelled." if own else f"{md_address()} has cancelled this task.", 409)
     _check_version(task, expected_version)
     if new_status == Status.BLOCKED and not note.strip():
         raise ServiceError("reason_required", "Please give a reason for putting this on hold.", 422)
@@ -644,12 +691,12 @@ def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: 
     task.save()
     md = get_md()
     if md and new_status != old and task.origin != SharedTask.Origin.PA_SELF:
-        name = pa.spoken_name
+        name, sir = pa.spoken_name, md_address()
         if new_status == Status.COMPLETED:
-            title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"Sir, {name} has completed: {task.title}."
+            title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"{sir}, {name} has completed: {task.title}."
         elif new_status == Status.BLOCKED:
             title, priority = f"{name} put a task on hold", Priority.NORMAL
-            spoken = f"Sir, {name} has put {task.title} on hold. Reason: {task.hold_reason}."
+            spoken = f"{sir}, {name} has put {task.title} on hold. Reason: {task.hold_reason}."
         elif new_status == Status.IN_PROGRESS:
             title, priority, spoken = f"{name} started a task", Priority.LOW, ""
         else:
@@ -686,19 +733,19 @@ def _notify_md_new_request(req: TaskRequest):
     if not md:
         return
     item = request_item(req)
-    pa_name = req.requested_by.spoken_name
+    pa_name, sir = req.requested_by.spoken_name, md_address()
     if req.kind == TaskRequest.Kind.CREATE:
         when = f", {item['due_label']}" if item["due_label"] else ""
-        spoken = f"Sir, {pa_name} has sent you a new {item['priority'].lower()} priority task: {item['title']}{when}. Would you like to accept it?"
+        spoken = f"{sir}, {pa_name} has sent you a new {item['priority'].lower()} priority task: {item['title']}{when}. Would you like to accept it?"
         title = f"New task from {pa_name}"
         kind = "request_to_md"
     else:
-        spoken = f"Sir, {pa_name} has proposed a change to {item['target_title']}. Please review it."
+        spoken = f"{sir}, {pa_name} has proposed a change to {item['target_title']}. Please review it."
         title = f"Change proposed by {pa_name}"
         kind = "change_request"
-    # A courteous note in Mansi's name (template above if the AI is unavailable).
+    # A courteous note in the PA's name (template above if the AI is unavailable).
     from .compose import compose
-    message = compose(kind, f"{pa_name} (the MD's personal assistant)", "Sir", {
+    message = compose(kind, f"{pa_name} (the MD's personal assistant)", sir, {
         "title": item["title"], "when": item["due_label"], "priority": item["priority"].lower(),
         "reason": req.reason, "target": item.get("target_title") or "",
     }, fallback=spoken, user=req.requested_by)
@@ -771,7 +818,7 @@ def accept_request(md: User, request_id) -> TaskRequest:
                 origin=SharedTask.Origin.PA_REQUEST, created_by=req.requested_by,
             )
             apply_schedule(task, data, creating=True)
-            task.announcement = data.get("announcement") or default_announcement(task.title, task.kind)
+            task.announcement = data.get("announcement") or default_announcement(task.title, task.kind, md_address())
             task.save()
             req.resulting_task = task
         else:
@@ -992,6 +1039,66 @@ def recheck_delegation(user: User, task_id) -> SharedTask:
 
 
 # --------------------------------------------------------------------------- AI context
+def tell_sender_seen(user: User, alert: Alert) -> Alert | None:
+    """Mansi answered yes to "shall I tell Sir you've seen it?": one short note for Sir. Spoken when the task
+    matters (urgent / high), otherwise it only sits in his lists. Never raised twice for the same alert."""
+    if not user.is_pa or alert.kind != Alert.Kind.TASK_ASSIGNED:
+        return None
+    md = get_md()
+    if md is None:
+        return None
+    existing = Alert.objects.filter(recipient=md, ref_type="seen", ref_id=str(alert.id)).first()
+    if existing:
+        return existing
+    task = SharedTask.objects.filter(id=alert.ref_id).first() if alert.ref_type == "shared_task" and alert.ref_id else None
+    title = task.title if task else (alert.body or alert.title)
+    loud = bool(task and task.priority in (Priority.URGENT, Priority.HIGH))
+    return Alert.objects.create(
+        recipient=md, kind=Alert.Kind.INFO, priority=Priority.NORMAL if loud else Priority.LOW,
+        title=f"{user.spoken_name} has seen it", body=title[:400],
+        spoken_text=f"{md_address()}, {user.spoken_name} has seen: {title}."[:400], ref_type="seen", ref_id=str(alert.id)[:64],
+    )
+
+
+LAST_VIEW_TTL = timedelta(minutes=15)
+
+
+def remember_last_view(user: User, request: dict, summary: str, has_private: bool = False) -> None:
+    """Keep the list JARVIS just answered with (its filters and what was said), so the next question can narrow
+    or widen the SAME list ("sirf meetings", "aur Sir ke diye hue", "sab dikhao") even when the phone did not
+    send the card back. Stored beside the voice conversation's short memory, with the same encryption.
+    has_private: the sentence names one of Sir's personal items, so it is only ever repeated to an unlocked phone."""
+    row = ConversationState.objects.filter(user=user).first()
+    try:
+        data = json.loads(row.state_json or "{}") if row else {}
+    except ValueError:
+        data = {}
+    data["last_view"] = {"request": request, "summary": (summary or "")[:200], "private": bool(has_private),
+                         "at": timezone.now().isoformat()}
+    ConversationState.objects.update_or_create(user=user, defaults={"state_json": json.dumps(data, ensure_ascii=False, default=str)})
+
+
+def last_view(user: User, include_private: bool = True) -> dict | None:
+    """The list answered last (within a quarter of an hour), or None. On a locked phone (include_private=False)
+    a sentence that named a personal item is left out; the filters alone are kept."""
+    row = ConversationState.objects.filter(user=user).first()
+    if not row:
+        return None
+    try:
+        last = (json.loads(row.state_json or "{}") or {}).get("last_view")
+    except ValueError:
+        return None
+    if not isinstance(last, dict) or not last.get("at"):
+        return None
+    try:
+        if timezone.now() - datetime.fromisoformat(last["at"]) > LAST_VIEW_TTL:
+            return None
+    except (TypeError, ValueError):
+        return None
+    said = "" if (last.get("private") and not include_private) else (last.get("summary") or "")
+    return {"filters": last.get("request") or {}, "jarvis_said": said}
+
+
 def ai_context(user: User, include_private: bool = True) -> dict:
     """Facts the AI may use. Strictly scoped: a PA context contains no MD private data.
 
@@ -1055,6 +1162,10 @@ def ai_context(user: User, include_private: bool = True) -> dict:
     # How much is waiting, split the way the speaker thinks about it. Sir has official work and personal items;
     # personal ones exist only in his own context (and not at all on a locked phone).
     ctx["pending_summary"] = dict(pending_split(user, dash, include_private)["counts"])
+    # How the MD is addressed and named: every "Sir" in the rules means this word.
+    ctx["md_address"], ctx["md_address_hi"] = md_address(), md_address_hi()
+    md_user = get_md()
+    ctx["md_name"] = md_user.spoken_name if md_user else ""
     if user.is_md:
         closed = (Status.COMPLETED, Status.CANCELLED)
         ctx["pending_summary"]["with_pa_open"] = len([
@@ -1065,7 +1176,8 @@ def ai_context(user: User, include_private: bool = True) -> dict:
     def allowed(v):
         return {"enum": v.get("values"), "bool": "on/off", "time": "HH:MM (24h)",
                 "days": "day names: sunday / sat,sun / weekdays / none",
-                "blocks": "set with routineAdd / routineRemove"}.get(v["type"]) or f"{v['min']}-{v['max']}"
+                "blocks": "set with routineAdd / routineRemove",
+                "text": v.get("hint", "short text")}.get(v["type"]) or f"{v['min']}-{v['max']}"
     ctx["settings"] = {k: {"now": current[k], "allowed": allowed(v), "means": v["say"]}
                        for k, v in PREF_SCHEMA.items() if not v.get("hidden")}
     ctx["settings"]["quietHours"] = {"now": f"{current['quietStartHour']}-{current['quietEndHour']}", "allowed": "START-END in 24h",
@@ -1087,6 +1199,9 @@ PREF_SCHEMA = {
                    "aliases": {"auto": "auto", "english": "auto", "hinglish": "auto", "both": "auto", "mixed": "auto",
                                "hindi": "hi-IN", "hi": "hi-IN", "hi-in": "hi-IN"},
                    "labels": {"auto": "Hindi and English together", "hi-IN": "pure Hindi"}},
+    # How JARVIS addresses the MD (and how the PA's JARVIS refers to the MD): Sir, Ma'am, Madam, or "name".
+    "addressAs": {"type": "text", "default": "Sir", "say": "how JARVIS addresses you (Sir, Ma'am, Madam or your name)",
+                  "hint": "Sir / Ma'am / Madam / name (= your own name)"},
     "voiceAccent": {"type": "enum", "values": ["hi-IN", "en-IN"], "default": "hi-IN", "say": "voice",
                     "aliases": {"hindi": "hi-IN", "hi": "hi-IN", "hi-in": "hi-IN", "english": "en-IN", "en": "en-IN",
                                 "en-in": "en-IN", "indian english": "en-IN"},
@@ -1564,7 +1679,8 @@ def briefing_facts(user: User, kind: str, conceal_private: bool = False) -> tupl
         m = load["movable"]
         facts["day_load"]["could_move"] = {"title": span_name(m), "to": tu.fmt_day(today + timedelta(days=1))}
 
-    address = "Sir" if user.is_md else user.spoken_name
+    address = address_of(user)
+    facts["address"] = address  # how the reader is addressed (the briefing writer uses exactly this word)
     hour = tu.now_local().hour
     greeting = {"morning": "Good morning", "evening": "Good evening"}.get(
         kind, "Good morning" if hour < 12 else "Good afternoon" if hour < 17 else "Good evening")

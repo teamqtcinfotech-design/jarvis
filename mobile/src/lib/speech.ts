@@ -74,13 +74,19 @@ function pump() {
   });
 }
 
+/** "PA" is read by every voice as a word ("paa"); as "P.A." it is said letter by letter. The screen keeps "PA". */
+export const forSpeech = (text: string) => text.replace(/\bPA\b/g, 'P.A.');
+
 export function say(text: string, opts: { interrupt?: boolean; onDone?: () => void; lang?: SpeakLang; fallback?: string } = {}) {
   if (!text?.trim()) {
     opts.onDone?.();
     return;
   }
   if (opts.interrupt) stopSpeaking();
-  queue.push({ id: `u${Date.now()}-${seq++}`, text, lang: opts.lang ?? 'en', fallback: opts.fallback, onDone: opts.onDone });
+  queue.push({
+    id: `u${Date.now()}-${seq++}`, text: forSpeech(text), lang: opts.lang ?? 'en',
+    fallback: opts.fallback ? forSpeech(opts.fallback) : opts.fallback, onDone: opts.onDone,
+  });
   pump();
 }
 

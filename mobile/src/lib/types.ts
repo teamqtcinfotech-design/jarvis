@@ -7,6 +7,9 @@ export interface SessionUser {
   username: string;
   role: Role;
   name: string;
+  /** How JARVIS addresses this person ("Sir", "Ma'am", a name), and the same in Devanagari. Set on the server. */
+  address?: string;
+  address_hi?: string;
 }
 
 export interface TaskItem {
@@ -64,6 +67,12 @@ export interface BusyWindow {
 
 export interface Dashboard {
   user: SessionUser;
+  /** The two names as JARVIS says them (set on the server), so no screen carries a typed-in name. */
+  pa_name?: string;
+  md_name?: string;
+  /** How the MD is addressed and referred to ("Sir", "Ma'am", a name), and the same in Devanagari. */
+  md_address?: string;
+  md_address_hi?: string;
   server_time: string;
   date_label: string;
   overdue: TaskItem[];
@@ -206,6 +215,12 @@ export interface DataView {
   office?: { start_min: number; end_min: number };
   /** One person's card: who they are, from the staff app. */
   profile?: { name: string; department: string; designation: string; on_leave: boolean; leave: string };
+  /** The sentence JARVIS spoke for this card (and its Hindi twin), written by the server from the real numbers. */
+  summary?: string;
+  summary_hi?: string;
+  /** The request this card answers (kind, whose, period, filters): sent back with the card so a follow-up
+   *  ("sirf meetings", "sab dikhao") starts from the same list. */
+  request?: Record<string, unknown>;
   file_name: string;
   text: string;
 }

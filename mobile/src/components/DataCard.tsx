@@ -11,6 +11,8 @@ import { dataChanged } from '@/lib/bus';
 import { useConversation } from '@/lib/conversation';
 import { downloadCsv, downloadPdf, shareText } from '@/lib/download';
 import { useLayout } from '@/lib/layout';
+import { addressOf } from '@/lib/names';
+import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors, priorityColor, radius, shadow, tone } from '@/lib/theme';
 import type { DataView, TaskItem, ViewRow, ViewTimelineItem } from '@/lib/types';
@@ -336,6 +338,8 @@ function Table({ view, onOpen }: { view: DataView; onOpen: (id: string, scope: s
 }
 
 function Requests({ view, isMD }: { view: DataView; isMD: boolean }) {
+  const { user } = useSession();
+  const address = addressOf(user);
   const [busy, setBusy] = useState('');
   const [note, setNote] = useState('');
   const decide = async (r: ViewRow, accept: boolean) => {
@@ -343,7 +347,7 @@ function Requests({ view, isMD }: { view: DataView; isMD: boolean }) {
     setNote('');
     try {
       await api(`/requests/${r.id}/${accept ? 'accept' : 'decline'}/`, { method: 'POST', body: {}, idempotencyKey: newIdempotencyKey() });
-      say(accept ? "Accepted, Sir. It's on your list." : "Declined, Sir. I've informed them.", { interrupt: true });
+      say(accept ? `Accepted, ${address}. It's on your list.` : `Declined, ${address}. I've informed them.`, { interrupt: true });
       dataChanged.emit();
     } catch (e) {
       setNote(e instanceof ApiError ? e.message : 'Could not reach the server.');

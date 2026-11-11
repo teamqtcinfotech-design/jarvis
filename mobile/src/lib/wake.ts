@@ -8,8 +8,14 @@ export interface WakeConfig {
   serverUrl: string;
   accessToken: string;
   refreshToken: string;
-  /** What to say when woken, e.g. "Ji Sir?" (spoken by the app once it is in front). */
+  /** How JARVIS addresses this person ("Sir", "Ma'am", a first name), as in "Ji Sir?". */
   address: string;
+  /** The same in Devanagari, for the Hindi lines of the closed-app conversation. */
+  addressHi?: string;
+  /** Whether this phone's user is the MD (the closed-app loop words a few lines differently). */
+  isMd?: boolean;
+  /** The PA's name as JARVIS says it, so the closed-app listener expects it (left out = keep the last one). */
+  paName?: string;
   speakWhenLocked: boolean;
   /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
   wakeWord: boolean;
@@ -26,11 +32,14 @@ export interface WakeStatus {
   notificationsAllowed: boolean;
   batteryUnrestricted: boolean;
   manufacturer: string;
+  /** How often "Hey JARVIS" fired today, and how often nothing was said after it (a false wake, most likely). */
+  wakesToday: number;
+  emptyWakesToday: number;
 }
 
 const NO_STATUS: WakeStatus = {
   supported: false, running: false, listening: false, overlayAllowed: false, micAllowed: false,
-  notificationsAllowed: false, batteryUnrestricted: false, manufacturer: '',
+  notificationsAllowed: false, batteryUnrestricted: false, manufacturer: '', wakesToday: 0, emptyWakesToday: 0,
 };
 
 export interface TtsEvent {
@@ -48,6 +57,8 @@ type Native = {
   pause: () => void;
   resume: () => void;
   consumePendingWake: () => boolean;
+  consumePendingOpen?: () => string | null;
+  noteEmptyWake?: () => void;
   openOverlaySettings: () => void;
   openBatterySettings: () => void;
   openAutostartSettings: () => boolean;
@@ -132,6 +143,24 @@ export function wakeConsumePending(): boolean {
     return native?.consumePendingWake() ?? false;
   } catch {
     return false;
+  }
+}
+
+/** The reminder / alert key of the notification that just opened the app, once; null otherwise. */
+export function wakeConsumeOpenKey(): string | null {
+  try {
+    return native?.consumePendingOpen?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Woken by "Hey JARVIS", greeted, and nothing was said: counted, so Settings can show how often that happens. */
+export function wakeNoteEmpty() {
+  try {
+    native?.noteEmptyWake?.();
+  } catch {
+    // ignore
   }
 }
 

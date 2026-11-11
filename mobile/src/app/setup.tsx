@@ -12,6 +12,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Button, Card, Icon, Txt } from '@/components/ui';
 import { currentServer, deviceTokens } from '@/lib/api';
+import { addressHiOf, addressOf } from '@/lib/names';
 import { usePrefs } from '@/lib/prefs';
 import { useSession } from '@/lib/session';
 import { markSetupDone } from '@/lib/setup';
@@ -81,7 +82,9 @@ export default function Setup() {
           serverUrl: currentServer(),
           accessToken: tokens.access,
           refreshToken: tokens.refresh,
-          address: isMD ? 'Sir' : user.name,
+          address: addressOf(user),
+          addressHi: addressHiOf(user),
+          isMd: isMD,
           speakWhenLocked: prefs.privateAloudWhenLocked,
           wakeWord: st.micAllowed,
         });

@@ -63,12 +63,10 @@ class JarvisWakeModule : Module() {
         Function("stopSpeaking") { TtsEngine.stop() }
         OnActivityEntersForeground {
             WakeBus.appInForeground = true
-            val extras = appContext.currentActivity?.intent
-            if (extras?.getBooleanExtra(WakeService.EXTRA_WAKE, false) == true) {
-                extras.removeExtra(WakeService.EXTRA_WAKE)
-                WakeBus.pendingWake = true
-            }
+            appContext.currentActivity?.intent?.let { takeExtras(it) }
         }
+        // The app was already running and a notification was tapped: the new intent carries what was tapped.
+        OnNewIntent { intent -> takeExtras(intent) }
         OnActivityEntersBackground {
             WakeBus.appInForeground = false
             WakeBus.paused = false  // the app no longer needs the microphone: "Hey JARVIS" listens again at once
@@ -76,9 +74,12 @@ class JarvisWakeModule : Module() {
 
         AsyncFunction("getStatus") {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val (wakes, empty) = WakeBus.wakeCounts(context)
             mapOf(
                 "supported" to true,
                 "running" to WakeBus.running,
+                "wakesToday" to wakes,
+                "emptyWakesToday" to empty,
                 // false while Android is silencing the microphone, so the app restarts the listening part
                 "listening" to (WakeBus.listening && !WakeBus.micBlocked),
                 "overlayAllowed" to (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)),
@@ -101,8 +102,14 @@ class JarvisWakeModule : Module() {
                 .putString(WakeBus.KEY_ACCESS, config["accessToken"] as? String ?: "")
                 .putString(WakeBus.KEY_REFRESH, config["refreshToken"] as? String ?: "")
                 .putString(WakeBus.KEY_ADDRESS, config["address"] as? String ?: "Sir")
+                .putString(WakeBus.KEY_ADDRESS_HI, (config["addressHi"] as? String)?.takeIf { it.isNotBlank() }
+                    ?: (config["address"] as? String ?: "Sir"))
+                .putBoolean(WakeBus.KEY_IS_MD, config["isMd"] as? Boolean ?: ((config["address"] as? String ?: "Sir") == "Sir"))
                 .putBoolean(WakeBus.KEY_SPEAK_LOCKED, config["speakWhenLocked"] as? Boolean ?: false)
                 .apply()
+            (config["paName"] as? String)?.takeIf { it.isNotBlank() }?.let {
+                WakeBus.prefs(context).edit().putString(WakeBus.KEY_PA_NAME, it).apply()
+            }
             WakeBus.paused = false
             WakeService.start(context)
             wakeWord
@@ -137,6 +144,16 @@ class JarvisWakeModule : Module() {
             pending
         }
 
+        /** The reminder / alert key behind the notification that opened the app, once; null otherwise. */
+        Function("consumePendingOpen") {
+            val key = WakeBus.pendingOpenKey
+            WakeBus.pendingOpenKey = null
+            key
+        }
+
+        /** The app was woken by "Hey JARVIS" and nothing was said after the greeting (a false wake, most likely). */
+        Function("noteEmptyWake") { WakeBus.countEmptyWake(context) }
+
         Function("openOverlaySettings") {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
@@ -168,6 +185,18 @@ class JarvisWakeModule : Module() {
                 ComponentName("com.miui.securitycenter", "com.miui.securitycenter.Main"),
             )
             candidates.any { open(Intent().setComponent(it)) }
+        }
+    }
+
+    /** What the intent that brought the app up says: woken by "Hey JARVIS", or a tapped reminder / alert notification. */
+    private fun takeExtras(intent: Intent) {
+        if (intent.getBooleanExtra(WakeService.EXTRA_WAKE, false)) {
+            intent.removeExtra(WakeService.EXTRA_WAKE)
+            WakeBus.pendingWake = true
+        }
+        intent.getStringExtra(WakeService.EXTRA_OPEN_KEY)?.let {
+            intent.removeExtra(WakeService.EXTRA_OPEN_KEY)
+            if (it.isNotBlank()) WakeBus.pendingOpenKey = it
         }
     }
 

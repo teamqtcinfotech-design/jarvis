@@ -9,7 +9,9 @@ import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { api } from '@/lib/api';
 import { TASK_DRAFTS, draftHeading } from '@/lib/drafts';
 import { addDays, dayLabel, isoDate, timeLabel } from '@/lib/format';
+import { mdHim, mdWord } from '@/lib/names';
 import { useSession } from '@/lib/session';
+import { useDashboard } from '@/lib/useDashboard';
 import { colors, kindIcon, kindLabel, priorityColor, priorityLabel, prioritySoft, radius, shadow } from '@/lib/theme';
 import type { CategoryOption, Draft, DraftAction, Kind, Priority, StaffOption } from '@/lib/types';
 
@@ -47,10 +49,12 @@ interface Props {
 
 export function DraftCard({ draft, saving, listening, error, onChange, onSave, onCancel, onReply }: Props) {
   const { user } = useSession();
+  const { data: dash } = useDashboard();
+  const md = mdWord(dash);
   const [editing, setEditing] = useState(false);
   const [allStaff, setAllStaff] = useState<StaffOption[] | null>(null);
   const [categories, setCategories] = useState<CategoryOption[]>(draft.categories ?? []);
-  const head = draftHeading(draft);
+  const head = draftHeading(draft, md, mdHim(dash));
   const isMD = user?.role === 'MD';
   const isTask = TASK_DRAFTS.includes(draft.action);
   const choosing = draft.action === 'choose_destination';
@@ -76,7 +80,8 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
   ];
   const staffOptions = allStaff ?? draft.staff_candidates ?? [];
   const when = draft.due_date ? `${dayLabel(draft.due_date)}${draft.due_time ? ` · ${timeLabel(draft.due_time)}` : ''}` : 'No date';
-  const saveLabel = draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}` : SAVE_LABEL[draft.action] ?? 'Confirm';
+  const saveLabel = draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}`
+    : draft.action === 'md_request' ? `Send to ${md}` : SAVE_LABEL[draft.action] ?? 'Confirm';
   const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text : !!(draft.target || draft.targets?.length))
     && (draft.action !== 'delegation' || !!draft.staff);
   const danger = draft.action === 'delete_task' || draft.action === 'decline_request';
@@ -101,7 +106,7 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
       quick.push({ label: 'My personal', say: 'mere personal mein daalo', icon: 'lock-closed-outline' });
       quick.push({ label: 'Give to my PA', say: 'PA ko de do', icon: 'person-outline' });
     } else if (choosing) {
-      quick.push({ label: 'For Sir', say: 'Sir ke liye hai', icon: 'paper-plane-outline' });
+      quick.push({ label: `For ${md}`, say: `${md} ke liye hai`, icon: 'paper-plane-outline' });
       quick.push({ label: 'For me', say: 'mere liye hai', icon: 'person-outline' });
     }
   }

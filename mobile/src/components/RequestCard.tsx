@@ -3,6 +3,8 @@ import { StyleSheet, View } from 'react-native';
 
 import { ApiError, api, newIdempotencyKey } from '@/lib/api';
 import { dataChanged } from '@/lib/bus';
+import { addressOf } from '@/lib/names';
+import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
 import type { RequestItem } from '@/lib/types';
@@ -10,7 +12,7 @@ import type { RequestItem } from '@/lib/types';
 import { Button, Card, PriorityTag, Tag, Txt } from './ui';
 
 const STATE_TAG: Record<string, { label: string; color: string; bg: string }> = {
-  PENDING: { label: 'Awaiting MD', color: colors.warn, bg: colors.warnSoft },
+  PENDING: { label: 'Waiting', color: colors.warn, bg: colors.warnSoft },
   ACCEPTED: { label: 'Accepted', color: colors.success, bg: colors.successSoft },
   DECLINED: { label: 'Declined', color: colors.danger, bg: colors.dangerSoft },
   WITHDRAWN: { label: 'Withdrawn', color: colors.muted, bg: colors.surfaceAlt },
@@ -18,6 +20,8 @@ const STATE_TAG: Record<string, { label: string; color: string; bg: string }> = 
 };
 
 export function RequestCard({ request, mode }: { request: RequestItem; mode: 'md' | 'pa' }) {
+  const { user } = useSession();
+  const address = addressOf(user);
   const [busy, setBusy] = useState<'' | 'accept' | 'decline' | 'withdraw'>('');
   const [error, setError] = useState('');
   const tag = STATE_TAG[request.state];
@@ -31,8 +35,8 @@ export function RequestCard({ request, mode }: { request: RequestItem; mode: 'md
         body: {},
         idempotencyKey: what === 'withdraw' ? undefined : newIdempotencyKey(),
       });
-      if (what === 'accept') say("Accepted, Sir. It's on your list.", { interrupt: true });
-      if (what === 'decline') say("Declined, Sir. I've informed them.", { interrupt: true });
+      if (what === 'accept') say(`Accepted, ${address}. It's on your list.`, { interrupt: true });
+      if (what === 'decline') say(`Declined, ${address}. I've informed them.`, { interrupt: true });
       dataChanged.emit();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not reach the server.');

@@ -13,7 +13,7 @@ from django.utils import timezone
 from . import timeutils as tu
 from .models import Kind, Priority, PrivateTask, ReminderAck, ReminderTold, SharedTask, Status, User
 from .services import (
-    busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs, md_private_qs,
+    address_of, busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs, md_private_qs,
     meeting_override_until, pa_tasks_qs, shared_md_tasks_qs,
 )
 
@@ -98,28 +98,29 @@ def reminders_for(user: User, hours: int = 48) -> dict:
     prefs = get_prefs(user)  # the reader's own lead times and day-reminder hour
 
     if user.is_md:
+        sir = address_of(user)
         for task in md_private_qs(user).filter(**open_filter):
-            items += _task_reminders(task, "private", True, "Sir", prefs)
+            items += _task_reminders(task, "private", True, sir, prefs)
         for task in shared_md_tasks_qs().filter(**open_filter):
-            items += _task_reminders(task, "shared", False, "Sir", prefs)
+            items += _task_reminders(task, "shared", False, sir, prefs)
         # Anything involving the PA is for both: the MD is reminded too.
         pa = get_pa()
         pa_name = pa.spoken_name if pa else "your PA"
         for task in pa_tasks_qs().filter(**open_filter).exclude(origin=SharedTask.Origin.PA_SELF):
             meeting = task.origin == SharedTask.Origin.MD_MEET_PA
-            # The check-in on her tasks is hers, not his (he is told once that it is due, and in the evening).
-            for item in _task_reminders(task, "shared", False, "Sir", prefs, checkin=meeting):
+            # The check-in on the PA's tasks is the PA's, not the MD's (told once that it is due, and in the evening).
+            for item in _task_reminders(task, "shared", False, sir, prefs, checkin=meeting):
                 lead = _lead_phrase(lead_for(task, prefs))
                 if meeting:
                     item["title"] = f"Meeting with {pa_name}: {task.title}"
-                    item["spoken"] = (f"Sir, your meeting with {pa_name} starts {lead}: {task.title}."
+                    item["spoken"] = (f"{sir}, your meeting with {pa_name} starts {lead}: {task.title}."
                                       if item["label"] == "before" else
-                                      f"Sir, your meeting with {pa_name} is starting now: {task.title}.")
+                                      f"{sir}, your meeting with {pa_name} is starting now: {task.title}.")
                 else:
                     item["title"] = f"{pa_name}: {task.title}"
-                    item["spoken"] = (f"Sir, {pa_name}'s task {task.title} is due {lead}."
+                    item["spoken"] = (f"{sir}, {pa_name}'s task {task.title} is due {lead}."
                                       if item["label"] == "before" else
-                                      f"Sir, {pa_name}'s task is due now: {task.title}. Please check with her.")
+                                      f"{sir}, {pa_name}'s task is due now: {task.title}. Please check with {pa_name}.")
                 items.append(item)
     else:
         name = user.spoken_name

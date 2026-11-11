@@ -117,8 +117,11 @@ class WakeService : Service() {
     }
 
     private fun prefetchGreetings() {
-        val address = WakeBus.prefs(this).getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
-        val lines = if (address == "Sir") listOf("जी सर?", "सर?", "Done.") else listOf("जी?", "$address?", "Done.")
+        val prefs = WakeBus.prefs(this)
+        val address = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
+        val addressHi = prefs.getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
+        val isMd = prefs.getBoolean(WakeBus.KEY_IS_MD, address == "Sir")
+        val lines = if (isMd) listOf("जी $addressHi?", "$addressHi?", "Done.") else listOf("जी?", "$address?", "Done.")
         GrokVoice.prefetch(this, lines)
     }
 
@@ -171,6 +174,7 @@ class WakeService : Service() {
             var silentChunks = 0
             var envelope = 0.0
             var prevScore = 0f
+            var streak = 0        // slices in a row scoring at least STREAK_THRESHOLD
             var cooldownUntil = 0L
             var windowMax = 0f
             var windowLevel = 0.0
@@ -235,6 +239,7 @@ class WakeService : Service() {
                         failures = 0
                         silentChunks = 0
                         prevScore = 0f
+                        streak = 0
                         envelope = 0.0
                         detector.reset()  // nothing from before the pause may colour the first second back
                         Log.i(TAG, "listening again")
@@ -311,14 +316,23 @@ class WakeService : Service() {
                         lastReport = now
                     }
 
-                    // One very sure slice, or two fairly sure slices in a row (80 ms each).
-                    val heard = score >= THRESHOLD || (score >= SOFT_THRESHOLD && prevScore >= SOFT_THRESHOLD)
+                    // A real "Hey JARVIS" lasts well over half a second, so it scores high on several 80 ms slices in a
+                    // row: one very sure slice, two fairly sure, or three moderately sure ones. Never from amplified room
+                    // noise: the sound itself (before the gain) must be at a speaking level.
+                    streak = if (score >= STREAK_THRESHOLD) streak + 1 else 0
+                    val speaking = envelope >= MIN_SPEECH_LEVEL
+                    val heard = speaking && (score >= THRESHOLD || (score >= PAIR_THRESHOLD && prevScore >= PAIR_THRESHOLD)
+                            || streak >= STREAK_SLICES)
                     val was = prevScore
+                    val run = streak
                     prevScore = score
                     if (heard && now > cooldownUntil) {
                         cooldownUntil = now + 2500
                         prevScore = 0f
-                        Log.i(TAG, String.format("Hey JARVIS detected (score %.3f, previous %.3f, gain %.1f)", score, was, gain))
+                        streak = 0
+                        Log.i(TAG, String.format("Hey JARVIS detected (score %.3f, previous %.3f, streak %d, level %.0f, gain %.1f)",
+                            score, was, run, envelope, gain))
+                        WakeBus.countWake(this)
                         onWakeWord()
                     }
                 }
@@ -373,7 +387,7 @@ class WakeService : Service() {
             if (!WakeBus.appInForeground && WakeBus.pendingWake) {
                 Log.w(TAG, "App did not come to the front (MIUI background pop-up blocked?)")
                 val address = WakeBus.prefs(this).getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
-                val sir = if (address == "Sir") "सर" else address
+                val sir = WakeBus.prefs(this).getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
                 TtsEngine.speak(TtsEngine.Request("wake-" + System.nanoTime(),
                     "जी $sir? जार्विस खोलने के लिए नोटिफ़िकेशन दबाइए।", "Ji $address? Tap the notification to open JARVIS.", "hi-IN", 0.95f))
                 notifier.showWakeFallback(address)
@@ -432,11 +446,18 @@ class WakeService : Service() {
         const val ACTION_STOP = "com.qtcinfotech.jarvis.wake.STOP"
         const val EXTRA_WAKE = "jarvis_wake"
         const val EXTRA_NO_MIC = "jarvis_no_mic"
-        private const val THRESHOLD = 0.5f          // one slice this sure is enough
-        private const val SOFT_THRESHOLD = 0.3f     // or two slices in a row this sure
+        /** The reminder / alert key of a tapped notification: the app opens straight on it and asks its question. */
+        const val EXTRA_OPEN_KEY = "jarvis_open_key"
+        private const val THRESHOLD = 0.7f          // one slice this sure is enough
+        private const val PAIR_THRESHOLD = 0.45f    // or two slices in a row this sure
+        private const val STREAK_THRESHOLD = 0.35f  // or STREAK_SLICES in a row this sure
+        private const val STREAK_SLICES = 3
+        // The sound itself (before the gain) must be at least this, or nobody is speaking: hiss boosted to a "speech"
+        // level never counts. Set low for now; the detection log prints the level, so it can be raised from evidence.
+        private const val MIN_SPEECH_LEVEL = 300.0
         private const val TARGET_LEVEL = 3000.0     // the loudness normal speech near the phone has
         private const val NOISE_FLOOR = 110.0       // below this it is room noise: never amplified
-        private const val MAX_GAIN = 6.0
+        private const val MAX_GAIN = 3.0            // quiet speech is helped a little; hiss is never turned into "speech"
         private const val SILENT_CHUNKS_LIMIT = 75  // 6 s of pure zeros
         private const val WATCH_EVERY_MS = 30_000L  // a message from Sir or Mansi reaches a closed app within half a minute
 

@@ -25,7 +25,8 @@ MAX_HISTORY = 8
 CONFIRMABLE = TASK_ACTIONS | {"accept_request", "decline_request", "complete", "remember", "change_task", "delete_task"}
 AI_DONE_OK = {"private_task", "pa_task", "pa_meeting", "md_request", "remember", "accept_request", "decline_request",
               "complete", "pa_self_task"}
-EMPTY = {"history": [], "pending": None, "choices": None, "offer": None}
+EMPTY = {"history": [], "pending": None, "choices": None, "offer": None,
+         "last_view": None}  # the list JARVIS showed last (see services.remember_last_view); kept, not used here
 
 
 # ------------------------------------------------------------------ state
@@ -61,7 +62,7 @@ def _heading(p: dict) -> str:
         "private_task": "Personal task", "pa_task": f"Task for {pa}", "pa_meeting": f"Meeting with {pa}",
         "delegation": f"Task for {(p.get('staff') or {}).get('name', 'a staff member')}",
         "team_delegation": f"Task for {(p.get('team') or {}).get('label', 'the team')}",
-        "md_request": "Request to Sir", "pa_self_task": "Your own task",
+        "md_request": f"Request to {services.md_address()}", "pa_self_task": "Your own task",
         "accept_request": "Accept request", "decline_request": "Decline request",
         "complete": "Mark as done", "remember": "Remember this", "choose_destination": "Where should this go?",
         "change_task": "Change task", "delete_task": "Delete task",
@@ -92,7 +93,7 @@ def _choices_for(draft: dict) -> dict | None:
 
 # ------------------------------------------------------------------ the turn
 def turn(user: User, text: str, *, event: str = "", locked: bool = False, private_ok: bool = True) -> dict:
-    address = "Sir" if user.is_md else user.spoken_name
+    address = services.address_of(user)
     state = _load(user)
     if event == "reset":
         reset(user)
@@ -182,8 +183,8 @@ def _wake(user: User, state: dict, address: str, private_ok: bool) -> dict:
     now = timezone.now()
     missed = ([r for r in reminders_for(user, hours=1)["reminders"] if datetime.fromisoformat(r["fire_at"]) <= now]
               if OFFER_MISSED_ON_WAKE else [])
-    greet_show = "Ji Sir?" if user.is_md else f"Ji {user.spoken_name}?"
-    greet_hi = "जी सर?" if user.is_md else "जी?"
+    greet_show = f"Ji {address}?"
+    greet_hi = f"जी {services.address_hi_of(user)}?" if user.is_md else "जी?"
     if not missed:
         resp = _resp(greet_show, greet_hi, "hi", listen=True, action="greet")
     else:
@@ -269,7 +270,8 @@ def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
         services.update_pa_self_task(user, t["id"], clean, version)
         return False
     if SharedTask.objects.filter(id=t["id"], assignee_type=SharedTask.Assignee.PA).exists():
-        raise ServiceError("forbidden", "only Sir can change a task he gave you. You can update its status.", 403)
+        he = services.md_pronouns()[0]
+        raise ServiceError("forbidden", f"only {services.md_address()} can change a task {he} gave you. You can update its status.", 403)
     services.propose_change(user, t["id"], clean, version, reason)
     return True
 
@@ -277,6 +279,7 @@ def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
 def _execute(user: User, p: dict, address: str) -> dict:
     a = p.get("action")
     targets = p.get("targets") or ([p["target"]] if p.get("target") else [])
+    sir, he = services.md_address(), services.md_pronouns()[0]
     try:
         if a in TASK_ACTIONS and not (p.get("title") or "").strip():
             raise ServiceError("invalid", "the task has no title.", 422)
@@ -293,7 +296,7 @@ def _execute(user: User, p: dict, address: str) -> dict:
                       else f"Given to {pa}, {address}. I'll remind you both and tell you when it's done.")
         elif a == "md_request":
             services.create_md_request(user, data)
-            spoken = f"Sent to Sir, {address}. I'll tell you when he answers."
+            spoken = f"Sent to {sir}, {address}. I'll tell you when {he} answers."
         elif a == "pa_self_task":
             data["description"] = p.get("transcript", "")
             services.create_pa_self_task(user, data)
@@ -336,9 +339,9 @@ def _execute(user: User, p: dict, address: str) -> dict:
                 raise ServiceError("invalid", "I don't know which task.", 422)
             to_sir = sum(1 for t in targets if _complete_one(user, t))
             if len(targets) == 1:
-                spoken = f"Sent to Sir to confirm, {address}." if to_sir else f"Marked as done, {address}."
+                spoken = f"Sent to {sir} to confirm, {address}." if to_sir else f"Marked as done, {address}."
             else:
-                spoken = f"Marked {len(targets)} as done, {address}." + (f" {to_sir} sent to Sir to confirm." if to_sir else "")
+                spoken = f"Marked {len(targets)} as done, {address}." + (f" {to_sir} sent to {sir} to confirm." if to_sir else "")
         elif a == "remember":
             services.add_memory(user, p.get("memory_text", ""))
             spoken = f"Done, {address}. I'll remember that."
@@ -355,7 +358,7 @@ def _execute(user: User, p: dict, address: str) -> dict:
             to_sir = sum(1 for t in targets if _change_one(user, t, changes, reason))
             what = "Changed" if a == "change_task" else "Deleted"
             if to_sir:
-                spoken = f"Sent to Sir to confirm, {address}."
+                spoken = f"Sent to {sir} to confirm, {address}."
             elif len(targets) == 1:
                 spoken = f"{what}, {address}." + (" It's cancelled, not erased." if a == "delete_task" else "")
             else:

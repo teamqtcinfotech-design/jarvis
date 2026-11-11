@@ -1,6 +1,7 @@
 /** The task lists, as menu items (phone drawer) or rail icons (tablet). One place, so counts never differ. */
 import type { DrawerItem } from './Drawer';
 import type { EngineValueLite } from './navTypes';
+import { mdWord } from '@/lib/names';
 import { colors } from '@/lib/theme';
 import type { Dashboard, SessionUser } from '@/lib/types';
 
@@ -8,6 +9,7 @@ const open = (items: { status: string }[] | undefined) => (items ?? []).filter((
 
 export function navItems(user: SessionUser, data: Dashboard | null, engine: EngineValueLite): DrawerItem[] {
   const isMD = user.role === 'MD';
+  const md = mdWord(data);
   const pending = data?.requests.filter((r) => r.state === 'PENDING').length ?? 0;
   const privateCount = data ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime].filter((t) => t.scope === 'private').length : 0;
   return [
@@ -22,9 +24,9 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
           { key: 'pa', label: 'Given to your PA', icon: 'person-outline', count: open(data?.pa_tasks) },
         ]
       : [
-          { key: 'requests', label: 'Waiting for Sir', icon: 'hand-left-outline', count: pending, tone: colors.gold },
-          { key: 'md_tasks', label: 'Sir’s tasks from you', icon: 'person-outline', count: open(data?.md_tasks) },
-          { key: 'busy', label: 'When Sir is busy', icon: 'time-outline' },
+          { key: 'requests', label: `Waiting for ${md}`, icon: 'hand-left-outline', count: pending, tone: colors.gold },
+          { key: 'md_tasks', label: `${md}’s tasks from you`, icon: 'person-outline', count: open(data?.md_tasks) },
+          { key: 'busy', label: `When ${md} is busy`, icon: 'time-outline' },
         ]),
     { key: 'staff', label: 'Given to staff', icon: 'briefcase-outline', count: open(data?.delegated) },
     { key: 'held', label: 'Held alerts', icon: 'notifications-outline', count: engine.held.length, tone: colors.danger, detail: 'Kept quiet while you were busy' },

@@ -45,6 +45,36 @@ object WakeBus {
     fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences("jarvis_wake", Context.MODE_PRIVATE)
 
+    // ---- how often "Hey JARVIS" fired today, and how often nothing was said after it (a false wake, most likely).
+    private fun today(): String = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+
+    @Synchronized
+    private fun bump(context: Context, key: String) {
+        val p = prefs(context)
+        val day = today()
+        val e = p.edit()
+        if (p.getString(KEY_WAKE_DAY, "") != day) {
+            e.putString(KEY_WAKE_DAY, day).putInt(KEY_WAKE_COUNT, 0).putInt(KEY_WAKE_EMPTY, 0).apply()
+        }
+        e.putInt(key, prefs(context).getInt(key, 0) + 1).apply()
+    }
+
+    fun countWake(context: Context) = bump(context, KEY_WAKE_COUNT)
+    fun countEmptyWake(context: Context) = bump(context, KEY_WAKE_EMPTY)
+
+    fun wakeCounts(context: Context): Pair<Int, Int> {
+        val p = prefs(context)
+        if (p.getString(KEY_WAKE_DAY, "") != today()) return 0 to 0
+        return p.getInt(KEY_WAKE_COUNT, 0) to p.getInt(KEY_WAKE_EMPTY, 0)
+    }
+
+    /** The key of the reminder or alert whose notification was tapped to open the app (consumed once by the app). */
+    @Volatile var pendingOpenKey: String? = null
+
+    const val KEY_WAKE_DAY = "wake_day"
+    const val KEY_WAKE_COUNT = "wake_count"
+    const val KEY_WAKE_EMPTY = "wake_empty"
+
     /** The service should run (someone is signed in on this phone). */
     const val KEY_ENABLED = "enabled"
     /** Listen for "Hey JARVIS" as well (needs the microphone). */
@@ -53,6 +83,11 @@ object WakeBus {
     const val KEY_ACCESS = "access"
     const val KEY_REFRESH = "refresh"
     const val KEY_ADDRESS = "address"
+    /** The form of address in Devanagari ("सर", "मैम") for the Hindi lines, and whether this user is the MD. */
+    const val KEY_ADDRESS_HI = "address_hi"
+    const val KEY_IS_MD = "is_md"
+    /** The PA's name as JARVIS says it (for the closed-app recogniser's word list). */
+    const val KEY_PA_NAME = "pa_name"
     const val KEY_SPEAK_LOCKED = "speak_locked"
     const val KEY_SPOKEN = "spoken_keys"
     const val KEY_PUSH_TOKEN = "push_token"

@@ -22,9 +22,10 @@ function Shell() {
   );
   if (!user) return stack;
   if (locked) return <LockScreen />;
+  // The dashboard comes first: the alert engine reads the PA's name and the MD's form of address from it.
   return (
-    <AlertEngineProvider>
-      <DashboardProvider>
+    <DashboardProvider>
+      <AlertEngineProvider>
         <ConversationProvider>
           <View style={{ flex: 1 }}>
             {stack}
@@ -32,8 +33,8 @@ function Shell() {
             <HeldSheet />
           </View>
         </ConversationProvider>
-      </DashboardProvider>
-    </AlertEngineProvider>
+      </AlertEngineProvider>
+    </DashboardProvider>
   );
 }
 

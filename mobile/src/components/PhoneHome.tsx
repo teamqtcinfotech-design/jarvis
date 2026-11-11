@@ -12,6 +12,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useAlertEngine } from '@/lib/alertEngine';
 import { useConversation } from '@/lib/conversation';
 import { greeting, timeOf } from '@/lib/format';
+import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
 import type { SessionUser, TaskItem } from '@/lib/types';
@@ -89,7 +90,9 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   }, [newestAnswer]);
 
   const isMD = user.role === 'MD';
-  const address = isMD ? 'Sir' : user.name;
+  const address = addressOf(user);
+  const paName = data?.pa_name || 'your PA';
+  const md = mdWord(data);
   const presence = engine.presence.state;
   const items = navItems(user, data, engine);
   const pending = data?.requests.filter((r) => r.state === 'PENDING').length ?? 0;
@@ -134,16 +137,16 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         { kind: 'people', label: 'My staff', icon: 'people-outline' },
         { kind: 'done', label: 'Completed', icon: 'checkmark-done-outline' },
         { kind: 'late', label: 'Late items', icon: 'alert-circle-outline' },
-        { kind: 'pa', label: 'With Mansi', icon: 'person-outline' },
+        { kind: 'pa', label: `With ${paName}`, icon: 'person-outline' },
       ]
     : [
         { kind: 'today', label: 'My day', icon: 'today-outline' },
         { kind: 'pa', label: 'My tasks', icon: 'list-outline' },
-        { kind: 'busy', label: 'When Sir is busy', icon: 'time-outline' },
+        { kind: 'busy', label: `When ${md} is busy`, icon: 'time-outline' },
         { kind: 'performance', label: 'Staff performance', icon: 'podium-outline' },
         { kind: 'people', label: 'Staff list', icon: 'people-outline' },
         { kind: 'done', label: 'Completed', icon: 'checkmark-done-outline' },
-        { kind: 'requests', label: 'Waiting for Sir', icon: 'hand-left-outline' },
+        { kind: 'requests', label: `Waiting for ${md}`, icon: 'hand-left-outline' },
       ];
 
   return (
@@ -203,7 +206,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           <Tile icon="today-outline" label="Today" value={data?.today.length ?? '–'} toneKey="accent" onPress={() => select('today')} />
           <Tile icon="alert-circle-outline" label="Late" value={data?.overdue.length ?? '–'} toneKey={data?.overdue.length ? 'danger' : 'muted'} onPress={() => select('late')} />
           <Tile icon="checkmark-done-outline" label="Done today" value={data?.completed_today ?? '–'} toneKey="success" onPress={() => report('done', 'Completed')} />
-          <Tile icon="hand-left-outline" label={isMD ? 'Need your OK' : 'Waiting for Sir'} value={pending} toneKey={pending ? 'warn' : 'muted'} onPress={() => select('requests')} />
+          <Tile icon="hand-left-outline" label={isMD ? 'Need your OK' : `Waiting for ${md}`} value={pending} toneKey={pending ? 'warn' : 'muted'} onPress={() => select('requests')} />
         </View>
 
         {/* Reports */}

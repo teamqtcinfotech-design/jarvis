@@ -5,10 +5,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ApiError, api } from '@/lib/api';
 import { dataChanged } from '@/lib/bus';
 import { dayLabel, timeOf } from '@/lib/format';
+import { addressOf, mdWord } from '@/lib/names';
 import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors, kindLabel, radius } from '@/lib/theme';
 import type { TaskItem } from '@/lib/types';
+import { useDashboard } from '@/lib/useDashboard';
 
 import { Button, Icon, PriorityTag, Tag, Txt } from './ui';
 
@@ -27,6 +29,8 @@ function shiftDay(item: TaskItem, days: number) {
 
 export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: () => void }) {
   const { user } = useSession();
+  const { data: dash } = useDashboard();
+  const md = mdWord(dash);
   const insets = useSafeAreaInsets();
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
@@ -37,12 +41,12 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
   const isMD = user?.role === 'MD';
   const isStaff = item.assignee?.type === 'STAFF';
   const isPaTask = item.assignee?.type === 'PA';
-  const ownPaTask = isPaTask && item.origin === 'PA_SELF'; // Mansi's own task: Sir can see it but is not told about each step
-  const toldSir = ownPaTask ? '' : " I've told Sir,";
+  const ownPaTask = isPaTask && item.origin === 'PA_SELF'; // the PA's own task: the MD can see it but is not told about each step
+  const toldSir = ownPaTask ? '' : ` I've told ${md},`;
   const paStatus = (status: string, note = '') =>
     api(`/pa-tasks/${item.id}/status/`, { method: 'POST', body: { status, expected_version: item.version, note } });
   const base = item.scope === 'private' ? `/private-tasks/${item.id}/` : `/shared-tasks/${item.id}/`;
-  const address = isMD ? 'Sir' : user?.name ?? '';
+  const address = addressOf(user);
 
   const run = async (label: string, fn: () => Promise<{ status: number }>, spokenOk: string) => {
     setBusy(label);
@@ -50,9 +54,9 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
     try {
       const res = await fn();
       const proposed = res.status === 202;
-      say(proposed ? `${address}, sent to Sir for approval.` : spokenOk, { interrupt: true });
+      say(proposed ? `${address}, sent to ${md} for approval.` : spokenOk, { interrupt: true });
       dataChanged.emit();
-      if (proposed) setMessage('Sent to MD for approval. The task stays as it is until MD accepts.');
+      if (proposed) setMessage(`Sent to ${md} for approval. The task stays as it is until ${md} accepts.`);
       else onClose();
     } catch (e) {
       setMessage(e instanceof ApiError ? e.message : 'Could not reach the server.');
@@ -113,7 +117,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
               </Txt>
             ) : (
               <Txt variant="small">
-                Given by Sir to <Txt variant="heading" style={{ fontSize: 13 }}>{item.assignee.staff_name}</Txt> · {item.status_label}
+                Given by {md} to <Txt variant="heading" style={{ fontSize: 13 }}>{item.assignee.staff_name}</Txt> · {item.status_label}
               </Txt>
             )}
             {item.hold_reason ? <Txt variant="small" style={{ marginTop: 2 }}>On hold: {item.hold_reason}</Txt> : null}

@@ -9,6 +9,7 @@ import { TaskSheet } from '@/components/TaskSheet';
 import { Empty, IconButton, Tag, Txt } from '@/components/ui';
 import { relativeAgo } from '@/lib/format';
 import { useLayout } from '@/lib/layout';
+import { mdHe, mdWord } from '@/lib/names';
 import { useSession } from '@/lib/session';
 import { colors } from '@/lib/theme';
 import type { Dashboard, TaskItem } from '@/lib/types';
@@ -29,25 +30,33 @@ const SECTIONS: Record<string, Section> = {
   upcoming: { title: 'Coming up', empty: 'Nothing coming up this week.', items: (d) => d.upcoming },
   nodate: { title: 'No date yet', empty: 'No undated tasks.', items: (d) => d.anytime },
   private: { title: 'Private reminders', empty: 'No private reminders.', items: (d) => all(d).filter((t) => t.scope === 'private') },
-  pa: { title: 'Given to your PA', empty: 'Say “Mansi ko bolo…” to give your PA a task.', staff: true, items: (d) => d.pa_tasks ?? [] },
-  md_tasks: { title: 'Sir’s tasks from your requests', empty: 'None yet.', items: (d) => d.md_tasks ?? [] },
+  pa: { title: 'Given to your PA', empty: 'Say “PA ko bolo…” to give your PA a task.', staff: true, items: (d) => d.pa_tasks ?? [] },
+  md_tasks: { title: 'Tasks from your requests', empty: 'None yet.', items: (d) => d.md_tasks ?? [] },
   staff: { title: 'Given to staff', empty: 'Say “Ramesh ko bolo…” to give work to someone in the team.', staff: true, items: (d) => d.delegated },
 };
 
+/** Signed out (by hand, or the login expired) while a list is open: go to the login page before the screen below
+ *  runs, because the dashboard it depends on is gone the moment the user is. */
 export default function ListScreen() {
-  const { section = 'today' } = useLocalSearchParams<{ section: string }>();
   const { user } = useSession();
+  if (!user) return <Redirect href="/login" />;
+  return <ListBody user={user} />;
+}
+
+function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['user']> }) {
+  const { section = 'today' } = useLocalSearchParams<{ section: string }>();
   const router = useRouter();
   const { data, error, updatedAt, reload } = useDashboard();
   const { isTablet } = useLayout();
   const [openTask, setOpenTask] = useState<TaskItem | null>(null);
-  if (!user) return <Redirect href="/login" />;
   const isMD = user.role === 'MD';
 
   const back = () => (router.canGoBack() ? router.back() : router.replace('/'));
+  const md = mdWord(data);
   let title = SECTIONS[section]?.title ?? 'Tasks';
-  if (section === 'requests') title = isMD ? 'Need your OK' : 'Waiting for Sir';
-  if (section === 'busy') title = 'When Sir is busy today';
+  if (section === 'requests') title = isMD ? 'Need your OK' : `Waiting for ${md}`;
+  if (section === 'md_tasks') title = `${md}’s tasks from your requests`;
+  if (section === 'busy') title = `When ${md} is busy today`;
 
   let body: React.ReactNode = null;
   if (!data) {
@@ -56,21 +65,23 @@ export default function ListScreen() {
     const list = isMD ? data.requests.filter((r) => r.state === 'PENDING') : data.requests.slice(0, 20);
     body = list.length
       ? list.map((r) => <RequestCard key={r.id} request={r} mode={isMD ? 'md' : 'pa'} />)
-      : <Empty text={isMD ? 'Nothing waiting for your decision.' : 'Say “Sir ke liye kal 3 baje…” to send Sir a task.'} />;
+      : <Empty text={isMD ? 'Nothing waiting for your decision.' : `Say “${md} ke liye kal 3 baje…” to send ${md} a task.`} />;
   } else if (section === 'busy') {
     const busy = data.md_busy_today ?? [];
     body = (
       <View style={s.busyCard}>
         {busy.length ? busy.map((w) => <Tag key={w.start} label={w.label} icon="time-outline" color={colors.ink} bg={colors.goldSoft} />) : <Txt variant="small">No busy times today.</Txt>}
-        <Txt variant="caption" style={{ marginTop: 8, width: '100%' }}>Sir’s personal plans are private. You only see when he is busy.</Txt>
+        <Txt variant="caption" style={{ marginTop: 8, width: '100%' }}>{md}’s personal plans are private. You only see when {mdHe(data)} is busy.</Txt>
       </View>
     );
   } else {
     const sec = SECTIONS[section] ?? SECTIONS.today;
     const items = sec.items(data);
+    // The PA's real name in the hint, not a typed-in one.
+    const empty = section === 'pa' && data.pa_name ? `Say “${data.pa_name} ko bolo…” to give ${data.pa_name} a task.` : sec.empty;
     body = items.length
       ? items.map((t) => <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} showStaffStatus={sec.staff} />)
-      : <Empty text={sec.empty} />;
+      : <Empty text={empty} />;
   }
 
   return (

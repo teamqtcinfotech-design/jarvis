@@ -86,7 +86,12 @@ object TtsEngine {
      * JARVIS speaks in the Grok voice; if that cannot be reached before any sound has played (offline, voice off,
      * daily limit), the phone's own voice says this sentence instead.
      */
-    fun speak(req: Request) {
+    /** "PA" is read by every voice as a word ("paa"); as "P.A." it is said letter by letter. Shown text keeps "PA". */
+    private val PA_WORD = Regex("\\bPA\\b")
+    fun forSpeech(text: String): String = PA_WORD.replace(text, "P.A.")
+
+    fun speak(raw: Request) {
+        val req = raw.copy(text = forSpeech(raw.text), fallback = raw.fallback?.let { forSpeech(it) })
         Log.i(TAG, "speak(${req.lang}): ${req.text.take(140)}")  // one line per sentence, so a test can see what was said
         val ctx = appContext
         if (ctx != null && GrokVoice.enabled(ctx)) {

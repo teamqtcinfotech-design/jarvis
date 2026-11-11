@@ -18,8 +18,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
 
 import { useConversation } from '@/lib/conversation';
+import { mdWord } from '@/lib/names';
 import { useSession } from '@/lib/session';
 import { colors, fonts, radius } from '@/lib/theme';
+import { useDashboard } from '@/lib/useDashboard';
 
 import { DataCard } from './DataCard';
 import { DraftCard } from './DraftCard';
@@ -100,6 +102,7 @@ function useKeyboardHeight() {
 export function AssistantStage() {
   const conv = useConversation();
   const { user } = useSession();
+  const { data } = useDashboard();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
@@ -179,9 +182,10 @@ export function AssistantStage() {
     setTyping(false);
     conv.micPress();
   };
+  const md = mdWord(data);
   const suggestions = isMD
-    ? ['Aaj ka plan kya hai?', 'Meri staff ki list dikhao', 'Mansi kal kya kar rahi hai?', 'Kal 11 baje Sharma ji ke saath meeting']
-    : ['Sir aaj free kab hain?', 'Mere tasks dikhao', 'Sir ke liye kal 3 baje bank meeting', 'Kya kya ho gaya?'];
+    ? ['Aaj ka plan kya hai?', 'Meri staff ki list dikhao', `${data?.pa_name || 'PA'} ke kal ke tasks dikhao`, 'Kal 11 baje Sharma ji ke saath meeting']
+    : [`${md} aaj free kab hain?`, 'Mere tasks dikhao', `${md} ke liye kal 3 baje bank meeting`, 'Kya kya ho gaya?'];
   const recent = conv.draft ? conv.messages.slice(-2) : conv.messages.slice(-6);
 
   // Where the orb sits. It is one orb the whole time: it only moves and changes size.

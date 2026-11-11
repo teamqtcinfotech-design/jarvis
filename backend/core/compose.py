@@ -23,7 +23,7 @@ Rules:
 - Mention urgency only when the priority is URGENT or HIGH ("urgent", "high priority"). Never mention a normal or low priority.
 - No filler: no "kindly requests", "at your earliest convenience", "please be informed", "as it is marked".
 - Same language style as the sender's own words: English, or Hinglish in Roman letters. No Devanagari.
-- The MD speaks to his assistant politely but briefly ("please"); the assistant speaks to Sir respectfully ("Sir, ...").
+- The MD speaks to the assistant politely but briefly ("please"); the assistant addresses the MD respectfully by the exact word given as md_address in the facts ("Sir, ..." / "Ma'am, ..."). In the examples below "Sir" stands for md_address and "Mansi" for the assistant's real name (recipient / sender).
 - Do not sign off, do not add greetings like "hope you are well", do not mention JARVIS.
 - Output only the message text.
 
@@ -37,7 +37,10 @@ def compose(kind: str, sender: str, recipient: str, facts: dict, fallback: str, 
     """kind: task_for_pa | meeting_with_pa | request_to_md | change_request. Returns the message (or the fallback)."""
     if not ai_brain.ai_available():
         return fallback
-    payload = {"kind": kind, "sender": sender, "recipient": recipient, **{k: v for k, v in facts.items() if v}}
+    from . import services  # local import: services imports compose inside its functions
+
+    payload = {"kind": kind, "sender": sender, "recipient": recipient, "md_address": services.md_address(),
+               **{k: v for k, v in facts.items() if v}}
     try:
         response = ai_brain._get_client().messages.create(  # noqa: SLF001 — same client, same timeouts
             model=settings.JARVIS_AI_COMMAND_MODEL,
