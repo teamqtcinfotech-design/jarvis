@@ -100,7 +100,11 @@ def forget_device(user, token: str) -> int:
 
 # ------------------------------------------------------------------ sending
 def payload_for(alert: Alert) -> dict[str, str]:
-    """Everything the phone needs to show and speak the alert without another round trip (FCM allows 4 KB)."""
+    """Everything the phone needs to show and speak the alert without another round trip (FCM allows 4 KB).
+    The spoken line is in the recipient's current language."""
+    from . import lang
+
+    spoken = alert.spoken_text_hi if lang.current(alert.recipient) == "hi" and alert.spoken_text_hi else alert.spoken_text
     return {
         "type": "alert",
         "id": str(alert.id),
@@ -108,7 +112,7 @@ def payload_for(alert: Alert) -> dict[str, str]:
         "priority": alert.priority,
         "title": alert.title[:200],
         "body": (alert.body or "")[:1500],
-        "spoken": (alert.spoken_text or "")[:1500],
+        "spoken": (spoken or "")[:1500],
         "ref_type": alert.ref_type,
         "ref_id": alert.ref_id,
     }

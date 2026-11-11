@@ -193,14 +193,9 @@ def is_overdue(task, now: datetime | None = None) -> bool:
     return False
 
 
-def default_announcement(title: str, kind: str, for_name: str = "Sir") -> str:
-    if kind == Kind.MEETING:
-        return f"{for_name}, your meeting {title} is coming up."
-    if kind == Kind.CALL:
-        return f"{for_name}, reminder to call: {title}."
-    if kind == Kind.PAYMENT:
-        return f"{for_name}, payment reminder: {title}."
-    return f"{for_name}, reminder: {title}."
+# A task's "announcement" holds only the person's OWN reminder line ("remind me: take the blue file"); every other
+# reminder sentence is built when it is served (reminders.py), so it follows the reader's language and the MD's
+# form of address as they are today, not as they were when the task was written down.
 
 
 # --------------------------------------------------------------------------- serialisation
@@ -269,13 +264,14 @@ def shared_item(task: SharedTask) -> dict:
 
 def request_item(req: TaskRequest) -> dict:
     payload = req.payload or {}
-    due_label = ""
+    due_label = due_label_hi = ""
     if payload.get("due_date"):
         d = date.fromisoformat(payload["due_date"])
         if payload.get("due_time"):
-            due_label = tu.due_phrase("TIMED", d, tu.combine_local(d, time.fromisoformat(payload["due_time"])))
+            at = tu.combine_local(d, time.fromisoformat(payload["due_time"]))
+            due_label, due_label_hi = tu.due_phrase("TIMED", d, at), tu.due_phrase_hi("TIMED", d, at)
         else:
-            due_label = tu.fmt_day(d)
+            due_label, due_label_hi = tu.fmt_day(d), tu.fmt_day_hi(d)
     return {
         "id": str(req.id),
         "kind": req.kind,
@@ -284,6 +280,7 @@ def request_item(req: TaskRequest) -> dict:
         "payload": payload,
         "priority": payload.get("priority", req.target.priority if req.target_id else "NORMAL"),
         "due_label": due_label,
+        "due_label_hi": due_label_hi,
         "reason": req.reason,
         "target_id": str(req.target_id) if req.target_id else None,
         "target_title": req.target.title if req.target_id else None,
@@ -323,14 +320,17 @@ ALERT_FRESH_FOR = timedelta(hours=24)   # older than this it is history, never n
 ALERT_LIST_FOR = timedelta(days=7)      # and older than this it is not even listed
 
 
-def alert_item(alert: Alert) -> dict:
+def alert_item(alert: Alert, lang: str = "en") -> dict:
+    """lang = the recipient's current language: the spoken line comes in Hindi when it has a Hindi twin."""
     return {
         "id": str(alert.id),
         "kind": alert.kind,
         "priority": alert.priority,
         "title": alert.title,
         "body": alert.body,
-        "spoken_text": alert.spoken_text,
+        "spoken_text": alert.spoken_text_hi if lang == "hi" and alert.spoken_text_hi else alert.spoken_text,
+        "spoken_text_hi": alert.spoken_text_hi,
+        "spoken_text_en": alert.spoken_text,
         "ref_type": alert.ref_type,
         "ref_id": alert.ref_id,
         "created_at": alert.created_at.isoformat(),
@@ -528,7 +528,7 @@ def create_private_task(md: User, data: dict, source: str = PrivateTask.Source.M
         source=source,
     )
     apply_schedule(task, data, creating=True)
-    task.announcement = data.get("announcement") or default_announcement(task.title, task.kind, md_address())
+    task.announcement = (data.get("announcement") or "")[:300]
     task.save()
     audit(md, "private_task.create", "private_task", task.id)  # no title in audit, by design
     return task
@@ -605,28 +605,31 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
         sync_state=SharedTask.Sync.NOT_REQUIRED,
     )
     apply_schedule(task, {**data, "kind": task.kind}, creating=True)
-    sir = md_address()
-    task.announcement = (f"{pa.spoken_name}, your meeting with {sir} is coming up: {task.title}." if meeting_with_pa
-                         else data.get("announcement") or f"{pa.spoken_name}, reminder for {sir}'s task: {task.title}.")
+    sir, sir_hi = md_address(), md_address_hi()
+    task.announcement = (data.get("announcement") or "")[:300]
     task.save()
     when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
+    when_hi = tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at)
+    pr_en = {"URGENT": "urgent ", "HIGH": "high-priority "}.get(task.priority, "")
+    pr_hi = {"URGENT": "अर्जेंट ", "HIGH": "ज़रूरी "}.get(task.priority, "")
     if meeting_with_pa:
         title = f"Meeting with {sir}"
         spoken = f"{pa.spoken_name}, {sir} has scheduled a meeting with you" + (f" {when}" if when else "") + f": {task.title}."
+        spoken_hi = f"{pa.spoken_name}, {sir_hi} ने आपके साथ मीटिंग रखी है" + (f" {when_hi}" if when_hi else "") + f": {task.title}।"
     else:
         title = f"New task from {sir}"
-        spoken = (f"{pa.spoken_name}, {sir} has given you a new {task.priority.lower()} priority task: "
-                  f"{task.title}" + (f", {when}" if when else "") + ".")
-    # A brief professional note in the MD's name (template above if the AI is unavailable).
+        spoken = f"{pa.spoken_name}, {sir} has given you a new {pr_en}task: {task.title}" + (f", {when}" if when else "") + "."
+        spoken_hi = f"{pa.spoken_name}, {sir_hi} ने आपको एक नया {pr_hi}टास्क दिया है: {task.title}" + (f", {when_hi}" if when_hi else "") + "।"
+    # A brief professional note in the MD's name (template above if the AI is unavailable), in both languages.
     from .compose import compose  # local import: compose depends on the AI client, services must not
-    message = compose(
+    message, message_hi = compose(
         "meeting_with_pa" if meeting_with_pa else "task_for_pa", f"{sir} (the Managing Director)", pa.spoken_name,
         {"title": task.title, "when": when, "priority": task.priority.lower(), "instruction": task.description,
-         "notes": task.notes}, fallback=spoken, user=md,
+         "notes": task.notes}, fallback=spoken, fallback_hi=spoken_hi, user=md,
     )
     Alert.objects.create(
         recipient=pa, kind=Alert.Kind.TASK_ASSIGNED, priority=task.priority, title=title,
-        body=message[:400], spoken_text=message[:400],
+        body=message[:400], spoken_text=message[:400], spoken_text_hi=message_hi[:400],
         ref_type="shared_task", ref_id=str(task.id),
     )
     audit(md, "pa_meeting.create" if meeting_with_pa else "pa_task.create", "shared_task", task.id)
@@ -646,7 +649,7 @@ def create_pa_self_task(pa: User, data: dict) -> SharedTask:
         sync_state=SharedTask.Sync.NOT_REQUIRED,
     )
     apply_schedule(task, data, creating=True)
-    task.announcement = data.get("announcement") or default_announcement(task.title, task.kind, pa.spoken_name)
+    task.announcement = (data.get("announcement") or "")[:300]
     task.save()
     audit(pa, "pa_self_task.create", "shared_task", task.id)
     return task
@@ -691,19 +694,22 @@ def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: 
     task.save()
     md = get_md()
     if md and new_status != old and task.origin != SharedTask.Origin.PA_SELF:
-        name, sir = pa.spoken_name, md_address()
+        name, sir, sir_hi = pa.spoken_name, md_address(), md_address_hi()
+        spoken_hi = ""
         if new_status == Status.COMPLETED:
             title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"{sir}, {name} has completed: {task.title}."
+            spoken_hi = f"{sir_hi}, {name} ने पूरा कर दिया: {task.title}।"
         elif new_status == Status.BLOCKED:
             title, priority = f"{name} put a task on hold", Priority.NORMAL
             spoken = f"{sir}, {name} has put {task.title} on hold. Reason: {task.hold_reason}."
+            spoken_hi = f"{sir_hi}, {name} ने {task.title} होल्ड पर रखा है। कारण: {task.hold_reason}।"
         elif new_status == Status.IN_PROGRESS:
             title, priority, spoken = f"{name} started a task", Priority.LOW, ""
         else:
             title, priority, spoken = f"{name} reopened a task", Priority.LOW, ""
         Alert.objects.create(
             recipient=md, kind=Alert.Kind.STAFF_UPDATE, priority=priority, title=title, body=task.title,
-            spoken_text=spoken[:400], ref_type="shared_task", ref_id=str(task.id),
+            spoken_text=spoken[:400], spoken_text_hi=spoken_hi[:400], ref_type="shared_task", ref_id=str(task.id),
         )
     audit(pa, "pa_task.status", "shared_task", task.id, f"{old} -> {new_status}")
     return task
@@ -733,25 +739,30 @@ def _notify_md_new_request(req: TaskRequest):
     if not md:
         return
     item = request_item(req)
-    pa_name, sir = req.requested_by.spoken_name, md_address()
+    pa_name, sir, sir_hi = req.requested_by.spoken_name, md_address(), md_address_hi()
+    pr_en = {"URGENT": "urgent ", "HIGH": "high-priority "}.get(item["priority"], "")
+    pr_hi = {"URGENT": "अर्जेंट ", "HIGH": "ज़रूरी "}.get(item["priority"], "")
     if req.kind == TaskRequest.Kind.CREATE:
         when = f", {item['due_label']}" if item["due_label"] else ""
-        spoken = f"{sir}, {pa_name} has sent you a new {item['priority'].lower()} priority task: {item['title']}{when}. Would you like to accept it?"
+        when_hi = f", {item['due_label_hi']}" if item["due_label_hi"] else ""
+        spoken = f"{sir}, {pa_name} has sent you a new {pr_en}task: {item['title']}{when}. Would you like to accept it?"
+        spoken_hi = f"{sir_hi}, {pa_name} ने आपको एक नया {pr_hi}टास्क भेजा है: {item['title']}{when_hi}। मंज़ूर करूँ?"
         title = f"New task from {pa_name}"
         kind = "request_to_md"
     else:
         spoken = f"{sir}, {pa_name} has proposed a change to {item['target_title']}. Please review it."
+        spoken_hi = f"{sir_hi}, {pa_name} ने {item['target_title']} में बदलाव सुझाया है। कृपया देख लीजिए।"
         title = f"Change proposed by {pa_name}"
         kind = "change_request"
-    # A courteous note in the PA's name (template above if the AI is unavailable).
+    # A courteous note in the PA's name (template above if the AI is unavailable), in both languages.
     from .compose import compose
-    message = compose(kind, f"{pa_name} (the MD's personal assistant)", sir, {
+    message, message_hi = compose(kind, f"{pa_name} (the MD's personal assistant)", sir, {
         "title": item["title"], "when": item["due_label"], "priority": item["priority"].lower(),
         "reason": req.reason, "target": item.get("target_title") or "",
-    }, fallback=spoken, user=req.requested_by)
+    }, fallback=spoken, fallback_hi=spoken_hi, user=req.requested_by)
     Alert.objects.create(
         recipient=md, kind=Alert.Kind.NEW_REQUEST, priority=item["priority"], title=title,
-        body=message[:400], spoken_text=message[:400], ref_type="request", ref_id=str(req.id),
+        body=message[:400], spoken_text=message[:400], spoken_text_hi=message_hi[:400], ref_type="request", ref_id=str(req.id),
     )
 
 
@@ -787,16 +798,20 @@ def propose_change(pa: User, task_id, changes: dict, expected_version: int, reas
 
 def _notify_requester(req: TaskRequest, accepted: bool, conflict: bool = False):
     item = request_item(req)
+    sir, sir_hi, name = md_address(), md_address_hi(), req.requested_by.spoken_name
     if conflict:
         text = f"Your request '{item['title']}' could not be applied because the task changed. Please send a fresh one."
+        text_hi = f"आपकी रिक्वेस्ट '{item['title']}' लागू नहीं हो सकी क्योंकि टास्क बदल गया था। कृपया नई भेजिए।"
     elif accepted:
-        text = f"MD accepted: {item['title']}."
+        text = f"{sir} accepted: {item['title']}."
+        text_hi = f"{sir_hi} ने मंज़ूर किया: {item['title']}।"
     else:
-        text = f"MD declined: {item['title']}." + (f" Note: {req.decision_note}" if req.decision_note else "")
+        text = f"{sir} declined: {item['title']}." + (f" Note: {req.decision_note}" if req.decision_note else "")
+        text_hi = f"{sir_hi} ने अस्वीकार किया: {item['title']}।" + (f" नोट: {req.decision_note}" if req.decision_note else "")
     Alert.objects.create(
         recipient=req.requested_by, kind=Alert.Kind.REQUEST_DECIDED, priority=Priority.NORMAL,
         title="Request accepted" if accepted else ("Request conflict" if conflict else "Request declined"),
-        body=item["title"], spoken_text=f"{req.requested_by.spoken_name}, {text}"[:400],
+        body=item["title"], spoken_text=f"{name}, {text}"[:400], spoken_text_hi=f"{name}, {text_hi}"[:400],
         ref_type="request", ref_id=str(req.id),
     )
 
@@ -818,7 +833,7 @@ def accept_request(md: User, request_id) -> TaskRequest:
                 origin=SharedTask.Origin.PA_REQUEST, created_by=req.requested_by,
             )
             apply_schedule(task, data, creating=True)
-            task.announcement = data.get("announcement") or default_announcement(task.title, task.kind, md_address())
+            task.announcement = (data.get("announcement") or "")[:300]
             task.save()
             req.resulting_task = task
         else:
@@ -937,7 +952,6 @@ def delegate_to_staff(user: User, data: dict, staff: StaffMember, *, category_ke
             created_by=user, sync_state=SharedTask.Sync.PENDING,
         )
         apply_schedule(task, data, creating=True)
-        task.announcement = f"Follow up with {staff.name}: {task.title}."
         task.save()
         command_id = uuid.uuid4()
         payload = build_create_command(task, str(command_id))
@@ -1056,7 +1070,9 @@ def tell_sender_seen(user: User, alert: Alert) -> Alert | None:
     return Alert.objects.create(
         recipient=md, kind=Alert.Kind.INFO, priority=Priority.NORMAL if loud else Priority.LOW,
         title=f"{user.spoken_name} has seen it", body=title[:400],
-        spoken_text=f"{md_address()}, {user.spoken_name} has seen: {title}."[:400], ref_type="seen", ref_id=str(alert.id)[:64],
+        spoken_text=f"{md_address()}, {user.spoken_name} has seen: {title}."[:400],
+        spoken_text_hi=f"{md_address_hi()}, {user.spoken_name} ने देख लिया: {title}।"[:400],
+        ref_type="seen", ref_id=str(alert.id)[:64],
     )
 
 
@@ -1202,6 +1218,13 @@ PREF_SCHEMA = {
     # How JARVIS addresses the MD (and how the PA's JARVIS refers to the MD): Sir, Ma'am, Madam, or "name".
     "addressAs": {"type": "text", "default": "Sir", "say": "how JARVIS addresses you (Sir, Ma'am, Madam or your name)",
                   "hint": "Sir / Ma'am / Madam / name (= your own name)"},
+    # The language JARVIS replies in: auto = the language of what was just said (Hindi or English), or pinned.
+    "replyLanguage": {"type": "enum", "values": ["auto", "hi", "en"], "default": "auto", "say": "reply language",
+                      "aliases": {"auto": "auto", "match": "auto", "same": "auto", "mixed": "auto", "hinglish": "auto",
+                                  "hindi": "hi", "hi": "hi", "english": "en", "en": "en"},
+                      "labels": {"auto": "the language you speak", "hi": "Hindi", "en": "English"}},
+    # The languages of the last few sentences spoken (kept by core.lang; never set by hand).
+    "langRecent": {"type": "text", "default": "", "say": "recent languages", "hidden": True},
     "voiceAccent": {"type": "enum", "values": ["hi-IN", "en-IN"], "default": "hi-IN", "say": "voice",
                     "aliases": {"hindi": "hi-IN", "hi": "hi-IN", "hi-in": "hi-IN", "english": "en-IN", "en": "en-IN",
                                 "en-in": "en-IN", "indian english": "en-IN"},
@@ -1478,6 +1501,15 @@ def meeting_override_until(prefs: dict) -> datetime | None:
         return None
 
 
+def set_pref_quiet(user: User, key: str, value) -> None:
+    """One setting JARVIS keeps for itself (what it has noticed), stored without an audit line."""
+    if key not in PREF_SCHEMA:
+        return
+    row, _ = UserPrefs.objects.get_or_create(user=user)
+    row.data = {**(row.data or {}), key: value}
+    row.save(update_fields=["data"])
+
+
 def set_prefs(user: User, patch: dict) -> dict:
     expanded = expand_pref_patch(patch or {}, get_prefs(user))
     clean = dict(coerce_pref(k, v) for k, v in expanded.items())
@@ -1679,8 +1711,10 @@ def briefing_facts(user: User, kind: str, conceal_private: bool = False) -> tupl
         m = load["movable"]
         facts["day_load"]["could_move"] = {"title": span_name(m), "to": tu.fmt_day(today + timedelta(days=1))}
 
+    from . import lang as _lang
     address = address_of(user)
     facts["address"] = address  # how the reader is addressed (the briefing writer uses exactly this word)
+    facts["language"] = "Hindi (Devanagari script)" if _lang.current(user) == "hi" else "Indian English"
     hour = tu.now_local().hour
     greeting = {"morning": "Good morning", "evening": "Good evening"}.get(
         kind, "Good morning" if hour < 12 else "Good afternoon" if hour < 17 else "Good evening")

@@ -13,20 +13,21 @@
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { Animated, AppState } from 'react-native';
+import { Animated, AppState, Platform } from 'react-native';
 
 import { type AlertQuestion, type EngineItem, type HeldOffer, questionFor, useAlertEngine } from './alertEngine';
+import { langOfText, replyLang, setReplyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdHe, mdWord, mdWordHi } from './names';
 import { useDashboard } from './useDashboard';
 import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
 import { downloadCsv, downloadPdf, shareText } from './download';
 import { CONFIRMABLE, TASK_DRAFTS, describeDraft } from './drafts';
-import { dayLabel, timeLabel } from './format';
+import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
 import { useSession } from './session';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang } from './speech';
-import type { AskAnswer, DataView, Draft, DraftAction, StaffOption } from './types';
+import type { AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
 import { onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeStart, wakeStatus, wakeSupported } from './wake';
 
@@ -173,7 +174,14 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, presentAlert: () => undefined,
     wake: () => undefined });
 
-  const voice = useVoiceCapture(prefs.listenLang, {
+  // Which language the recogniser starts in. 'auto' is Indian English (Hinglish included) and, on Android 14+, the
+  // phone switches to Hindi by itself. Older phones cannot switch, so there, once the last several turns were all
+  // Hindi, the recogniser starts in Hindi instead. A pinned "Mostly pure Hindi" always wins.
+  const [learnedHindi, setLearnedHindi] = useState(false);
+  const recentLangs = useRef<('hi' | 'en')[]>([]);
+  const canSwitchByItself = Platform.OS === 'android' && Number(Platform.Version) >= 34;
+  const listenLang = prefs.listenLang === 'hi-IN' ? 'hi-IN' : learnedHindi && !canSwitchByItself ? 'hi-IN' : 'auto';
+  const voice = useVoiceCapture(listenLang, {
     hints,
     onFinal: (text) => fns.current.heard(text),
     onError: (message, code) => fns.current.voiceError(message, code),
@@ -195,21 +203,25 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     return () => setVoiceProbe(null);
   }, [setVoiceProbe, probe]);
 
-  // Names the recogniser should expect, so "JARVIS" and "Mansi" are not turned into other words.
+  // Names the recogniser should expect, so "JARVIS", "Mansi" and "Sharma ji" are not turned into other words:
+  // the two of them, the staff, and the contacts this person has explained to JARVIS.
+  const mdName = dash?.md_name ?? '';
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
-    api<{ results: StaffOption[] }>('/staff/')
-      .then((r) => {
-        if (cancelled) return;
-        const names = r.data.results.flatMap((s) => [s.name, s.name.split(' ')[0]]);
-        setHints([...BASE_HINTS, ...new Set(names)].slice(0, 60));
-      })
-      .catch(() => undefined);
+    const people = [address, paName, mdName, md].filter(Boolean);
+    Promise.all([
+      api<{ results: StaffOption[] }>('/staff/').then((r) => r.data.results.map((s) => s.name)).catch(() => [] as string[]),
+      api<{ results: ContactItem[] }>('/contacts/').then((r) => r.data.results.map((c) => c.name)).catch(() => [] as string[]),
+    ]).then(([staff, contacts]) => {
+      if (cancelled) return;
+      const names = [...people, ...staff, ...contacts].flatMap((n) => [n, n.split(' ')[0]]).filter((n) => n.length > 1);
+      setHints([...BASE_HINTS, ...new Set(names)].slice(0, 60));
+    });
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [user, address, paName, mdName, md]);
 
   // ---------------------------------------------------------------- helpers
   const push = (role: Msg['role'], text: string, extra: Partial<Msg> = {}) => {
@@ -406,7 +418,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   // An alert JARVIS brings to him by voice (a tapped notification, or one that is due while he is here): come to
-  // the orb screen, say it, ask its one question, and listen once for the answer.
+  // the orb screen, say it, ask its one question, and listen once for the answer. The alert line arrives in the
+  // reader's language (the server picks); the question follows the line.
   const presentAlert = (item: EngineItem, spoken: string) => {
     const q = questionFor(item, isMD, { en: md, hi: mdHi });
     questionRef.current = q ? { item, q, spoken } : null;
@@ -418,12 +431,14 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     } catch {
       // not mounted yet; the voice still works
     }
-    const line = q?.en ? `${spoken} ${q.en}` : spoken;
+    const hindi = langOfText(spoken) === 'hi';
+    const ask = hindi ? q?.hi : q?.en;
+    const line = ask ? `${spoken} ${ask}` : spoken;
     push('jarvis', line);
     expectingRef.current = !!q;
     silenceRef.current = 0;
     calledRef.current = false;
-    say(line, { interrupt: true, onDone: q ? listen : undefined });
+    say(line, { interrupt: true, lang: hindi ? 'hi' : 'en', fallback: q?.en ? `${spoken} ${q.en}` : spoken, onDone: q ? listen : undefined });
   };
 
   // Woken by "Hey JARVIS": come to the orb screen, greet (and offer held alerts in the same breath), listen.
@@ -461,16 +476,28 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       setBusy('');
       const msg = e instanceof ApiError ? e.message : 'Something went wrong.';
       push('jarvis', msg, { tone: 'error' });
-      say(`Sorry ${address}. ${msg}`, { interrupt: true });
+      sayOwn(`Sorry ${address}. ${msg}`, `माफ़ कीजिए ${addressHi}। ${msg}`, { interrupt: true });
     }
   };
 
+  /** One of the lines the app builds itself, in the language JARVIS is using with this person. */
+  const sayOwn = (en: string, hi: string, opts: { interrupt?: boolean; onDone?: () => void } = {}) => {
+    const t = twin(en, hi);
+    say(t.text, { ...opts, lang: t.lang, fallback: t.fallback });
+  };
+
   const handleDraft = (d: Draft) => {
-    langRef.current = d.reply_language === 'hi' ? 'hi' : 'en';
+    // The server decided the language of this turn; every line the app says from here follows it.
+    setReplyLang(d.reply_language);
+    langRef.current = replyLang();
+    const said: 'hi' | 'en' = d.reply_language === 'hi' ? 'hi' : 'en';
+    recentLangs.current = [...recentLangs.current, said].slice(-6);
+    setLearnedHindi(recentLangs.current.length >= 4 && recentLangs.current.every((l) => l === 'hi'));
     const speakText = d.speak_text || d.spoken_reply;
     const lang: SpeakLang = d.speak_lang === 'hi' ? 'hi' : 'en';
-    // An answer with data: the screen gets a timeline / chart / table while the short reply is spoken.
-    if (d.view && d.action === 'answer') addAnswer(d.view, lastQuestion.current);
+    // An answer with data: the screen gets a timeline / chart / table while the short reply is spoken. The card is
+    // titled by what it shows ("Waiting for Ma'am"), not by the raw words that asked for it.
+    if (d.view && d.action === 'answer') addAnswer(d.view, d.view.title || lastQuestion.current);
 
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
@@ -633,9 +660,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       say(a.speak_text || a.text, { lang: a.speak_lang === 'hi' ? 'hi' : 'en', fallback: a.text, onDone: listen }); // queued after the holding line
     } catch (e) {
       setBusy('');
-      const msg = e instanceof ApiError && e.code === 'timeout' ? 'That search took too long.' : "I couldn't get the answer.";
+      const timeout = e instanceof ApiError && e.code === 'timeout';
+      const msg = timeout ? 'That search took too long.' : "I couldn't get the answer.";
       push('jarvis', `${msg} Please try again.`, { tone: 'error' });
-      say(`Sorry ${address}, ${msg} Please try again.`, { interrupt: true });
+      sayOwn(`Sorry ${address}, ${msg} Please try again.`,
+        `माफ़ कीजिए ${addressHi}, ${timeout ? 'उस खोज में बहुत समय लग गया।' : 'जवाब नहीं मिल पाया।'} फिर से कोशिश कीजिए।`, { interrupt: true });
     }
   };
 
@@ -648,7 +677,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       push('jarvis', res.data.text);
       expectingRef.current = true;
       silenceRef.current = 0;
-      say(res.data.text, { onDone: listen });
+      say(res.data.text, { lang: langOfText(res.data.text), onDone: listen }); // written in the reader's language by the server
     } catch {
       setBusy('');
       push('jarvis', "I couldn't prepare the briefing right now.", { tone: 'error' });
@@ -682,11 +711,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       source: 'VOICE',
     };
     const key = idemKey.current;
+    // "I'll remind you tomorrow at 4 PM." / "कल 4 बजे याद दिला दूँगा।" — the card's day and time in both languages.
+    const whenEn = d.due_date ? ` I'll remind you ${dayLabel(d.due_date).toLowerCase()}${d.due_time ? ` at ${timeLabel(d.due_time)}` : ''}.` : '';
+    const whenHi = d.due_date ? ` ${dayLabelHi(d.due_date)}${d.due_time ? ` ${timeLabelHi(d.due_time)}` : ''} याद दिला दूँगा।` : '';
     try {
+      // Every saved line in both languages: the one JARVIS is using with this person is spoken (see lang.ts).
       let spoken = '';
+      let spokenHi = '';
       if (d.action === 'private_task') {
         await api('/private-tasks/', { method: 'POST', body, idempotencyKey: key });
-        spoken = `Saved, ${address}.` + (d.due_date ? ` I'll remind you ${dayLabel(d.due_date).toLowerCase()}${d.due_time ? ` at ${timeLabel(d.due_time)}` : ''}.` : '');
+        spoken = `Saved, ${address}.${whenEn}`;
+        spokenHi = `सेव हो गया, ${addressHi}।${whenHi}`;
       } else if (d.action === 'delegation') {
         const res = await api<any>('/delegations/', {
           method: 'POST',
@@ -695,9 +730,13 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           timeoutMs: 30000,
         });
         const who = res.data?.assignee?.staff_name ?? 'the staff member';
-        spoken = res.status === 202
-          ? `${address}, sent to ${who}. I'm waiting for the staff app to confirm and will tell you.`
-          : `Done, ${address}. ${who} has the task now. I'll keep track of it.`;
+        if (res.status === 202) {
+          spoken = `${address}, sent to ${who}. I'm waiting for the staff app to confirm and will tell you.`;
+          spokenHi = `${addressHi}, ${who} को भेज दिया। स्टाफ़ ऐप के कन्फ़र्म करने का इंतज़ार है, बता दूँगा।`;
+        } else {
+          spoken = `Done, ${address}. ${who} has the task now. I'll keep track of it.`;
+          spokenHi = `हो गया, ${addressHi}। ${who} के पास टास्क पहुँच गया। मैं नज़र रखूँगा।`;
+        }
       } else if (d.action === 'team_delegation') {
         const res = await api<{ assigned: string[]; pending: string[]; not_assigned: { name: string; reason: string }[] }>(
           '/delegations/team/',
@@ -710,8 +749,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         );
         const r = res.data;
         spoken = `${address}, given to ${r.assigned.length} ${r.assigned.length === 1 ? 'person' : 'people'}.`;
-        if (r.pending.length) spoken += ` ${r.pending.length} still being confirmed.`;
-        if (r.not_assigned.length) spoken += ` Could not give it to: ${r.not_assigned.map((n) => n.name).join(', ')}.`;
+        spokenHi = `${addressHi}, ${r.assigned.length} लोगों को दे दिया।`;
+        if (r.pending.length) {
+          spoken += ` ${r.pending.length} still being confirmed.`;
+          spokenHi += ` ${r.pending.length} अभी कन्फ़र्म होने बाकी हैं।`;
+        }
+        if (r.not_assigned.length) {
+          const names = r.not_assigned.map((n) => n.name).join(', ');
+          spoken += ` Could not give it to: ${names}.`;
+          spokenHi += ` इन्हें नहीं दे पाया: ${names}।`;
+        }
       } else if (d.action === 'pa_task' || d.action === 'pa_meeting') {
         const meeting = d.action === 'pa_meeting';
         const res = await api<any>('/pa-tasks/', {
@@ -720,17 +767,22 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           idempotencyKey: key,
         });
         const who = res.data?.assignee?.staff_name ?? d.pa_name ?? 'your PA';
-        spoken = meeting
-          ? `Saved, ${address}. I've told ${who}, and I'll remind you both.`
-          : `Given to ${who}, ${address}. I'll remind you both and tell you when it's done.`;
+        if (meeting) {
+          spoken = `Saved, ${address}. I've told ${who}, and I'll remind you both.`;
+          spokenHi = `सेव हो गया, ${addressHi}। ${who} को बता दिया है, और आप दोनों को याद दिला दूँगा।`;
+        } else {
+          spoken = `Given to ${who}, ${address}. I'll remind you both and tell you when it's done.`;
+          spokenHi = `${who} को दे दिया, ${addressHi}। आप दोनों को याद दिलाऊँगा और पूरा होने पर बताऊँगा।`;
+        }
       } else if (d.action === 'md_request') {
         await api('/requests/', { method: 'POST', body, idempotencyKey: key });
         spoken = `Sent to ${md}, ${address}. I'll tell you when ${mdHe(dash)} answers.`;
+        spokenHi = `${mdHi} को भेज दिया, ${addressHi}। जवाब आते ही बताऊँगा।`;
       } else if (d.action === 'pa_self_task') {
         // Mansi's own task: straight onto her list, nothing is sent to Sir for approval.
         await api('/pa-tasks/self/', { method: 'POST', body: { ...body, description: d.transcript }, idempotencyKey: key });
-        spoken = `Saved in your own tasks, ${address}.`
-          + (d.due_date ? ` I'll remind you ${dayLabel(d.due_date).toLowerCase()}${d.due_time ? ` at ${timeLabel(d.due_time)}` : ''}.` : '');
+        spoken = `Saved in your own tasks, ${address}.${whenEn}`;
+        spokenHi = `आपके अपने टास्क में सेव हो गया, ${addressHi}।${whenHi}`;
       } else if (d.action === 'accept_request' || d.action === 'decline_request') {
         const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
         if (!list.length) return setBusy('');
@@ -739,9 +791,13 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           await api(`/requests/${t.id}/${verb}/`, { method: 'POST', body: {}, idempotencyKey: `${key}-${t.id}` });
           acknowledgeByRef('request', t.id).catch(() => undefined); // the banner about it goes away
         }
-        spoken = list.length === 1
-          ? (verb === 'accept' ? `Accepted, ${address}. It's on your list.` : `Declined, ${address}.`)
-          : `${verb === 'accept' ? 'Accepted' : 'Declined'} all ${list.length}, ${address}.`;
+        if (list.length === 1) {
+          spoken = verb === 'accept' ? `Accepted, ${address}. It's on your list.` : `Declined, ${address}.`;
+          spokenHi = verb === 'accept' ? `मंज़ूर कर दिया, ${addressHi}। आपकी लिस्ट में आ गया।` : `मना कर दिया, ${addressHi}।`;
+        } else {
+          spoken = `${verb === 'accept' ? 'Accepted' : 'Declined'} all ${list.length}, ${address}.`;
+          spokenHi = `सभी ${list.length} ${verb === 'accept' ? 'मंज़ूर' : 'मना'} कर दिए, ${addressHi}।`;
+        }
       } else if (d.action === 'complete') {
         const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
         if (!list.length) return setBusy('');
@@ -751,12 +807,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           const res = await api(path, { method: 'POST', body: { expected_version: t.version ?? 1 } });
           if (res.status === 202) sentToSir += 1;
         }
-        spoken = list.length === 1
-          ? (sentToSir ? `Sent to ${md} to confirm, ${address}.` : `Marked as done, ${address}.`)
-          : `Marked ${list.length} as done, ${address}.` + (sentToSir ? ` ${sentToSir} sent to ${md} to confirm.` : '');
+        if (list.length === 1) {
+          spoken = sentToSir ? `Sent to ${md} to confirm, ${address}.` : `Marked as done, ${address}.`;
+          spokenHi = sentToSir ? `${mdHi} को कन्फ़र्म करने के लिए भेज दिया, ${addressHi}।` : `पूरा हुआ मार्क कर दिया, ${addressHi}।`;
+        } else {
+          spoken = `Marked ${list.length} as done, ${address}.` + (sentToSir ? ` ${sentToSir} sent to ${md} to confirm.` : '');
+          spokenHi = `${list.length} पूरे हुए मार्क कर दिए, ${addressHi}।` + (sentToSir ? ` ${sentToSir} ${mdHi} को कन्फ़र्म करने भेजे।` : '');
+        }
       } else if (d.action === 'remember') {
         await api('/memories/', { method: 'POST', body: { text: d.memory_text }, idempotencyKey: key });
         spoken = `Done, ${address}. I'll remember that.`;
+        spokenHi = `हो गया, ${addressHi}। याद रखूँगा।`;
       } else if (d.action === 'change_task' || d.action === 'delete_task') {
         const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
         if (!list.length) return setBusy('');
@@ -768,9 +829,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           if (res.status === 202) sentToSir += 1;
         }
         const what = d.action === 'change_task' ? 'Changed' : 'Deleted';
-        spoken = sentToSir ? `Sent to ${md} to confirm, ${address}.`
-          : list.length === 1 ? `${what}, ${address}.${d.action === 'delete_task' ? " It's cancelled, not erased." : ''}`
-          : `${what} ${list.length}, ${address}.`;
+        const whatHi = d.action === 'change_task' ? 'बदल' : 'हटा';
+        if (sentToSir) {
+          spoken = `Sent to ${md} to confirm, ${address}.`;
+          spokenHi = `${mdHi} को कन्फ़र्म करने के लिए भेज दिया, ${addressHi}।`;
+        } else if (list.length === 1) {
+          spoken = `${what}, ${address}.${d.action === 'delete_task' ? " It's cancelled, not erased." : ''}`;
+          spokenHi = `${whatHi} दिया, ${addressHi}।${d.action === 'delete_task' ? ' कैंसल हुआ है, मिटा नहीं।' : ''}`;
+        } else {
+          spoken = `${what} ${list.length}, ${address}.`;
+          spokenHi = `${list.length} ${whatHi} दिए, ${addressHi}।`;
+        }
       }
       setBusy('');
       setDraft(null);
@@ -780,13 +849,14 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       if (d.done_reply && !editedRef.current && AI_DONE_OK.includes(d.action)) {
         reply(d.done_reply, d.done_speak || d.done_reply, d.done_lang === 'hi' ? 'hi' : 'en', true, { tone: 'saved' });
       } else {
-        reply(spoken, undefined, 'en', true, { tone: 'saved' });
+        const t = twin(spoken, spokenHi);
+        reply(spoken, t.lang === 'hi' ? t.text : undefined, t.lang, true, { tone: 'saved' });
       }
     } catch (e) {
       setBusy('');
       const msg = e instanceof ApiError ? e.message : 'Could not save.';
       setDraftError(`${msg} Nothing was saved${e instanceof ApiError && e.retryable ? ' — tap the button to try again' : ''}.`);
-      say(`Sorry ${address}, it was not saved. ${msg}`, { interrupt: true });
+      sayOwn(`Sorry ${address}, it was not saved. ${msg}`, `माफ़ कीजिए ${addressHi}, सेव नहीं हुआ। ${msg}`, { interrupt: true });
     }
   };
 
@@ -960,6 +1030,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               addressHi: addressHiOf(user),
               isMd: user.role === 'MD',
               paName,
+              hints,
+              voiceAccent: prefs.voiceAccent,
+              listenLang: listenLang === 'hi-IN' ? 'hi-IN' : 'en-IN',
+              replyLang: replyLang(),
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
             });
@@ -984,7 +1058,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       clearTimeout(kick);
       sub.remove();
     };
-  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, user, paName]);
+    // The names, the voice and the listening language go along too, and again whenever they change.
+  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

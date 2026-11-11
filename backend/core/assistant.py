@@ -11,6 +11,7 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 
 from . import ai_brain, datacards, hinglish_parser, scheduling, services
+from . import lang as lang_mod
 from . import timeutils as tu
 from .models import Kind, Priority, PrivateTask, SharedTask, TaskCategory, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
@@ -48,6 +49,30 @@ def _due_label(due_date: str, due_time: str) -> str:
     if due_time:
         return tu.due_phrase("TIMED", d, tu.combine_local(d, time.fromisoformat(due_time)))
     return tu.fmt_day(d)
+
+
+def _due_label_hi(due_date: str, due_time: str) -> str:
+    if not due_date:
+        return ""
+    d = date.fromisoformat(due_date)
+    if due_time:
+        return tu.due_phrase_hi("TIMED", d, tu.combine_local(d, time.fromisoformat(due_time)))
+    return tu.fmt_day_hi(d)
+
+
+_PRIORITY_HI = {"URGENT": "अर्जेंट", "HIGH": "हाई", "NORMAL": "नॉर्मल", "LOW": "लो"}
+_KIND_HI = {"TASK": "टास्क", "MEETING": "मीटिंग", "CALL": "कॉल", "PAYMENT": "पेमेंट", "FOLLOW_UP": "फ़ॉलो-अप"}
+
+
+def _say(draft: dict, en: str, hi: str = "") -> None:
+    """A reply the server wrote, with its Hindi twin: the twin is what the voice says when the speaker's language
+    is Hindi (see lang.py), the English line is what the screen shows and the English voice says."""
+    draft["spoken_reply"], draft["reply_en"], draft["reply_hi"] = en, en, hi
+
+
+def _ask(draft: dict, en: str, hi: str = "") -> None:
+    """A question the server itself needs answered, with its Hindi twin."""
+    draft["needs_clarification"], draft["question"], draft["question_hi"] = True, en, hi
 
 
 def _match_items(words: str, items: list[dict]) -> list[dict]:
@@ -99,6 +124,23 @@ def describe_changes(changes: dict) -> str:
         bits.append(f"priority to {changes['priority'].lower()}")
     if "kind" in changes:
         bits.append(f"type to {changes['kind'].lower().replace('_', '-')}")
+    return ", ".join(bits)
+
+
+def describe_changes_hi(changes: dict) -> str:
+    """The Hindi twin of describe_changes, as a question stem: "कल 4 बजे पर ले जाऊँ", "प्रायोरिटी हाई कर दूँ"."""
+    bits = []
+    if "title" in changes:
+        bits.append(f"नाम '{changes['title']}' कर दूँ")
+    if "due_date" in changes or "due_time" in changes:
+        d = changes.get("due_date")
+        t = changes.get("due_time")
+        when = _due_label_hi(d, t) if d else (tu.fmt_time_hi(tu.combine_local(tu.today_local(), time.fromisoformat(t))) if t else "")
+        bits.append(f"{when} पर ले जाऊँ" if d else f"समय {when} कर दूँ")
+    if "priority" in changes:
+        bits.append(f"प्रायोरिटी {_PRIORITY_HI.get(changes['priority'], changes['priority'].lower())} कर दूँ")
+    if "kind" in changes:
+        bits.append(f"टाइप {_KIND_HI.get(changes['kind'], changes['kind'].lower())} कर दूँ")
     return ", ".join(bits)
 
 
@@ -198,7 +240,7 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
     return intent
 
 
-def _prepare_team(draft: dict, cmd: dict, address: str):
+def _prepare_team(draft: dict, cmd: dict, address: str, address_hi: str):
     members, skipped, label = services.team_members(cmd.get("team_name") or "all")
     draft["team"] = {
         "label": label,
@@ -209,14 +251,21 @@ def _prepare_team(draft: dict, cmd: dict, address: str):
     if draft["priority"] == Priority.LOW:
         draft["priority"] = Priority.NORMAL
     if not members:
-        draft["needs_clarification"] = True
-        draft["question"] = (f"{address}, I couldn't find anyone in that team. Which team or person should do this?"
-                             if not label else f"{address}, everyone in {label} is on leave. Who else should do this?")
+        if not label:
+            _ask(draft, f"{address}, I couldn't find anyone in that team. Which team or person should do this?",
+                 f"{address_hi}, उस टीम में कोई नहीं मिला। ये किस टीम या किस व्यक्ति को देना है?")
+        else:
+            _ask(draft, f"{address}, everyone in {label} is on leave. Who else should do this?",
+                 f"{address_hi}, {label} में सब छुट्टी पर हैं। ये किसे देना है?")
         return
     skipped_txt = f" {len(skipped)} on leave will be skipped." if skipped else ""
-    draft["spoken_reply"] = (f"{address}, this will go to {len(members)} "
-                             f"{'person' if len(members) == 1 else 'people'} in {label}: {draft['title']}"
-                             + (f", {draft['due_label']}" if draft["due_label"] else "") + f".{skipped_txt} Shall I assign it?")
+    skipped_hi = f" {len(skipped)} छुट्टी पर हैं, वो छूट जाएँगे।" if skipped else ""
+    due_hi = _due_label_hi(draft["due_date"], draft["due_time"])
+    _say(draft,
+         f"{address}, this will go to {len(members)} {'person' if len(members) == 1 else 'people'} in {label}: {draft['title']}"
+         + (f", {draft['due_label']}" if draft["due_label"] else "") + f".{skipped_txt} Shall I assign it?",
+         f"{address_hi}, ये {label} के {len(members)} लोगों को जाएगा: {draft['title']}"
+         + (f", {due_hi}" if due_hi else "") + f"।{skipped_hi} असाइन कर दूँ?")
 
 
 def _staff_option(s) -> dict:
@@ -224,7 +273,7 @@ def _staff_option(s) -> dict:
             "leave_until": s.leave_until.isoformat() if s.leave_until else None}
 
 
-def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str):
+def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str, address_hi: str):
     """Resolve the person against the live TaskPanel directory, pick a category, pre-check with TaskPanel."""
     name = (cmd.get("staff_name") or "").strip()
     draft["categories"] = [{"key": c.key, "name": c.name, "department": c.department}
@@ -244,30 +293,33 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str):
         draft["staff_candidates"] = [draft["staff"]]
     elif len(matches) > 1:
         draft["staff_candidates"] = [_staff_option(s) for s in matches]
-        draft["needs_clarification"] = True
         options = " or ".join(f"{s.name} from {s.department}" for s in matches[:3])
-        draft["question"] = f"{address}, which {name}: {options}?"
+        options_hi = " या ".join(f"{s.department} वाले {s.name}" for s in matches[:3])
+        _ask(draft, f"{address}, which {name}: {options}?", f"{address_hi}, कौन से {name}: {options_hi}?")
         return
     elif suggestions:
         draft["staff_candidates"] = [_staff_option(s) for s in suggestions]
-        draft["needs_clarification"] = True
         if len(suggestions) == 1:
-            draft["question"] = f"{address}, did you mean {suggestions[0].name} from {suggestions[0].department}?"
+            _ask(draft, f"{address}, did you mean {suggestions[0].name} from {suggestions[0].department}?",
+                 f"{address_hi}, आपका मतलब {suggestions[0].department} वाले {suggestions[0].name} से था?")
         else:
-            draft["question"] = f"{address}, I couldn't find {name}. Did you mean " + \
-                " or ".join(s.name for s in suggestions[:3]) + "?"
+            _ask(draft, f"{address}, I couldn't find {name}. Did you mean " + " or ".join(s.name for s in suggestions[:3]) + "?",
+                 f"{address_hi}, {name} नहीं मिले। आपका मतलब " + " या ".join(s.name for s in suggestions[:3]) + " से था?")
         return
     else:
-        draft["needs_clarification"] = True
-        draft["question"] = (f"{address}, I couldn't find {name} in the TaskPanel staff list. Who should do this?"
-                             if name else f"{address}, who should I assign this to?")
+        if name:
+            _ask(draft, f"{address}, I couldn't find {name} in the TaskPanel staff list. Who should do this?",
+                 f"{address_hi}, {name} TaskPanel की स्टाफ़ लिस्ट में नहीं मिले। ये किसे देना है?")
+        else:
+            _ask(draft, f"{address}, who should I assign this to?", f"{address_hi}, ये किसे असाइन करूँ?")
         return
 
     if person.on_leave:
         until = tu.fmt_day(person.leave_until) if person.leave_until else "further notice"
+        until_hi = tu.fmt_day_hi(person.leave_until) if person.leave_until else "अगली सूचना"
         draft["warnings"].append(f"{person.name} is on leave until {until}.")
-        draft["needs_clarification"] = True
-        draft["question"] = f"{address}, {person.name} is on leave until {until}. Should someone else do this?"
+        _ask(draft, f"{address}, {person.name} is on leave until {until}. Should someone else do this?",
+             f"{address_hi}, {person.name} {until_hi} तक छुट्टी पर हैं। किसी और को दे दूँ?")
         return
 
     # Ask TaskPanel to check its own rules now (category/department, dates) — nothing is saved by this.
@@ -575,8 +627,8 @@ def _rebuilt(pending: dict, new: dict) -> dict:
     else:
         trial.update(new)
         trial["due_label"] = _due_label(trial.get("due_date", ""), trial.get("due_time", ""))
-    trial.update({"needs_clarification": False, "question": "", "schedule": None, "warnings": [], "overrides": {},
-                  "done_reply": "", "done_speak": "", "done_lang": "en"})
+    trial.update({"needs_clarification": False, "question": "", "question_hi": "", "schedule": None, "warnings": [],
+                  "overrides": {}, "done_reply": "", "done_speak": "", "done_lang": "en"})
     return trial
 
 
@@ -652,6 +704,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     full_text = f"{previous}. {text}".strip(". ") if previous else text
     card = _clean_pending(pending) if awaiting else None  # the waiting card (not to be confused with pending requests)
     ctx = services.ai_context(user, include_private=include_private)
+    # The language to answer in, from the sentence itself (or lately); the model is told, not asked.
+    ctx["reply_language"] = lang_mod.lang_for(user, text)
     # The last few turns of THIS conversation, so follow-ups like "aur Neha ko bhi" make sense.
     ctx["conversation"] = ai_brain.history_text(history)
     # The card he is looking at, so "is list ka PDF", "pehla wala" or a bare name from the list make sense.
@@ -704,6 +758,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     address_hi = services.address_hi_of(user)
     sir, sir_hi = services.md_address(), services.md_address_hi()
     intent = _route_intent(user, cmd, full_text)
+    # Which language JARVIS answers in: a pinned setting, else this sentence, else the model's reading, else lately.
+    heard = lang_mod.detect(text) or lang_mod.clean(cmd.get("reply_language"))
+    reply_language = lang_mod.lang_for(user, text, cmd.get("reply_language"))
+    lang_mod.remember(user, heard)
 
     due_date = _safe_date(cmd.get("due_date", ""))
     due_time = _safe_time(cmd.get("due_time", ""))
@@ -741,6 +799,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "people": [],           # everyone named in it (checked against staff, contacts and past tasks)
         "contacts_saved": [],   # people the speaker just explained, now remembered
         "question_hi": "",      # Devanagari version of a server-built question, for the Hindi voice
+        "reply_en": "",         # a server-built reply and its Devanagari twin (see _say)
+        "reply_hi": "",
         "schedule": None,       # diary check: clash / free slot / full day (see _advise_schedule)
         "overrides": {},        # confirm_pending: day / time to apply to the waiting card before saving
         "view": None,           # data the phone draws for this answer (timeline / chart / table), see datacards
@@ -752,7 +812,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "spoken_reply": (cmd.get("spoken_reply") or "").strip(),
         "ask_text": "",       # general question for /assistant/ask/
         "memory_text": "",    # fact to remember (after the user confirms)
-        "reply_language": cmd.get("reply_language") if cmd.get("reply_language") in {"en", "hi"} else "en",
+        "reply_language": reply_language,
         "speak_text": "",     # what the voice says (Devanagari when the reply is Hindi)
         "speak_lang": "en",
         "done_reply": (cmd.get("done_reply") or "").strip()[:300],  # said after a successful save
@@ -770,10 +830,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["action"] = "pa_self_task"  # Mansi's own task: on her list, visible to Sir, no approval needed
     elif intent == "assign_to_staff":
         draft["action"] = "delegation"
-        _prepare_delegation(draft, cmd, user, address)
+        _prepare_delegation(draft, cmd, user, address, address_hi)
     elif intent == "assign_to_team":
         draft["action"] = "team_delegation"
-        _prepare_team(draft, cmd, address)
+        _prepare_team(draft, cmd, address, address_hi)
     elif intent in {"assign_to_pa", "meet_with_pa"}:
         draft["action"] = "pa_meeting" if intent == "meet_with_pa" else "pa_task"
         if intent == "meet_with_pa":
@@ -781,8 +841,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         pa = services.get_pa()
         draft["pa_name"] = pa.spoken_name if pa else ""
         if not pa:
-            draft["needs_clarification"] = True
-            draft["question"] = f"{address}, there is no PA account set up yet."
+            _ask(draft, f"{address}, there is no PA account set up yet.", f"{address_hi}, अभी कोई PA अकाउंट बना नहीं है।")
         elif intent == "meet_with_pa" and not draft["title"].lower().startswith("meeting"):
             draft["title"] = draft["title"] or f"Meeting with {pa.spoken_name}"
     elif intent == "needs_destination":
@@ -792,34 +851,37 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             draft["question"] = ""  # the model was asking something else; whose it is comes first
         if not draft["question"]:
             if user.is_md:
-                draft["question"] = f"{address}, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?"
-                draft["question_hi"] = f"{address_hi}, इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम में किसी को?"
+                _ask(draft, f"{address}, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?",
+                     f"{address_hi}, इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम में किसी को?")
             else:
-                draft["question"] = f"{address}, is this for {sir}, for you, or for someone in the team?"
-                draft["question_hi"] = f"{address}, ये {sir_hi} के लिए है, आपके लिए, या टीम में किसी के लिए?"
+                _ask(draft, f"{address}, is this for {sir}, for you, or for someone in the team?",
+                     f"{address_hi}, ये {sir_hi} के लिए है, आपके लिए, या टीम में किसी के लिए?")
     elif intent in {"accept_request", "decline_request"}:
         draft["action"] = intent
         ids = {r["id"]: r for r in pending}
         chosen = _chosen(cmd, ids)
         verb = "accept" if intent == "accept_request" else "decline"
+        verb_hi = "मंज़ूर कर दूँ" if intent == "accept_request" else "मना कर दूँ"
         if chosen:
             draft["targets"] = chosen
         elif len(pending) == 1:
             draft["targets"] = [pending[0]]
         elif pending:
-            draft["needs_clarification"] = True
             draft["target_candidates"] = pending[:5]
-            draft["question"] = f"{address}, which request? " + "; ".join(r["title"] for r in pending[:3]) + ". Or all of them?"
+            names = "; ".join(r["title"] for r in pending[:3])
+            _ask(draft, f"{address}, which request? {names}. Or all of them?", f"{address_hi}, कौन सी रिक्वेस्ट? {names}। या सभी?")
         else:
             draft["action"] = "answer"
-            draft["spoken_reply"] = f"{address}, there are no pending requests right now."
+            _say(draft, f"{address}, there are no pending requests right now.", f"{address_hi}, अभी कोई रिक्वेस्ट पेंडिंग नहीं है।")
         if draft["targets"]:
             draft["target"] = draft["targets"][0]
             if len(draft["targets"]) == 1:
-                draft["spoken_reply"] = f"{address}, {verb} the request: {draft['target']['title']}?"
+                _say(draft, f"{address}, {verb} the request: {draft['target']['title']}?",
+                     f"{address_hi}, रिक्वेस्ट {draft['target']['title']} {verb_hi}?")
             else:
-                draft["spoken_reply"] = (f"{address}, {verb} these {len(draft['targets'])} requests: "
-                                         + "; ".join(t["title"] for t in draft["targets"]) + "?")
+                names = "; ".join(t["title"] for t in draft["targets"])
+                _say(draft, f"{address}, {verb} these {len(draft['targets'])} requests: {names}?",
+                     f"{address_hi}, ये {len(draft['targets'])} रिक्वेस्ट {verb_hi}: {names}?")
     elif intent == "complete_task":
         draft["action"] = "complete"
         open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
@@ -830,15 +892,18 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             draft["targets"] = matches
             draft["target"] = matches[0]
             if len(matches) == 1:
-                draft["spoken_reply"] = f"{address}, mark '{matches[0]['title']}' as done?"
+                _say(draft, f"{address}, mark '{matches[0]['title']}' as done?", f"{address_hi}, '{matches[0]['title']}' पूरा हुआ मार्क कर दूँ?")
             else:
-                draft["spoken_reply"] = (f"{address}, mark these {len(matches)} as done: "
-                                         + "; ".join(m["title"] for m in matches) + "?")
+                names = "; ".join(m["title"] for m in matches)
+                _say(draft, f"{address}, mark these {len(matches)} as done: {names}?",
+                     f"{address_hi}, ये {len(matches)} पूरे हुए मार्क कर दूँ: {names}?")
         else:
-            draft["needs_clarification"] = True
             draft["target_candidates"] = matches[:5]
-            draft["question"] = (f"{address}, which one did you finish: " + "; ".join(m["title"] for m in matches[:3])
-                                 + ". Or both?" if matches else f"{address}, which task did you finish?")
+            if matches:
+                names = "; ".join(m["title"] for m in matches[:3])
+                _ask(draft, f"{address}, which one did you finish: {names}. Or both?", f"{address_hi}, कौन सा पूरा हुआ: {names}। या दोनों?")
+            else:
+                _ask(draft, f"{address}, which task did you finish?", f"{address_hi}, कौन सा टास्क पूरा हुआ?")
     elif intent in EDIT_ACTIONS:
         draft["action"] = intent
         open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
@@ -852,20 +917,26 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             if intent == "change_task":
                 draft["changes"] = _changes_from(cmd)
                 if not draft["changes"]:
-                    draft["needs_clarification"] = True
-                    draft["question"] = f"{address}, what should I change about '{names}': the time, the day, the priority or the name?"
+                    _ask(draft, f"{address}, what should I change about '{names}': the time, the day, the priority or the name?",
+                         f"{address_hi}, '{names}' में क्या बदलूँ: समय, दिन, प्रायोरिटी या नाम?")
                 else:
-                    draft["spoken_reply"] = f"{address}, {describe_changes(draft['changes'])} for '{names}'?"
-            else:
+                    _say(draft, f"{address}, {describe_changes(draft['changes'])} for '{names}'?",
+                         f"{address_hi}, '{names}' {describe_changes_hi(draft['changes'])}?")
+            elif len(matches) == 1:
                 # Deleting always asks first. It is a cancel, not an erase, so it can be undone from the app.
-                draft["spoken_reply"] = (f"{address}, delete '{names}'? It will be cancelled, not erased."
-                                         if len(matches) == 1 else f"{address}, delete these {len(matches)}: {names}?")
+                _say(draft, f"{address}, delete '{names}'? It will be cancelled, not erased.",
+                     f"{address_hi}, '{names}' हटा दूँ? ये कैंसल होगा, मिटेगा नहीं।")
+            else:
+                _say(draft, f"{address}, delete these {len(matches)}: {names}?", f"{address_hi}, ये {len(matches)} हटा दूँ: {names}?")
         else:
-            draft["needs_clarification"] = True
             draft["target_candidates"] = matches[:5]
             verb = "change" if intent == "change_task" else "delete"
-            draft["question"] = (f"{address}, which one should I {verb}: " + "; ".join(m["title"] for m in matches[:3]) + "?"
-                                 if matches else f"{address}, which task should I {verb}?")
+            verb_hi = "बदलूँ" if intent == "change_task" else "हटाऊँ"
+            if matches:
+                names = "; ".join(m["title"] for m in matches[:3])
+                _ask(draft, f"{address}, which one should I {verb}: {names}?", f"{address_hi}, कौन सा {verb_hi}: {names}?")
+            else:
+                _ask(draft, f"{address}, which task should I {verb}?", f"{address_hi}, कौन सा टास्क {verb_hi}?")
     elif intent == "set_setting":
         draft["action"] = "set_setting"
         key = (cmd.get("setting_key") or "").strip()
@@ -880,13 +951,13 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             draft["setting_patch"] = clean
             if not draft["spoken_reply"]:
                 what = ", ".join(services.describe_pref(k, v) for k, v in clean.items())
-                draft["spoken_reply"] = f"Done {address}: {what}."
+                _say(draft, f"Done {address}: {what}.", f"हो गया {address_hi}: {what}।")
         except services.ServiceError as err:
-            draft["needs_clarification"] = True
-            draft["question"] = f"{address}, {err.message}"
+            _ask(draft, f"{address}, {err.message}")
     elif intent == "briefing":
         draft["action"] = "briefing"
-        draft["spoken_reply"] = draft["spoken_reply"] or f"Here is your briefing, {address}."
+        if not draft["spoken_reply"]:
+            _say(draft, f"Here is your briefing, {address}.", f"{address_hi}, ये रही आपकी ब्रीफ़िंग।")
         draft["view"] = datacards.build(user, "today", include_private)
     elif intent == "general_question":
         # Answered by /assistant/ask/ (web search). The answering step asks for missing details itself.
@@ -894,15 +965,16 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["ask_text"] = ((cmd.get("question") or "").strip() or full_text)[:1000]
         draft["needs_clarification"] = False
         draft["question"] = ""
-        draft["spoken_reply"] = draft["spoken_reply"] or f"One moment, {address}."
+        if not draft["spoken_reply"]:
+            _say(draft, f"One moment, {address}.", f"एक सेकंड {address_hi}, देख रहा हूँ।")
     elif intent == "remember":
         draft["action"] = "remember"
         draft["memory_text"] = " ".join((cmd.get("memory_text") or "").split())[:300]
         if not draft["memory_text"]:
-            draft["needs_clarification"] = True
-            draft["question"] = f"{address}, what should I remember?"
+            _ask(draft, f"{address}, what should I remember?", f"{address_hi}, क्या याद रखूँ?")
         elif not draft["spoken_reply"]:
-            draft["spoken_reply"] = f"{address}, I'll remember this: {draft['memory_text']} Okay?"
+            _say(draft, f"{address}, I'll remember this: {draft['memory_text']} Okay?",
+                 f"{address_hi}, मैं ये याद रखूँगा: {draft['memory_text']} ठीक है?")
     elif intent == "confirm_pending":
         draft["action"] = "confirm_pending"  # the phone saves the draft it is holding
         draft["needs_clarification"] = False
@@ -914,12 +986,14 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["action"] = "cancel_pending"
         draft["needs_clarification"] = False
         draft["question"] = ""
-        draft["spoken_reply"] = draft["spoken_reply"] or f"Okay {address}, cancelled. Nothing was saved."
+        if not draft["spoken_reply"]:
+            _say(draft, f"Okay {address}, cancelled. Nothing was saved.", f"ठीक है {address_hi}, कैंसल कर दिया। कुछ सेव नहीं हुआ।")
     elif intent == "dismiss_alert":
         draft["action"] = "dismiss"  # the phone clears the alert on screen
         draft["needs_clarification"] = False
         draft["question"] = ""
-        draft["spoken_reply"] = draft["spoken_reply"] or "Done."
+        if not draft["spoken_reply"]:
+            _say(draft, "Done.", "ठीक है।")
     elif intent == "screen_action":
         # Voice works the screen: the app does it, nothing is saved or changed on the server.
         act = cmd.get("screen_action") if cmd.get("screen_action") in _SCREEN_ACTIONS else ""
@@ -929,7 +1003,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["question"] = ""
         if act in ("export_pdf", "export_csv", "share") and not on_screen:
             draft["action"], draft["screen_action"] = "answer", ""
-            draft["spoken_reply"] = f"{address}, there is no list on screen. Ask me for one first, then I can download or share it."
+            _say(draft, f"{address}, there is no list on screen. Ask me for one first, then I can download or share it.",
+                 f"{address_hi}, स्क्रीन पर कोई लिस्ट नहीं है। पहले कोई लिस्ट माँगिए, फिर मैं डाउनलोड या शेयर कर सकता हूँ।")
         elif act == "open_item":
             known = {i["id"]: i for i in ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]}
             for i in (on_screen or {}).get("items", []):
@@ -937,21 +1012,26 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             chosen = _chosen(cmd, known)
             if chosen:
                 draft["target"], draft["targets"] = chosen[0], chosen[:1]
-                draft["spoken_reply"] = draft["spoken_reply"] or f"Opening {chosen[0]['title']}."
+                if not draft["spoken_reply"]:
+                    _say(draft, f"Opening {chosen[0]['title']}.", f"{chosen[0]['title']} खोल रहा हूँ।")
             else:
                 draft["action"], draft["screen_action"] = "answer", ""
-                draft["spoken_reply"] = f"{address}, which one should I open?"
+                _say(draft, f"{address}, which one should I open?", f"{address_hi}, कौन सा खोलूँ?")
         elif not act:
-            draft["spoken_reply"] = f"Sorry {address}, I can't do that on the screen yet."
+            _say(draft, f"Sorry {address}, I can't do that on the screen yet.", f"माफ़ कीजिए {address_hi}, ये अभी स्क्रीन पर नहीं कर सकता।")
         if not draft["spoken_reply"]:
-            draft["spoken_reply"] = {"export_pdf": f"Making the PDF, {address}.", "export_csv": f"Making the sheet, {address}.",
-                                     "share": f"Opening share, {address}.", "open_settings": f"Opening settings, {address}.",
-                                     "go_home": f"Okay {address}."}.get(act, f"Okay {address}.")
+            en = {"export_pdf": f"Making the PDF, {address}.", "export_csv": f"Making the sheet, {address}.",
+                  "share": f"Opening share, {address}.", "open_settings": f"Opening settings, {address}."}.get(act, f"Okay {address}.")
+            hi = {"export_pdf": f"PDF बना रहा हूँ, {address_hi}।", "export_csv": f"शीट बना रहा हूँ, {address_hi}।",
+                  "share": f"शेयर खोल रहा हूँ, {address_hi}।", "open_settings": f"सेटिंग्स खोल रहा हूँ, {address_hi}।"}.get(act, f"ठीक है {address_hi}।")
+            _say(draft, en, hi)
     elif intent == "end_conversation":
         draft["action"] = "end"
         draft["needs_clarification"] = False
         draft["question"] = ""
-        draft["spoken_reply"] = draft["spoken_reply"] or f"Okay {address}. Just say Hello JARVIS whenever you need me."
+        if not draft["spoken_reply"]:
+            _say(draft, f"Okay {address}. Just say Hello JARVIS whenever you need me.",
+                 f"ठीक है {address_hi}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।")
     else:
         draft["action"] = "answer"
         if intent == "query":
@@ -989,13 +1069,17 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
                 overdue = ctx["open_items"]["overdue"]
                 if today:
                     firsts = ", ".join(f"{i['title']} {i['due_label']}".strip() for i in today[:3])
-                    draft["spoken_reply"] = f"{address}, today you have {len(today)} item{'s' if len(today) > 1 else ''}: {firsts}."
+                    en = f"{address}, today you have {len(today)} item{'s' if len(today) > 1 else ''}: {firsts}."
+                    hi = f"{address_hi}, आज आपके {len(today)} काम हैं: {firsts}।"
                 else:
-                    draft["spoken_reply"] = f"{address}, nothing is scheduled for today."
+                    en, hi = f"{address}, nothing is scheduled for today.", f"{address_hi}, आज कुछ भी शेड्यूल नहीं है।"
                 if overdue:
-                    draft["spoken_reply"] += f" {len(overdue)} overdue."
+                    en += f" {len(overdue)} overdue."
+                    hi += f" {len(overdue)} लेट हैं।"
+                _say(draft, en, hi)
             else:
-                draft["spoken_reply"] = f"Sorry {address}, I didn't catch that. Please say it again or type it."
+                _say(draft, f"Sorry {address}, I didn't catch that. Please say it again or type it.",
+                     f"माफ़ कीजिए {address_hi}, समझ नहीं आया। फिर से बोलिए या टाइप कर दीजिए।")
 
     # Does JARVIS know the people named? Never book something with a name nobody recognises.
     if draft["action"] in TASK_ACTIONS or draft["action"] == "choose_destination":
@@ -1004,20 +1088,22 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"]:
         when = tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
         if when <= tu.now_local() and not draft["needs_clarification"]:
-            draft["needs_clarification"] = True
-            label = tu.fmt_time(when)
-            draft["question"] = (f"{address}, {label} {tu.fmt_day(when.date())} has already passed. "
-                                 f"Tomorrow at {label}, or a different time?")
+            label, label_hi = tu.fmt_time(when), tu.fmt_time_hi(when)
+            _ask(draft, f"{address}, {label} {tu.fmt_day(when.date())} has already passed. Tomorrow at {label}, or a different time?",
+                 f"{address_hi}, {tu.fmt_day_hi(when.date())} {label_hi} निकल चुका है। कल {label_hi}, या कोई और समय?")
 
     if draft["action"] in TASK_ACTIONS:
-        if not draft["title"]:
+        if not draft["title"] and not draft["question"]:
+            _ask(draft, f"{address}, what should the task say?", f"{address_hi}, टास्क में क्या लिखूँ?")
+        elif not draft["title"]:
             draft["needs_clarification"] = True
-            draft["question"] = draft["question"] or f"{address}, what should the task say?"
         pa_name = draft.get("pa_name") or "your PA"
+        due_hi = _due_label_hi(draft["due_date"], draft["due_time"])
         if draft["action"] == "pa_meeting":
             # Always state clearly that the PA will be informed.
             when = f" {draft['due_label']}" if draft["due_label"] else ""
-            draft["spoken_reply"] = f"{address}, meeting with {pa_name}{when}. I'll inform {pa_name} too. Shall I save it?"
+            _say(draft, f"{address}, meeting with {pa_name}{when}. I'll inform {pa_name} too. Shall I save it?",
+                 f"{address_hi}, {pa_name} के साथ मीटिंग" + (f" {due_hi}" if due_hi else "") + f"। {pa_name} को भी बता दूँगा। सेव कर दूँ?")
         elif draft["action"] != "team_delegation" and (not draft["spoken_reply"] or draft["engine"] == "rules"):
             what = {
                 "private_task": "Personal task",
@@ -1026,8 +1112,17 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
                 "pa_task": f"Task for {pa_name}",
                 "pa_self_task": "Your own task",
             }[draft["action"]]
+            what_hi = {
+                "private_task": "पर्सनल टास्क",
+                "md_request": f"{sir_hi} के लिए रिक्वेस्ट",
+                "delegation": f"{draft['staff']['name']} को असाइन" if draft["staff"] else "स्टाफ़ को असाइन",
+                "pa_task": f"{pa_name} के लिए टास्क",
+                "pa_self_task": "आपका अपना टास्क",
+            }[draft["action"]]
             bits = [b for b in (draft["due_label"], f"{priority.lower()} priority" if priority != "NORMAL" else "") if b]
-            draft["spoken_reply"] = f"{address}, {what}: {draft['title']}" + (f", {', '.join(bits)}" if bits else "") + ". Shall I save it?"
+            bits_hi = [b for b in (due_hi, f"{_PRIORITY_HI[priority]} प्रायोरिटी" if priority != "NORMAL" else "") if b]
+            _say(draft, f"{address}, {what}: {draft['title']}" + (f", {', '.join(bits)}" if bits else "") + ". Shall I save it?",
+                 f"{address_hi}, {what_hi}: {draft['title']}" + (f", {', '.join(bits_hi)}" if bits_hi else "") + "। सेव कर दूँ?")
 
     # Does it fit the diary? (clash, free slot, a very full day) — may replace the question above.
     if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"]:
@@ -1036,8 +1131,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     if draft["needs_clarification"] and draft["question"]:
         draft["spoken_reply"] = draft["question"]
 
-    # Voice text: the model's Devanagari version is used only when the final reply is still the model's own
-    # sentence (server-built confirmations are English and are spoken as written).
+    # Voice text, when the reply language is Hindi: a server-built question or answer has its own Devanagari twin;
+    # the model's Devanagari version is used only when the final reply is still the model's own sentence.
     hindi = (cmd.get("spoken_reply_hi") or "").strip()
     sched = draft.get("schedule") or {}
     model_reply = (cmd.get("spoken_reply") or "").strip()
@@ -1051,17 +1146,18 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["speak_text"], draft["speak_lang"] = sched["question_hi"], "hi"
     elif draft["reply_language"] == "hi" and hindi and _DEVANAGARI.search(hindi) and base_reply == model_reply:
         draft["speak_text"], draft["speak_lang"] = _insert_notes(hindi, sched.get("notes_hi") or [], hindi=True), "hi"
+    elif draft["reply_language"] == "hi" and draft["reply_hi"] and base_reply == draft["reply_en"]:
+        draft["speak_text"], draft["speak_lang"] = _insert_notes(draft["reply_hi"], sched.get("notes_hi") or [], hindi=True), "hi"
     else:
         draft["speak_text"], draft["speak_lang"] = draft["spoken_reply"], "en"
     done_hi = (cmd.get("done_reply_hi") or "").strip()
     if draft["done_reply"]:
         use_hi = draft["reply_language"] == "hi" and bool(_DEVANAGARI.search(done_hi))
         draft["done_speak"], draft["done_lang"] = (done_hi, "hi") if use_hi else (draft["done_reply"], "en")
-    # Fixed Hindi lines for the two short replies the model sometimes leaves without a Devanagari version.
+    # Fixed Hindi lines for the two short replies the model sometimes writes without a Devanagari version.
     if draft["reply_language"] == "hi" and draft["speak_lang"] != "hi":
-        who = f" {address_hi}" if user.is_md else ""
         if draft["action"] == "ask":
-            draft["speak_text"], draft["speak_lang"] = f"एक सेकंड{who}, देख रहा हूँ।", "hi"
+            draft["speak_text"], draft["speak_lang"] = f"एक सेकंड {address_hi}, देख रहा हूँ।", "hi"
         elif draft["action"] == "end":
-            draft["speak_text"], draft["speak_lang"] = f"ठीक है{who}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।", "hi"
+            draft["speak_text"], draft["speak_lang"] = f"ठीक है {address_hi}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।", "hi"
     return draft

@@ -10,6 +10,8 @@ export interface SessionUser {
   /** How JARVIS addresses this person ("Sir", "Ma'am", a name), and the same in Devanagari. Set on the server. */
   address?: string;
   address_hi?: string;
+  /** The language JARVIS is speaking to this person right now ('hi' / 'en'), from the server's language rule. */
+  language?: 'hi' | 'en';
 }
 
 export interface TaskItem {
@@ -94,7 +96,10 @@ export interface ServerAlert {
   priority: Priority;
   title: string;
   body: string;
+  /** Already in the recipient's language (the server picks); the English and Hindi twins come along too. */
   spoken_text: string;
+  spoken_text_en?: string;
+  spoken_text_hi?: string;
   ref_type: string;
   ref_id: string;
   created_at: string;
@@ -113,7 +118,11 @@ export interface Reminder {
   title: string;
   kind: Kind;
   is_private: boolean;
+  /** The line to say, already in the reader's language (the server picks); the two twins come along too. */
   spoken: string;
+  spoken_en?: string;
+  spoken_hi?: string;
+  lang?: 'hi' | 'en';
   ref: { scope: 'private' | 'shared'; id: string; version: number };
   /** Spoken or shown once already: never announced again. */
   told_at: string | null;

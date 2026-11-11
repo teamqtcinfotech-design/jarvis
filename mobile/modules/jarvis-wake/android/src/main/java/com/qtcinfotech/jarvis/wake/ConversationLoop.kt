@@ -41,6 +41,10 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     /** The same word in Devanagari ("सर", "मैम") for the Hindi lines. */
     private val addressHi: String get() = prefs.getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
     private val isMd: Boolean get() = prefs.getBoolean(WakeBus.KEY_IS_MD, address == "Sir")
+    /** The phone voice for English lines (the app's "JARVIS voice" setting); Hindi lines always use the Hindi voice. */
+    private val accent: String get() = prefs.getString(WakeBus.KEY_VOICE_ACCENT, "hi-IN") ?: "hi-IN"
+    /** The language JARVIS is speaking to him: the server says so with every reply; before the first, the app's last word. */
+    private var replyLang: String = prefs.getString(WakeBus.KEY_REPLY_LANG, "en") ?: "en"
     private val overlay = OverlayOrb(context) { end() }
 
     fun start() {
@@ -105,12 +109,14 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     private fun handle(resp: JSONObject?) {
         if (!active) return
         if (resp == null) {
-            speakThen("Sorry $address, I couldn't reach the server.", null, "en-IN") { end() }
+            sayOwn("Sorry $address, I couldn't reach the server.", "माफ़ कीजिए $addressHi, सर्वर से संपर्क नहीं हो पाया।") { end() }
             return
         }
         val show = resp.optString("show")
         val say = resp.optString("say", show)
-        val lang = if (resp.optString("say_lang") == "hi") "hi-IN" else "hi-IN" // Indian voice for both, like the app
+        val hindi = resp.optString("say_lang") == "hi"
+        replyLang = if (hindi) "hi" else "en"
+        val lang = if (hindi) "hi-IN" else accent  // the Hindi voice for Hindi lines; the chosen accent for English ones
         val listen = resp.optBoolean("listen", true)
         // After a plain answer or a "saved", one short listen for a follow-up is enough; then the microphone goes
         // straight back to "Hey JARVIS". Only a question that is waiting for him gets the longer wait.
@@ -132,6 +138,11 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         TtsEngine.speakThen(TtsEngine.Request("conv-" + System.nanoTime(), text, fallback, lang, 0.95f)) {
             main.post(onDone)
         }
+    }
+
+    /** One of the few lines this loop builds itself, in the language JARVIS is speaking to him right now. */
+    private fun sayOwn(en: String, hi: String, onDone: () -> Unit) {
+        if (replyLang == "hi") speakThen(hi, en, "hi-IN", onDone) else speakThen(en, null, accent, onDone)
     }
 
     // ------------------------------------------------------------------ hearing
@@ -179,16 +190,19 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
 
     private fun intent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN") // Indian English understands Hinglish too
+        // The app's listening setting: Indian English (understands Hinglish too), or Hindi for pure-Hindi speakers.
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, prefs.getString(WakeBus.KEY_LISTEN_LANG, "en-IN") ?: "en-IN")
         putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
         putExtra("android.speech.extras.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS", 1200L)
         putExtra("android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 1200L)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val names = arrayListOf("JARVIS", "Jarvis", "Sir")
+            // Names it should expect: JARVIS, the two of them, the staff and the contacts (so "Mansi" is not "Mercy").
+            val names = linkedSetOf("JARVIS", "Jarvis", address)
             prefs.getString(WakeBus.KEY_PA_NAME, null)?.takeIf { it.isNotBlank() }?.let { names.add(it) }
-            putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, names)
+            prefs.getString(WakeBus.KEY_HINTS, null)?.split("\n")?.map { it.trim() }?.filter { it.isNotEmpty() }?.let { names.addAll(it) }
+            putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, ArrayList(names.take(60)))
         }
     }
 
@@ -247,7 +261,8 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
                 else -> {
                     Log.w(TAG, "recognizer error $error")
                     if (retries++ < 2) main.postDelayed({ listen() }, 600)
-                    else speakThen("Sorry $address, I can't hear right now. Please try again in a moment.", null, "en-IN") { end() }
+                    else sayOwn("Sorry $address, I can't hear right now. Please try again in a moment.",
+                        "माफ़ कीजिए $addressHi, अभी सुन नहीं पा रहा। थोड़ी देर में फिर कोशिश कीजिए।") { end() }
                 }
             }
         }

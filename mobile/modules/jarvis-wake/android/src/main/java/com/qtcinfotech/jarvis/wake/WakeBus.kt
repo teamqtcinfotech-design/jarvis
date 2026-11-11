@@ -88,6 +88,14 @@ object WakeBus {
     const val KEY_IS_MD = "is_md"
     /** The PA's name as JARVIS says it (for the closed-app recogniser's word list). */
     const val KEY_PA_NAME = "pa_name"
+    /** More names the closed-app recogniser should expect (staff, contacts, the MD), one per line. */
+    const val KEY_HINTS = "hints"
+    /** The phone voice for English lines ("hi-IN" Hindi accent, "en-IN" Indian English); Hindi lines always use hi-IN. */
+    const val KEY_VOICE_ACCENT = "voice_accent"
+    /** The language the closed-app recogniser starts in ("en-IN" understands Hinglish too; "hi-IN" for pure Hindi). */
+    const val KEY_LISTEN_LANG = "listen_lang"
+    /** The language JARVIS is speaking to this person right now ("hi" / "en"), for the few lines built here. */
+    const val KEY_REPLY_LANG = "reply_lang"
     const val KEY_SPEAK_LOCKED = "speak_locked"
     const val KEY_SPOKEN = "spoken_keys"
     const val KEY_PUSH_TOKEN = "push_token"

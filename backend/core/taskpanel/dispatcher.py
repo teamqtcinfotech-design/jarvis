@@ -80,6 +80,7 @@ def _defer(cmd: IntegrationCommand, err: TaskPanelError):
             title="TaskPanel has not confirmed a task",
             body=(cmd.payload.get("data", {}).get("title") or "")[:200],
             spoken_text="TaskPanel has not confirmed one of the tasks you assigned. Please check it in the app.",
+            spoken_text_hi="TaskPanel ने आपके दिए एक टास्क को अभी कन्फ़र्म नहीं किया है। कृपया ऐप में देख लीजिए।",
             ref_type="command", ref_id=str(cmd.id),
         )
     else:

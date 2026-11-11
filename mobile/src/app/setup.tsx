@@ -85,6 +85,9 @@ export default function Setup() {
           address: addressOf(user),
           addressHi: addressHiOf(user),
           isMd: isMD,
+          voiceAccent: prefs.voiceAccent,
+          listenLang: prefs.listenLang === 'hi-IN' ? 'hi-IN' : 'en-IN',
+          replyLang: prefs.replyLanguage === 'auto' ? user.language : prefs.replyLanguage,
           speakWhenLocked: prefs.privateAloudWhenLocked,
           wakeWord: st.micAllowed,
         });
@@ -97,7 +100,7 @@ export default function Setup() {
       setRunning(false);
       router.replace('/');
     }
-  }, [refresh, user, isMD, prefs.privateAloudWhenLocked, update, router]);
+  }, [refresh, user, isMD, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.listenLang, prefs.replyLanguage, update, router]);
 
   /** Runs the steps in order; returns after opening a system page (the flow continues on return). */
   const runFrom = useCallback(

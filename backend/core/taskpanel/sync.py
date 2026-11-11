@@ -87,15 +87,18 @@ def _alert_status_change(task: SharedTask, old_status: str, snap: dict):
     if new == old_status or not task.staff:
         return
     staff = task.staff.name
+    spoken_hi = ""
     if new == "working":
         title, priority, spoken = f"{staff} started a task", Priority.LOW, ""
     elif new == "waiting":
         reason = snap.get("hold_reason") or ""
         title, priority = f"{staff} put a task on hold", Priority.NORMAL
         spoken = f"{staff} has put {task.title} on hold." + (f" Reason: {reason}." if reason else "")
+        spoken_hi = f"{staff} ने {task.title} होल्ड पर रखा है।" + (f" कारण: {reason}।" if reason else "")
     elif new == "done":
         title, priority = f"{staff} completed a task", Priority.NORMAL
         spoken = f"{staff} has completed: {task.title}."
+        spoken_hi = f"{staff} ने पूरा कर दिया: {task.title}।"
     else:
         return
     recipients = {task.created_by}
@@ -105,10 +108,12 @@ def _alert_status_change(task: SharedTask, old_status: str, snap: dict):
     from .. import services  # local import: services imports this module
 
     for user in recipients:
-        address = services.address_of(user)
+        address, address_hi = services.address_of(user), services.address_hi_of(user)
         Alert.objects.create(
             recipient=user, kind=Alert.Kind.STAFF_UPDATE, priority=priority, title=title, body=task.title,
-            spoken_text=f"{address}, {spoken}"[:400] if spoken else "", ref_type="shared_task", ref_id=str(task.id),
+            spoken_text=f"{address}, {spoken}"[:400] if spoken else "",
+            spoken_text_hi=f"{address_hi}, {spoken_hi}"[:400] if spoken_hi else "",
+            ref_type="shared_task", ref_id=str(task.id),
         )
 
 

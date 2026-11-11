@@ -17,6 +17,7 @@ import { AppState, Platform } from 'react-native';
 
 import { ApiError, api, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
+import { langOfText, replyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { usePrefs } from './prefs';
 import { PresenceState, usePresence } from './presence';
@@ -218,23 +219,38 @@ function buzzSilently(urgent: boolean) {
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** "Sir, your meeting starts in 15 minutes." -> "your meeting starts in 15 minutes." (the address is said once). */
-function withoutAddress(text: string, address: string): string {
+function withoutAddress(text: string, addresses: string[]): string {
   const t = text.trim();
   const low = t.toLowerCase();
-  const a = address.toLowerCase();
-  if (a && (low.startsWith(`${a}, `) || low.startsWith(`${a} `))) return t.slice(address.length + 1).trim();
+  for (const address of addresses) {
+    const a = address.toLowerCase();
+    if (a && (low.startsWith(`${a}, `) || low.startsWith(`${a} `))) return t.slice(address.length + 1).trim();
+  }
   return t;
 }
 
-/** Several things due at once are said as one sentence, not a burst of separate announcements. */
-function combined(lines: string[], address: string): string {
+/**
+ * Several things due at once are said as one sentence, not a burst of separate announcements. The lines come
+ * from the server in the reader's language; the wrapper follows them.
+ */
+function combined(lines: string[], address: string, addressHi: string): string {
   if (lines.length === 1) return lines[0];
+  const hindi = lines.some((l) => langOfText(l) === 'hi');
   const parts = lines.map((l) => {
-    const s = withoutAddress(l, address);
-    return /[.!?]$/.test(s) ? s : `${s}.`;
+    const s = withoutAddress(l, [address, addressHi]);
+    return /[.!?।]$/.test(s) ? s : `${s}${hindi ? '।' : '.'}`;
   });
-  return `${address}, ${lines.length} things. ${parts.join(' ')}`;
+  return hindi ? `${addressHi}, ${lines.length} बातें। ${parts.join(' ')}` : `${address}, ${lines.length} things. ${parts.join(' ')}`;
 }
+
+/** Speak a line that is already written (a server line, or one sentence made of several): the voice follows its script. */
+const speakLine = (text: string, opts: { interrupt?: boolean } = {}) => say(text, { ...opts, lang: langOfText(text) });
+
+/** Speak one app-built line in the language JARVIS is using with this person (see lang.ts). */
+const sayTwin = (en: string, hi: string, opts: { interrupt?: boolean } = {}) => {
+  const t = twin(en, hi);
+  say(t.text, { ...opts, lang: t.lang, fallback: t.fallback });
+};
 
 /** "2 private reminders and 1 request from your PA" in English and Hindi. */
 function describeHeld(items: EngineItem[], isMD: boolean, md: { en: string; hi: string }): { en: string; hi: string } {
@@ -389,8 +405,11 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const spokenFor = useCallback(
-    (item: EngineItem) => (item.isPrivate && !privateAloud() ? `${address}, you have a private reminder.` : item.spoken),
-    [address, privateAloud],
+    (item: EngineItem) => {
+      if (!item.isPrivate || privateAloud()) return item.spoken;
+      return replyLang() === 'hi' ? `${addressHi}, आपका एक प्राइवेट रिमाइंडर है।` : `${address}, you have a private reminder.`;
+    },
+    [address, addressHi, privateAloud],
   );
 
   // Told once: whatever the app speaks or shows is reported to the server, so the background part never says
@@ -432,7 +451,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         // An alert with a question is handed to the conversation: it says the line, asks, and listens once.
         const presenter = presenterRef.current;
         const asked = !!presenter && !!questionFor(item, isMD, md) && presenter(item, spokenFor(item));
-        if (!asked) say(spokenFor(item));
+        if (!asked) speakLine(spokenFor(item));
       } else {
         buzzSilently(item.priority === 'URGENT');
       }
@@ -457,7 +476,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (currentRef.current && currentRef.current.key !== item.key) queueRef.current.unshift(currentRef.current);
       setCurrent({ ...item, mode: 'silent' });
       const presenter = presenterRef.current;
-      if (!presenter || !presenter(item, spokenFor(item))) say(spokenFor(item), { interrupt: true });
+      if (!presenter || !presenter(item, spokenFor(item))) speakLine(spokenFor(item), { interrupt: true });
       tell([item]);
     },
     [setCurrent, setHeld, spokenFor, tell],
@@ -471,10 +490,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       Haptics.notificationAsync(
         items.some((i) => i.priority === 'URGENT') ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success,
       ).catch(() => undefined);
-      say(combined(items.map(spokenFor), address));
+      speakLine(combined(items.map(spokenFor), address, addressHi));
       tell(items);
     },
-    [deliver, show, spokenFor, tell, address],
+    [deliver, show, spokenFor, tell, address, addressHi],
   );
 
   const hold = useCallback(
@@ -827,9 +846,9 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const acceptOffer = useCallback(() => {
     setOffer(null);
     const items = [...heldRef.current];
-    if (items.length) say(combined(items.map(spokenFor), address)); // one sentence, the address once
+    if (items.length) speakLine(combined(items.map(spokenFor), address, addressHi)); // one sentence, the address once
     acknowledgeAllHeld().catch(() => undefined);
-  }, [spokenFor, acknowledgeAllHeld, address]);
+  }, [spokenFor, acknowledgeAllHeld, address, addressHi]);
 
   const declineOffer = useCallback(() => {
     setOffer(null);
@@ -866,19 +885,21 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       try {
         const res = await api(path, { method: 'POST', body: { expected_version: item.ref.version } });
         await acknowledge(item);
-        say(res.status === 202 ? `${address}, sent to ${md.en} for approval.` : `Done, ${address}.`, { interrupt: true });
+        if (res.status === 202) sayTwin(`${address}, sent to ${md.en} for approval.`, `${addressHi}, ${md.hi} को मंज़ूरी के लिए भेज दिया।`, { interrupt: true });
+        else sayTwin(`Done, ${address}.`, `हो गया, ${addressHi}।`, { interrupt: true });
         dataChanged.emit();
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
-          say(`${address}, this task changed. I've refreshed it.`, { interrupt: true });
+          sayTwin(`${address}, this task changed. I've refreshed it.`, `${addressHi}, ये टास्क बदल गया था। मैंने रिफ़्रेश कर दिया।`, { interrupt: true });
           await acknowledge(item);
           dataChanged.emit();
         } else {
-          say(`Sorry ${address}, I couldn't reach the server. Please try again.`, { interrupt: true });
+          sayTwin(`Sorry ${address}, I couldn't reach the server. Please try again.`,
+            `माफ़ कीजिए ${addressHi}, सर्वर से संपर्क नहीं हो पाया। फिर से कोशिश कीजिए।`, { interrupt: true });
         }
       }
     },
-    [acknowledge, address, md.en],
+    [acknowledge, address, addressHi, md.en, md.hi],
   );
 
   const decideRequest = useCallback(
@@ -890,15 +911,16 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
           body: {},
           idempotencyKey: newIdempotencyKey(),
         });
-        say(accept ? `Accepted, ${address}. It's on your list.` : `Declined, ${address}. I've informed them.`, { interrupt: true });
+        if (accept) sayTwin(`Accepted, ${address}. It's on your list.`, `मंज़ूर कर दिया, ${addressHi}। आपकी लिस्ट में आ गया।`, { interrupt: true });
+        else sayTwin(`Declined, ${address}. I've informed them.`, `मना कर दिया, ${addressHi}। उन्हें बता दिया है।`, { interrupt: true });
       } catch (e) {
         const msg = e instanceof ApiError ? e.message : 'Please try again.';
-        say(`${address}, ${msg}`, { interrupt: true });
+        sayTwin(`${address}, ${msg}`, `${addressHi}, ${msg}`, { interrupt: true });
       }
       await acknowledge(item);
       dataChanged.emit();
     },
-    [acknowledge, address],
+    [acknowledge, address, addressHi],
   );
 
   const reveal = useCallback(() => {
@@ -912,19 +934,19 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (question.kind === 'done') {
         if (yes) return complete(item);
         snooze(item, 15);
-        say(`Okay ${address}, I'll remind you in 15 minutes.`, { interrupt: true });
+        sayTwin(`Okay ${address}, I'll remind you in 15 minutes.`, `ठीक है ${addressHi}, 15 मिनट बाद याद दिला दूँगा।`, { interrupt: true });
         return;
       }
       // 'seen': yes = the MD is told the PA has seen it; no = it simply leaves the screen.
       clearKey(item);
       try {
         if (item.alertId) await api(`/alerts/${item.alertId}/ack/`, { method: 'POST', body: { seen: yes } });
-        if (yes) say(`Told ${md.en}, ${address}.`, { interrupt: true });
+        if (yes) sayTwin(`Told ${md.en}, ${address}.`, `${md.hi} को बता दिया, ${addressHi}।`, { interrupt: true });
       } catch {
-        say(`Sorry ${address}, I couldn't reach the server.`, { interrupt: true });
+        sayTwin(`Sorry ${address}, I couldn't reach the server.`, `माफ़ कीजिए ${addressHi}, सर्वर से संपर्क नहीं हो पाया।`, { interrupt: true });
       }
     },
-    [decideRequest, complete, snooze, clearKey, address, md.en],
+    [decideRequest, complete, snooze, clearKey, address, addressHi, md.en, md.hi],
   );
 
   const value: EngineValue = {

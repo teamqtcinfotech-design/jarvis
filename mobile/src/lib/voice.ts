@@ -32,7 +32,10 @@ interface Probe {
   timer: ReturnType<typeof setTimeout>;
 }
 
-/** Android's built-in recogniser ('auto' = Hindi + English, or 'hi-IN'). Audio never reaches our server. */
+/**
+ * Android's built-in recogniser. lang: 'auto' = Hindi + English (Indian English, which understands Hinglish; on
+ * Android 14+ the phone switches to Hindi by itself), or a fixed 'hi-IN' / 'en-IN'. Audio never reaches our server.
+ */
 export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const [state, setState] = useState<CaptureState>('idle');
   const [partial, setPartial] = useState('');
@@ -168,10 +171,11 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       contextualStrings: handlersRef.current.hints?.length ? handlersRef.current.hints.slice(0, 60) : undefined,
       volumeChangeEventOptions: { enabled: true, intervalMillis: 120 },
       androidIntentOptions: {
-        // A natural pause mid-sentence is not the end of it.
+        // A natural pause mid-sentence is not the end of it; but a short answer ("haan") must not be made to
+        // wait out a long minimum either, so the minimum is only what a word or two takes.
         EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
         EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
-        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 8000,
+        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 2000,
         ...(canSwitch
           ? {
               EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced' as const,

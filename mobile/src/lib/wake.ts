@@ -16,6 +16,14 @@ export interface WakeConfig {
   isMd?: boolean;
   /** The PA's name as JARVIS says it, so the closed-app listener expects it (left out = keep the last one). */
   paName?: string;
+  /** Names the closed-app recogniser should expect (staff, contacts, the two of them), so they are not misheard. */
+  hints?: string[];
+  /** The phone voice for English lines ('hi-IN' Hindi accent, 'en-IN' Indian English); Hindi lines always use hi-IN. */
+  voiceAccent?: string;
+  /** The language the closed-app recogniser starts in ('en-IN' understands Hinglish too; 'hi-IN' for pure Hindi). */
+  listenLang?: string;
+  /** The language JARVIS is speaking to this person right now ('hi' / 'en'), for the few lines the phone builds itself. */
+  replyLang?: string;
   speakWhenLocked: boolean;
   /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
   wakeWord: boolean;

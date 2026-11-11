@@ -114,6 +114,9 @@ function SettingsScreen() {
         addressHi: addressHiOf(user),
         isMd: isMD,
         paName: dash?.pa_name ?? '',
+        voiceAccent: prefs.voiceAccent,
+        listenLang: prefs.listenLang === 'hi-IN' ? 'hi-IN' : 'en-IN',
+        replyLang: prefs.replyLanguage === 'auto' ? user?.language : prefs.replyLanguage,
         speakWhenLocked: prefs.privateAloudWhenLocked,
         wakeWord: true,
       });
@@ -154,12 +157,18 @@ function SettingsScreen() {
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 60 }}>
         <Txt variant="label">Voice</Txt>
         <Card style={s.card}>
-          <Row title="Listening" detail="Speak Hindi, English or Hinglish — no need to choose. JARVIS replies in the language you use." right={null} />
+          <Row title="JARVIS replies in" detail="Match me: the language you just used, Hindi or English, for everything JARVIS says — replies, reminders and messages. Or always one language." right={null} />
+          <View style={s.chips}>
+            <Chip label="Match me" selected={prefs.replyLanguage === 'auto'} onPress={() => update({ replyLanguage: 'auto' })} />
+            <Chip label="Always Hindi" selected={prefs.replyLanguage === 'hi'} onPress={() => update({ replyLanguage: 'hi' })} />
+            <Chip label="Always English" selected={prefs.replyLanguage === 'en'} onPress={() => update({ replyLanguage: 'en' })} />
+          </View>
+          <Row title="Listening" detail="Speak Hindi, English or Hinglish — no need to choose. “Mostly pure Hindi” helps when you rarely use English words." right={null} />
           <View style={s.chips}>
             <Chip label="Automatic (Hindi + English)" selected={prefs.listenLang === 'auto'} onPress={() => update({ listenLang: 'auto' })} />
             <Chip label="Mostly pure Hindi" selected={prefs.listenLang === 'hi-IN'} onPress={() => update({ listenLang: 'hi-IN' })} />
           </View>
-          <Row title="JARVIS voice" detail="Always an Indian voice. Hindi replies use the Hindi voice." right={null} />
+          <Row title="JARVIS voice" detail="Hindi lines use the Hindi voice. For English lines, choose the accent." right={null} />
           <View style={s.chips}>
             <Chip label="Indian · Hindi accent" selected={prefs.voiceAccent === 'hi-IN'} onPress={() => update({ voiceAccent: 'hi-IN' })} />
             <Chip label="Indian English" selected={prefs.voiceAccent === 'en-IN'} onPress={() => update({ voiceAccent: 'en-IN' })} />

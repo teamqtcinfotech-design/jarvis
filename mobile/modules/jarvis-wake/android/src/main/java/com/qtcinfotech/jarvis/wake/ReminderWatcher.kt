@@ -25,6 +25,7 @@ import java.util.Locale
  */
 class ReminderWatcher(private val context: Context, private val notifier: WakeNotifier) {
     private val prefs = WakeBus.prefs(context)
+    private val DEVANAGARI = Regex("[\\u0900-\\u097F]")
 
     /** One thing to announce: its server key (for "told"), what to show and what to say. */
     private class Item(val key: String, val reminderKey: String?, val alertId: String?, val title: String,
@@ -124,10 +125,13 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         }
     }
 
-    /** Show each as a notification; say them all as ONE sentence (the address once), by the unlocked / locked rules. */
+    /**
+     * Show each as a notification; say them all as ONE sentence (the address once), by the unlocked / locked rules.
+     * The lines come from the server already in the reader's language (Hindi or English); the wrapper follows them.
+     */
     private fun announce(items: List<Item>) {
         val address = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
-        val generic = "$address, you have a private reminder."
+        val addressHi = prefs.getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         val unlocked = pm.isInteractive && !km.isKeyguardLocked
@@ -136,6 +140,8 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         for (item in items) {
             notifier.show(item.key, if (item.isPrivate) "JARVIS" else "JARVIS · Reminder",
                 if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent)
+            val generic = if (DEVANAGARI.containsMatchIn(item.spoken)) "$addressHi, आपका एक प्राइवेट रिमाइंडर है।"
+                          else "$address, you have a private reminder."
             val line = when {
                 unlocked -> item.spoken
                 speakLocked -> if (item.isPrivate) generic else item.spoken
@@ -144,24 +150,33 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
             if (line.isNotBlank()) lines.add(line)
         }
         if (lines.isEmpty()) return
-        speak(if (lines.size == 1) lines[0] else combined(lines, address))
+        speak(if (lines.size == 1) lines[0] else combined(lines, address, addressHi))
     }
 
-    /** "Sir, 3 things. Your meeting starts in 15 minutes. Mansi has completed: Book flights. …" */
-    private fun combined(lines: List<String>, address: String): String {
+    /** "Sir, 3 things. Your meeting starts in 15 minutes. Mansi has completed: Book flights. …" (or the Hindi twin). */
+    private fun combined(lines: List<String>, address: String, addressHi: String): String {
+        val hindi = lines.any { DEVANAGARI.containsMatchIn(it) }
         val parts = lines.map { raw ->
             var s = raw.trim()
             val low = s.lowercase(Locale.ROOT)
-            val a = address.lowercase(Locale.ROOT)
-            if (low.startsWith("$a, ") || low.startsWith("$a ")) s = s.substring(address.length + 1).trim()
-            if (!s.endsWith(".") && !s.endsWith("!") && !s.endsWith("?")) "$s." else s
+            for (a in listOf(address, addressHi)) {
+                val al = a.lowercase(Locale.ROOT)
+                if (al.isNotEmpty() && (low.startsWith("$al, ") || low.startsWith("$al "))) {
+                    s = s.substring(a.length + 1).trim()
+                    break
+                }
+            }
+            if (!s.endsWith(".") && !s.endsWith("!") && !s.endsWith("?") && !s.endsWith("।")) s + (if (hindi) "।" else ".") else s
         }
-        return "$address, ${lines.size} things. " + parts.joinToString(" ")
+        return if (hindi) "$addressHi, ${lines.size} बातें। " + parts.joinToString(" ")
+               else "$address, ${lines.size} things. " + parts.joinToString(" ")
     }
 
     private fun speak(text: String) {
         if (text.isBlank() || WakeBus.appInForeground) return
-        TtsEngine.speak(TtsEngine.Request("bg-" + System.nanoTime(), text, null, "hi-IN", 0.95f))
+        // The Hindi voice for a Hindi line; the chosen accent (the app's "JARVIS voice" setting) for an English one.
+        val lang = if (DEVANAGARI.containsMatchIn(text)) "hi-IN" else (prefs.getString(WakeBus.KEY_VOICE_ACCENT, "hi-IN") ?: "hi-IN")
+        TtsEngine.speak(TtsEngine.Request("bg-" + System.nanoTime(), text, null, lang, 0.95f))
     }
 
     fun close() {

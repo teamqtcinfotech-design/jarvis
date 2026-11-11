@@ -3,6 +3,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { AppState } from 'react-native';
 
 import * as apiClient from './api';
+import { setReplyLang } from './lang';
 import type { SessionUser } from './types';
 import { pushForget, pushToken, wakeStop } from './wake';
 
@@ -40,6 +41,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       setBiometricAvailable(bio);
       setServer(stored.server);
       setUser(stored.user);
+      setReplyLang(stored.user?.language);
       setLocked(Boolean(stored.user) && bio);
       setReady(true);
     })();
@@ -60,7 +62,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       apiClient.api<SessionUser>('/me/')
         .then((r) => {
           if (cancelled || !r.data?.username) return;
-          const next: SessionUser = { username: r.data.username, role: r.data.role, name: r.data.name, address: r.data.address, address_hi: r.data.address_hi };
+          const next: SessionUser = { username: r.data.username, role: r.data.role, name: r.data.name, address: r.data.address,
+            address_hi: r.data.address_hi, language: r.data.language };
+          setReplyLang(next.language); // the language JARVIS is speaking to this person, as the server sees it
           setUser((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
           apiClient.storeUser(next).catch(() => undefined);
         })

@@ -3,6 +3,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { AppState } from 'react-native';
 
 import { api } from './api';
+import { setPinnedLang } from './lang';
 import { useSession } from './session';
 import { setVoiceAccent } from './speech';
 
@@ -12,6 +13,8 @@ export interface Prefs {
   listenLang: 'auto' | 'hi-IN';
   /** Voice for English replies: Hindi accent (default) or Indian English. Hindi replies always use the Hindi voice. */
   voiceAccent: 'hi-IN' | 'en-IN';
+  /** The language JARVIS replies in: 'auto' = the language you just used (the server decides), or always one. */
+  replyLanguage: 'auto' | 'hi' | 'en';
   /** Speak private task details aloud while the app is open on screen. */
   speakPrivateDetails: boolean;
   /** Also speak them when the app is in the background or the phone is locked. Off: "you have a private reminder". */
@@ -49,6 +52,7 @@ export interface RoutineBlock {
 const DEFAULTS: Prefs = {
   listenLang: 'auto',
   voiceAccent: 'hi-IN',
+  replyLanguage: 'auto',
   speakPrivateDetails: true,
   privateAloudWhenLocked: false,
   awayAfterMinutes: 10,
@@ -105,6 +109,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
         const loaded = { ...DEFAULTS, ...clean(JSON.parse(raw)) } as Prefs;
         setPrefs(loaded);
         setVoiceAccent(loaded.voiceAccent);
+        setPinnedLang(loaded.replyLanguage);
       } catch {
         // ignore corrupt prefs
       }
@@ -118,6 +123,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
       const next = { ...prev, ...patch };
       SecureStore.setItemAsync(KEY, JSON.stringify(next)).catch(() => undefined);
       if (patch.voiceAccent) setVoiceAccent(patch.voiceAccent);
+      if (patch.replyLanguage) setPinnedLang(patch.replyLanguage);
       return next;
     });
   }, []);
@@ -128,6 +134,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
       const next = { ...prev, ...patch };
       SecureStore.setItemAsync(KEY, JSON.stringify(next)).catch(() => undefined);
       if (patch.voiceAccent) setVoiceAccent(patch.voiceAccent);
+      if (patch.replyLanguage) setPinnedLang(patch.replyLanguage);
       return next;
     });
     const sentAt = Date.now();

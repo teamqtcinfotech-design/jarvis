@@ -82,3 +82,21 @@ def due_phrase(due_kind: str, due_date: date | None, due_at: datetime | None) ->
     if due_kind == "DATE" and due_date:
         return fmt_day(due_date)
     return ""
+
+
+def due_phrase_hi(due_kind: str, due_date: date | None, due_at: datetime | None) -> str:
+    """'कल 4 बजे' / 'आज' — the Hindi twin of due_phrase."""
+    if due_kind == "TIMED" and due_at:
+        local = to_local(due_at)
+        return f"{fmt_day_hi(local.date())} {fmt_time_hi(local)}"
+    if due_kind == "DATE" and due_date:
+        return fmt_day_hi(due_date)
+    return ""
+
+
+def minutes_phrase_hi(minutes: int) -> str:
+    """'30 मिनट' / '2 घंटे' / '1 घंटा'."""
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} घंटे" if hours > 1 else "1 घंटा"
+    return f"{minutes} मिनट"

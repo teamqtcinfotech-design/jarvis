@@ -40,6 +40,32 @@ export function dayLabel(dateStr: string): string {
   return `${DAYS[date.getDay()]} ${date.getDate()} ${MONTHS[date.getMonth()]}`;
 }
 
+const DAYS_HI = ['रविवार', 'सोमवार', 'मंगलवार', 'बुधवार', 'गुरुवार', 'शुक्रवार', 'शनिवार'];
+const MONTHS_HI = ['जनवरी', 'फ़रवरी', 'मार्च', 'अप्रैल', 'मई', 'जून', 'जुलाई', 'अगस्त', 'सितंबर', 'अक्टूबर', 'नवंबर', 'दिसंबर'];
+
+/** The Hindi twin of dayLabel, for the Hindi voice: 'आज', 'कल', 'परसों', 'सोमवार 17 नवंबर'. */
+export function dayLabelHi(dateStr: string): string {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  const today = new Date();
+  if (dateStr === isoDate(today)) return 'आज';
+  if (dateStr === isoDate(addDays(today, 1))) return 'कल';
+  if (dateStr === isoDate(addDays(today, 2))) return 'परसों';
+  return `${DAYS_HI[date.getDay()]} ${date.getDate()} ${MONTHS_HI[date.getMonth()]}`;
+}
+
+/** The Hindi twin of timeLabel, as people say it: '4 बजे', 'साढ़े 4 बजे', '4:15 बजे'. */
+export function timeLabelHi(hhmm: string | null | undefined): string {
+  if (!hhmm) return '';
+  const [h, m] = hhmm.split(':').map(Number);
+  if (Number.isNaN(h)) return hhmm;
+  const hour = h % 12 || 12;
+  if (!m) return `${hour} बजे`;
+  if (m === 30) return `साढ़े ${hour} बजे`;
+  return `${hour}:${String(m).padStart(2, '0')} बजे`;
+}
+
 export function greeting(): string {
   const h = new Date().getHours();
   if (h < 12) return 'Good morning';

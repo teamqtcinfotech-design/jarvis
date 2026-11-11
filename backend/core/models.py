@@ -328,6 +328,8 @@ class Alert(models.Model):
     title = models.CharField(max_length=200)
     body = models.TextField(blank=True, default="")          # a briefing can be a full paragraph
     spoken_text = models.TextField(blank=True, default="")
+    # The same line in Devanagari, spoken instead when the recipient has been speaking Hindi (empty = English only).
+    spoken_text_hi = models.TextField(blank=True, default="")
     ref_type = models.CharField(max_length=20, blank=True, default="")
     ref_id = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)

@@ -14,7 +14,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from . import ai_brain, ai_usage, assistant, conversation, datacards, push, services, xai
+from . import ai_brain, ai_usage, assistant, conversation, datacards, lang, push, services, xai
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
@@ -89,6 +89,7 @@ class MeView(APIView):
             "name": u.spoken_name,
             "address": services.address_of(u),
             "address_hi": services.address_hi_of(u),
+            "language": lang.current(u),  # the language JARVIS is speaking to this person right now ("hi" / "en")
             "features": {
                 "ai": ai_brain.ai_available(),
                 "taskpanel": {**tp_client().describe(), "linked": services.user_link(u) is not None},
@@ -716,9 +717,10 @@ class AlertListView(APIView):
     def get(self, request):
         from django.utils import timezone
 
+        spoken_in = lang.current(request.user)  # the recipient's language right now: Hindi twins when it is Hindi
         qs = Alert.objects.filter(recipient=request.user, acknowledged_at__isnull=True,
                                   created_at__gte=timezone.now() - services.ALERT_LIST_FOR)[:50]
-        return Response({"results": [services.alert_item(a) for a in qs]})
+        return Response({"results": [services.alert_item(a, spoken_in) for a in qs]})
 
 
 class ToldView(APIView):

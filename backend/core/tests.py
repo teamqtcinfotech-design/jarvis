@@ -402,7 +402,10 @@ class TaskPanelRulesTests(BaseCase):
         md_rem = [x for x in self.md_client.get("/api/v1/reminders/").json()["reminders"] if task_id in x["key"]]
         pa_rem = [x for x in self.pa_client.get("/api/v1/reminders/").json()["reminders"] if task_id in x["key"]]
         self.assertTrue(md_rem and pa_rem)
-        self.assertIn("meeting with Priya", md_rem[0]["spoken"])
+        self.assertIn("meeting with Priya", md_rem[0]["spoken_en"])
+        # He gave the instruction in Hinglish, so his reminders now come in Hindi (the English twin stays beside them).
+        self.assertEqual(md_rem[0]["lang"], "hi")
+        self.assertIn("Priya के साथ आपकी मीटिंग", md_rem[0]["spoken"])
 
     def test_unclear_owner_asks_where_it_goes(self):
         draft = self._interpret(self.md_client, "kal GST file submit karni hai")
@@ -553,14 +556,22 @@ class SmartAssistantTests(BaseCase):
         self.assertIn("सर", draft["speak_text"])
         self.assertFalse(draft["needs_clarification"])
 
-    def test_server_built_confirmation_is_spoken_as_written(self):
+    def test_server_built_confirmation_has_its_own_hindi_twin(self):
         draft, _ = self.interpret(self.md_client, "Ramesh ko bolo kal GST file bheje", _cmd(
             intent="assign_to_staff", title="GST file bhejna", staff_name="Ramesh Kumar",
             spoken_reply="Sir, Ramesh ko GST file ka task de doon?", reply_language="hi",
             spoken_reply_hi="सर, रमेश को जीएसटी फाइल का टास्क दे दूँ?", engine="rules"))
         self.assertEqual(draft["action"], "delegation")
-        self.assertEqual(draft["speak_lang"], "en")  # the server rewrote the reply, so no stale Hindi version
-        self.assertEqual(draft["speak_text"], draft["spoken_reply"])
+        # The server rewrote the reply: the model's Devanagari line is stale, the server's own twin is spoken instead.
+        self.assertEqual(draft["speak_lang"], "hi")
+        self.assertNotEqual(draft["speak_text"], "सर, रमेश को जीएसटी फाइल का टास्क दे दूँ?")
+        self.assertIn("Ramesh Kumar को असाइन", draft["speak_text"])
+        self.assertTrue(draft["speak_text"].endswith("सेव कर दूँ?"), draft["speak_text"])
+        self.assertIn("Assign to Ramesh Kumar", draft["spoken_reply"])  # the screen still shows the English line
+        # The same sentence in English is spoken in English.
+        draft, _ = self.interpret(self.md_client, "Tell Ramesh to send the GST file tomorrow", _cmd(
+            intent="assign_to_staff", title="Send the GST file", staff_name="Ramesh Kumar", engine="rules"))
+        self.assertEqual((draft["speak_lang"], draft["speak_text"]), ("en", draft["spoken_reply"]))
 
     def test_conversation_and_own_memories_reach_the_model(self):
         services.add_memory(self.md, "City is Indore.")
@@ -752,8 +763,10 @@ class SmartAssistantTests(BaseCase):
     def test_pa_hears_a_composed_professional_note(self):
         from types import SimpleNamespace as NS
         client = mock.Mock()
+        note = {"text": "Mansi, please keep 10:00 today free for a meeting with Sir. It is urgent.",
+                "text_hi": "मानसी, कृपया आज 10 बजे सर के साथ मीटिंग के लिए समय रखिए। यह अर्जेंट है।"}
         client.messages.create.return_value = NS(
-            content=[NS(type="text", text="Mansi, please keep 10:00 today free for a meeting with Sir. It is urgent.")],
+            content=[NS(type="text", text=json.dumps(note, ensure_ascii=False))],
             stop_reason="end_turn", usage=NS(input_tokens=50, output_tokens=20, cache_creation_input_tokens=0,
                                              cache_read_input_tokens=0, server_tool_use=None))
         when = tu.now_local() + timedelta(hours=3)
@@ -764,9 +777,15 @@ class SmartAssistantTests(BaseCase):
                 "description": "Mansi ke saath 10 baje meeting, urgent"}, format="json", HTTP_IDEMPOTENCY_KEY="note-1")
         self.assertEqual(r.status_code, 201)
         alert = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
-        self.assertEqual(alert["spoken_text"], "Mansi, please keep 10:00 today free for a meeting with Sir. It is urgent.")
+        self.assertEqual(alert["spoken_text"], note["text"])
+        self.assertEqual(alert["spoken_text_hi"], note["text_hi"])  # the Hindi twin travels with it
         sent = json.dumps(client.messages.create.call_args.kwargs, default=str)
         self.assertNotIn(SECRET, sent)  # only the task's own facts go to the model
+        # The PA has been speaking Hindi lately: the same alert is spoken to her in Hindi.
+        services.set_pref_quiet(self.pa, "langRecent", "hi,hi,en,hi")
+        alert = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertEqual(alert["spoken_text"], note["text_hi"])
+        self.assertEqual(alert["spoken_text_en"], note["text"])
 
     def test_composed_note_falls_back_to_template_when_ai_is_off(self):
         r = self.md_client.post("/api/v1/pa-tasks/", {"title": "Book the Pune flights", "kind": "TASK"},
@@ -2159,3 +2178,137 @@ class TodayAndNarrowingTests(BaseCase):
         for kind in ("today", "pending", "late", "upcoming", "busy", "requests", "done", "stats", "week"):
             d, _ = self.ask(self.pa_client, "dikhao", view_kind=kind)
             self.assertNotIn(SECRET, json.dumps(d), kind)
+
+
+class LanguageTests(BaseCase):
+    """One language rule for everything JARVIS says: the sentence just spoken decides, a pinned setting overrides,
+    and what is said with nothing just spoken (alerts, reminders) follows the language used lately."""
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd) as fake:
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json(), fake
+
+    def turn(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_the_sentence_itself_tells_the_language(self):
+        from core import lang
+        self.assertEqual(lang.detect("kal 4 baje Sharma ji ke saath meeting"), "hi")
+        self.assertEqual(lang.detect("कल शर्मा जी के साथ मीटिंग"), "hi")
+        self.assertEqual(lang.detect("what do I have today"), "en")
+        self.assertEqual(lang.detect("remind me tomorrow at 4"), "en")
+        self.assertEqual(lang.detect("haan"), "hi")
+        self.assertEqual(lang.detect("yes"), "en")
+        self.assertEqual(lang.detect("Ramesh Kumar"), "")   # a bare name says nothing
+        self.assertEqual(lang.detect("5"), "")
+        self.assertEqual(lang.pick("hi", "English", "हिंदी"), "हिंदी")
+        self.assertEqual(lang.pick("hi", "English", ""), "English")  # no twin: the English line
+        self.assertEqual(lang.pick("en", "English", "हिंदी"), "English")
+
+    def test_server_decides_the_language_and_remembers_it(self):
+        tomorrow = (tu.today_local() + timedelta(days=1)).isoformat()
+        # Hinglish, while the model wrongly votes English: the server-built line is still spoken in Hindi.
+        d, fake = self.interpret(self.md_client, "kal 4 baje Sharma ji ke saath meeting", _cmd(
+            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", due_date=tomorrow, due_time="16:00",
+            reply_language="en", engine="rules"))
+        self.assertEqual(fake.call_args.args[1]["reply_language"], "hi")  # the model is told, not asked
+        self.assertEqual((d["reply_language"], d["speak_lang"]), ("hi", "hi"))
+        self.assertIn("कल 4 बजे", d["speak_text"])
+        self.assertTrue(d["speak_text"].endswith("सेव कर दूँ?"), d["speak_text"])
+        self.assertIn("tomorrow at 4 PM", d["spoken_reply"])  # the screen keeps the English line
+        self.assertEqual(services.get_prefs(self.md)["langRecent"], "hi")
+        # English next: English.
+        d, _ = self.interpret(self.md_client, "meeting with Sharma ji tomorrow at 4", _cmd(
+            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", due_date=tomorrow, due_time="16:00", engine="rules"))
+        self.assertEqual((d["reply_language"], d["speak_lang"]), ("en", "en"))
+        self.assertEqual(services.get_prefs(self.md)["langRecent"], "hi,en")
+        # A bare answer with no language of its own: the model is told what he has mostly used lately and follows it.
+        services.set_pref_quiet(self.md, "langRecent", "hi,hi,hi,en")
+        d, fake = self.interpret(self.md_client, "Ramesh", _cmd(intent="assign_to_staff", title="Send the GST file",
+                                                                   staff_name="Ramesh", reply_language="hi", engine="rules"))
+        self.assertEqual(fake.call_args.args[1]["reply_language"], "hi")
+        self.assertEqual(d["reply_language"], "hi")
+        self.assertEqual(services.get_prefs(self.md)["langRecent"], "hi,hi,hi,en,hi")
+        self.assertEqual(d["speak_lang"], "hi")
+        self.assertIn("Ramesh Kumar", d["speak_text"])
+        # Pinned: "always English" wins over a Hindi sentence, "always Hindi" over an English one.
+        self.md_client.patch("/api/v1/me/prefs/", {"replyLanguage": "en"}, format="json")
+        d, _ = self.interpret(self.md_client, "kal 4 baje Sharma ji ke saath meeting", _cmd(
+            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", due_date=tomorrow, due_time="16:00", engine="rules"))
+        self.assertEqual((d["reply_language"], d["speak_lang"]), ("en", "en"))
+        self.md_client.patch("/api/v1/me/prefs/", {"replyLanguage": "Hindi"}, format="json")
+        d, _ = self.interpret(self.md_client, "meeting with Sharma ji tomorrow at 4", _cmd(
+            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", due_date=tomorrow, due_time="16:00", engine="rules"))
+        self.assertEqual((d["reply_language"], d["speak_lang"]), ("hi", "hi"))
+        self.assertEqual(services.get_prefs(self.md)["replyLanguage"], "hi")
+
+    def test_questions_and_answers_the_server_builds_have_hindi_twins(self):
+        # Which one did you finish? / nothing pending / delete asks first — each spoken in Hindi when asked in Hindi.
+        d, _ = self.interpret(self.md_client, "wo kaam ho gaya", _cmd(intent="complete_task", title="xyz", engine="rules"))
+        self.assertTrue(d["needs_clarification"])
+        self.assertEqual(d["speak_lang"], "hi")
+        self.assertIn("कौन सा टास्क पूरा हुआ", d["speak_text"])
+        d, _ = self.interpret(self.md_client, "request accept karo", _cmd(intent="accept_request", engine="rules"))
+        self.assertEqual((d["action"], d["speak_lang"]), ("answer", "hi"))
+        self.assertIn("कोई रिक्वेस्ट पेंडिंग नहीं", d["speak_text"])
+        d, _ = self.interpret(self.md_client, "bas, thank you", _cmd(intent="end_conversation", engine="rules"))
+        self.assertEqual(d["speak_lang"], "hi")
+        self.assertIn("हेलो जार्विस", d["speak_text"])
+        d, _ = self.interpret(self.md_client, "okay thanks, that's all", _cmd(intent="end_conversation", engine="rules"))
+        self.assertEqual(d["speak_lang"], "en")
+        self.assertIn("Hello JARVIS", d["speak_text"])
+
+    def test_the_yes_is_answered_in_the_language_of_the_yes(self):
+        tomorrow = (tu.today_local() + timedelta(days=1)).isoformat()
+        r = self.turn(self.md_client, "kal 4 baje Sharma ji ke saath meeting", _cmd(
+            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", due_date=tomorrow, due_time="16:00", engine="rules"))
+        self.assertEqual((r["action"], r["say_lang"]), ("private_task", "hi"))
+        self.assertIn("सेव कर दूँ", r["say"])
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual((r["action"], r["say_lang"]), ("saved", "hi"))
+        self.assertIn("सेव हो गया", r["say"])
+        self.assertIn("कल 4 बजे याद दिला दूँगा", r["say"])
+        self.assertTrue(r["show"].startswith("Saved, Sir."))
+        # Nothing waiting, asked in English: English.
+        r = self.turn(self.md_client, "yes please", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["say_lang"], "en")
+
+    def test_alerts_reminders_and_nudges_follow_the_recipients_recent_language(self):
+        from core import followups, push
+        from core.reminders import reminders_for
+        services.set_pref_quiet(self.pa, "langRecent", "hi,hi,hi")
+        soon = tu.now_local() + timedelta(hours=3)
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Courier the contract", "priority": "HIGH",
+                                                   "due_date": soon.date().isoformat(), "due_time": soon.strftime("%H:%M")},
+                            format="json", HTTP_IDEMPOTENCY_KEY="lang-1")
+        alert = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertIn("ने आपको एक नया ज़रूरी टास्क दिया है: Courier the contract", alert["spoken_text"])
+        self.assertIn("Sir has given you a new high-priority task", alert["spoken_text_en"])
+        self.assertEqual(push.payload_for(Alert.objects.get(id=alert["id"]))["spoken"], alert["spoken_text"])
+        # Her reminders for it are Hindi too; Sir's about it stay English.
+        hers = [r for r in reminders_for(self.pa)["reminders"] if r["ref"]["id"] == alert["ref_id"]]
+        self.assertTrue(hers and all(r["lang"] == "hi" for r in hers), hers)
+        self.assertTrue(any("सर का टास्क अभी ड्यू है: Courier the contract" in r["spoken"] for r in hers), hers)
+        self.assertTrue(all("Priya, " in r["spoken_en"] for r in hers), hers)
+        his = [r for r in reminders_for(self.md)["reminders"] if r["ref"]["id"] == alert["ref_id"]]
+        self.assertTrue(his and all(r["lang"] == "en" and "Priya's task" in r["spoken"] for r in his), his)
+        # Her status change is told to Sir in English (his language), with the Hindi twin kept on the row.
+        task_id = alert["ref_id"]
+        r = self.pa_client.post(f"/api/v1/pa-tasks/{task_id}/status/", {"status": "COMPLETED", "expected_version": 1}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        done = [a for a in self.md_client.get("/api/v1/alerts/").json()["results"] if a["kind"] == "STAFF_UPDATE"][0]
+        self.assertEqual(done["spoken_text"], "Sir, Priya has completed: Courier the contract.")
+        self.assertEqual(done["spoken_text_hi"], "सर, Priya ने पूरा कर दिया: Courier the contract।")
+        # A follow-up nudge for her carries a Hindi twin and is served in Hindi.
+        r = self.md_client.post("/api/v1/pa-tasks/", {"title": "Chase the vendor"}, format="json", HTTP_IDEMPOTENCY_KEY="lang-3")
+        SharedTask.objects.filter(id=r.json()["id"]).update(created_at=tu.now_local() - timedelta(days=2))
+        followups.run(now=tu.combine_local(tu.today_local(), time(11, 0)))
+        nudge = [a for a in self.pa_client.get("/api/v1/alerts/").json()["results"] if a["ref_id"].startswith("notstarted:")]
+        self.assertTrue(nudge, "no nudge raised")
+        self.assertIn("अभी शुरू नहीं हुआ", nudge[0]["spoken_text"])
+        self.assertIn("is not started yet", nudge[0]["spoken_text_en"])
