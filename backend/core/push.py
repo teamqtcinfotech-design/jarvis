@@ -104,7 +104,10 @@ def payload_for(alert: Alert) -> dict[str, str]:
     The spoken line is in the recipient's current language."""
     from . import lang
 
+    from . import services
+
     spoken = alert.spoken_text_hi if lang.current(alert.recipient) == "hi" and alert.spoken_text_hi else alert.spoken_text
+    question = services.alert_question(alert)
     return {
         "type": "alert",
         "id": str(alert.id),
@@ -115,6 +118,10 @@ def payload_for(alert: Alert) -> dict[str, str]:
         "spoken": (spoken or "")[:1500],
         "ref_type": alert.ref_type,
         "ref_id": alert.ref_id,
+        # The question JARVIS asks after it (a contract both parts of the phone read), and the key it is announced
+        # under (a snoozed alert that comes back is a new announcement).
+        "question": json.dumps(question, ensure_ascii=False) if question else "",
+        "announce_key": f"alert:{alert.id}" + (f":s{int(alert.snoozed_until.timestamp())}" if alert.snoozed_until else ""),
     }
 
 

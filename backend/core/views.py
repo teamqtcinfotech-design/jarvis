@@ -35,6 +35,7 @@ from .serializers import (
     PaTaskInputSerializer,
     PaTaskStatusSerializer,
     RequestInputSerializer,
+    SnoozeSerializer,
     TeamDelegationSerializer,
     TaskInputSerializer,
     TaskPatchSerializer,
@@ -534,7 +535,7 @@ class ConversationTurnView(APIView):
         d = s.validated_data
         xai.tts_warm()  # he is talking: have the voice connection open by the time the reply is ready
         return Response(conversation.turn(request.user, d["text"], event=d["event"], locked=d["locked"],
-                                          private_ok=d["private_ok"]))
+                                          private_ok=d["private_ok"], about=d.get("about")))
 
 
 class AskView(APIView):
@@ -709,6 +710,40 @@ class ReminderAckView(APIView):
         return Response({"acknowledged": s.validated_data["key"]})
 
 
+class ReminderSnoozeView(APIView):
+    """"Later": a reminder or an alert comes back at the given moment (or in N minutes, or after the person's usual
+    snooze). Kept on the server, so the app and the phone's background part agree and a restart loses nothing."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        from django.utils import timezone
+
+        s = SnoozeSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        minutes = d["minutes"] or int(services.get_prefs(request.user).get("snoozeMinutes", 15))
+        until = d["until"] or timezone.now() + tu.timedelta(minutes=minutes)
+        if until <= timezone.now():
+            return error("invalid", "That time has already passed.", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        what = None
+        if d["key"]:
+            services.snooze_reminder(request.user, d["key"], until)
+            what = {"kind": "reminder", "key": d["key"]}
+        elif d["alert_id"]:
+            try:
+                alert = services.snooze_alert(request.user, d["alert_id"], until)
+            except (Alert.DoesNotExist, ValueError):
+                raise Http404
+            what = {"kind": "alert", "id": str(alert.id), "title": alert.title}
+        elif d["last"]:
+            what = services.snooze_last_told(request.user, until)
+            if what is None:
+                return error("nothing", "Nothing was said recently that could be snoozed.", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        else:
+            return error("invalid", "Say which reminder or alert.", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return Response({"until": until.isoformat(), "until_label": services.moment_label(until), **what})
+
+
 class AlertListView(APIView):
     """Unseen alerts of the last week. Each says whether it was already told (spoken or shown once) and whether it
     is still fresh enough to be announced; the phone never announces the same one twice."""
@@ -717,9 +752,13 @@ class AlertListView(APIView):
     def get(self, request):
         from django.utils import timezone
 
+        from django.db.models import Q
+
         spoken_in = lang.current(request.user)  # the recipient's language right now: Hindi twins when it is Hindi
-        qs = Alert.objects.filter(recipient=request.user, acknowledged_at__isnull=True,
-                                  created_at__gte=timezone.now() - services.ALERT_LIST_FOR)[:50]
+        now = timezone.now()
+        qs = (Alert.objects.filter(recipient=request.user, acknowledged_at__isnull=True, created_at__gte=now - services.ALERT_LIST_FOR)
+              .filter(Q(snoozed_until__isnull=True) | Q(snoozed_until__lte=now))  # snoozed: out of sight until then
+              .select_related("recipient")[:50])
         return Response({"results": [services.alert_item(a, spoken_in) for a in qs]})
 
 

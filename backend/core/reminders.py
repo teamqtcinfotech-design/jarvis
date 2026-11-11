@@ -11,8 +11,9 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 
 from . import lang as lang_mod
+from . import scheduling
 from . import timeutils as tu
-from .models import Kind, Priority, PrivateTask, ReminderAck, ReminderTold, SharedTask, Status, User
+from .models import Kind, Priority, PrivateTask, ReminderAck, ReminderSnooze, ReminderTold, SharedTask, Status, User
 from .services import (
     address_hi_of, address_of, busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs,
     md_address, md_address_hi, md_private_qs, meeting_override_until, pa_tasks_qs, shared_md_tasks_qs,
@@ -23,13 +24,18 @@ LOOKBACK = timedelta(hours=12)
 # in working hours only. After that it is left to the evening summary and the next morning's briefing.
 CHECKIN_AFTER = timedelta(minutes=45)
 CHECKIN_HOURS = range(9, 20)
+# A date-only item written down after the day's reminder time still gets its reminder that day: an hour before the
+# office closes, if that is still ahead. Later than that, the evening summary covers it.
+LATE_DAY_REMINDER_BEFORE_CLOSE = timedelta(hours=1)
+
+# The question JARVIS asks right after a reminder, and what a yes does. Both the app and the phone's background
+# part read this; neither spells its own. A meeting that is starting needs no question.
+Q_DONE = {"kind": "done", "en": "Done, or remind you later?", "hi": "हो गया, या बाद में याद दिलाऊँ?"}
+Q_CHECKIN = {"kind": "done", "en": "", "hi": ""}  # the check-in line itself asks ("Done, move it, or leave it?")
 
 
 def _lead_phrase(minutes: int) -> str:
-    if minutes >= 60 and minutes % 60 == 0:
-        hours = minutes // 60
-        return f"in {hours} hour{'s' if hours > 1 else ''}"
-    return f"in {minutes} minutes"
+    return f"in {tu.minutes_phrase(minutes)}"
 
 
 def _lead_phrase_hi(minutes: int) -> str:
@@ -45,7 +51,10 @@ def lead_for(task, prefs: dict) -> int:
 
 def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dict, checkin: bool = True,
                     address_hi: str = "") -> list[dict]:
-    """Every reminder line comes with its Hindi twin ("spoken_hi"); reminders_for picks by the reader's language."""
+    """Every reminder line comes with its Hindi twin ("spoken_hi"); reminders_for picks by the reader's language.
+
+    Keys name the item and its MOMENT (not its version): a rename or a note added later keeps the same key, so it
+    is not announced again; a new time is a new reminder."""
     out = []
     address_hi = address_hi or address
     base = {
@@ -54,13 +63,14 @@ def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dic
         "kind": task.kind,
         "is_private": is_private,
         "ref": {"scope": scope, "id": str(task.id), "version": task.version},
+        "question": None,
     }
-    key_prefix = f"{scope}:{task.id}:v{task.version}"
     # A reminder whose time had already passed when the task was written down is not a reminder he missed:
     # "kal 4 baje" said at 3:55 gets no "15 minutes before", only the "it's time".
     born = (task.created_at or timezone.now()) - timedelta(minutes=1)
     start = task.scheduled_start or task.due_at
     if start:
+        key_prefix = f"{scope}:{task.id}:t{int(start.timestamp())}"
         lead = lead_for(task, prefs)
         before_at = start - timedelta(minutes=lead)
         if lead > 0 and before_at >= born:
@@ -72,11 +82,11 @@ def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dic
                 spoken = f"{address}, your meeting {task.title} starts {lead_en}."
                 spoken_hi = f"{address_hi}, आपकी मीटिंग {task.title} {lead_hi} शुरू होगी।"
             elif task.kind == Kind.CALL:
-                spoken = f"{address}, your call {task.title} {lead_en}."
-                spoken_hi = f"{address_hi}, आपका कॉल {task.title} {lead_hi}।"
+                spoken = f"{address}, your call {task.title} is {lead_en}."
+                spoken_hi = f"{address_hi}, आपका कॉल {task.title} {lead_hi} है।"
             else:
-                spoken = f"{address}, {task.title} {lead_en}."
-                spoken_hi = f"{address_hi}, {task.title} {lead_hi}।"
+                spoken = f"{address}, {task.title} is due {lead_en}."
+                spoken_hi = f"{address_hi}, {task.title} {lead_hi} ड्यू है।"
             out.append({**base, "key": f"{key_prefix}:before", "label": "before",
                         "fire_at": before_at.isoformat(), "spoken": spoken, "spoken_hi": spoken_hi})
         if task.kind == Kind.MEETING:
@@ -90,10 +100,13 @@ def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dic
             due_hi = f"{address_hi}, समय हो गया: {task.title}।"
         if start >= born:
             out.append({**base, "key": f"{key_prefix}:due", "label": "due", "fire_at": start.isoformat(),
-                        "spoken": due_spoken, "spoken_hi": due_hi})
-        # Still open well after its time: one check-in, in working hours, then it is left to the evening summary.
+                        "spoken": due_spoken, "spoken_hi": due_hi,
+                        "question": None if task.kind == Kind.MEETING else Q_DONE})
+        # Still open well after its time: one check-in, in working hours on a working day, then it is left to the
+        # evening summary.
         at = start + CHECKIN_AFTER
-        if checkin and tu.to_local(at).hour in CHECKIN_HOURS:
+        at_local = tu.to_local(at)
+        if checkin and at_local.hour in CHECKIN_HOURS and not scheduling.is_off_day(prefs, at_local.date()):
             what = {Kind.MEETING: "your meeting", Kind.CALL: "your call"}.get(task.kind, "")
             what_hi = {Kind.MEETING: "आपकी मीटिंग", Kind.CALL: "आपका कॉल"}.get(task.kind, "")
             out.append({**base, "key": f"{key_prefix}:checkin", "label": "checkin", "fire_at": at.isoformat(),
@@ -101,13 +114,19 @@ def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dic
                         "spoken": f"{address}, {_join(what, task.title)} was due at {tu.fmt_time(start)} and is still open. "
                                   f"Done, move it, or leave it?",
                         "spoken_hi": f"{address_hi}, {_join(what_hi, task.title)} {tu.fmt_time_hi(start)} पर था और अभी भी खुला है। "
-                                     f"हो गया, आगे बढ़ाऊँ, या रहने दूँ?"})
+                                     f"हो गया, आगे बढ़ाऊँ, या रहने दूँ?",
+                        "question": Q_CHECKIN})
     elif task.due_date:
+        key_prefix = f"{scope}:{task.id}:d{task.due_date.isoformat()}"
         fire = tu.combine_local(task.due_date, day_reminder_time(prefs))
+        if fire < born and task.due_date == tu.to_local(born).date():
+            # Written down after the day's reminder time: still remind today, an hour before the office closes.
+            _, close = scheduling.office_hours(prefs, task.due_date)
+            fire = close - LATE_DAY_REMINDER_BEFORE_CLOSE
         if fire >= born:
             out.append({**base, "key": f"{key_prefix}:day", "label": "day", "fire_at": fire.isoformat(),
                         "spoken": f"{address}, today's reminder: {task.title}.",
-                        "spoken_hi": f"{address_hi}, आज का रिमाइंडर: {task.title}।"})
+                        "spoken_hi": f"{address_hi}, आज का रिमाइंडर: {task.title}।", "question": Q_DONE})
     return out
 
 
@@ -181,11 +200,16 @@ def reminders_for(user: User, hours: int = 48) -> dict:
                     item["spoken_hi"] = f"{name}, {sir_hi} का टास्क आज ड्यू है: {task.title}।"
                 items.append(item)
         for task in delegated_qs().filter(created_by=user, **open_filter):
-            start = task.due_at
-            if not start:
+            # A staff task she gave: a follow-up at its time, or on its day at her reminder hour when it has no time.
+            if task.due_at:
+                start, moment = task.due_at, f"t{int(task.due_at.timestamp())}"
+            elif task.due_date:
+                start, moment = tu.combine_local(task.due_date, day_reminder_time(prefs)), f"d{task.due_date.isoformat()}"
+            else:
                 continue
+            today_hi = "आज " if not task.due_at else ""
             items.append({
-                "key": f"shared:{task.id}:v{task.version}:followup",
+                "key": f"shared:{task.id}:{moment}:followup",
                 "label": "followup",
                 "fire_at": start.isoformat(),
                 "priority": task.priority,
@@ -193,10 +217,21 @@ def reminders_for(user: User, hours: int = 48) -> dict:
                 "kind": Kind.FOLLOW_UP,
                 "is_private": False,
                 "ref": {"scope": "shared", "id": str(task.id), "version": task.version},
-                "spoken": f"{name}, {task.staff.name}'s task is due now: {task.title}. Please follow up.",
-                "spoken_hi": f"{name}, {task.staff.name} का टास्क अभी ड्यू है: {task.title}। कृपया फ़ॉलो-अप कीजिए।",
+                "spoken": f"{name}, {task.staff.name}'s task is due {'now' if task.due_at else 'today'}: {task.title}. Please follow up.",
+                "spoken_hi": f"{name}, {task.staff.name} का टास्क {today_hi or 'अभी '}ड्यू है: {task.title}। कृपया फ़ॉलो-अप कीजिए।",
+                "question": None,
             })
 
+    # "Later": a snoozed reminder is served once more at the time he chose, under a new key, so it is announced
+    # afresh by whichever part of the phone sees it first (and the original leaves the list).
+    keys = [i["key"] for i in items]
+    snoozes = dict(ReminderSnooze.objects.filter(user=user, key__in=keys, until__gte=now - LOOKBACK).values_list("key", "until"))
+    for item in items:
+        until = snoozes.get(item["key"])
+        if until:
+            item["snoozed_from"] = item["key"]
+            item["key"] = f"{item['key']}:s{int(until.timestamp())}"
+            item["fire_at"] = until.isoformat()
     keys = [i["key"] for i in items]
     acked = set(ReminderAck.objects.filter(user=user, key__in=keys).values_list("key", flat=True))
     told = dict(ReminderTold.objects.filter(user=user, key__in=keys).values_list("key", "told_at"))

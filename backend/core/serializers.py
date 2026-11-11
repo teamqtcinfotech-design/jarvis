@@ -29,9 +29,11 @@ class TaskInputSerializer(serializers.Serializer):
     remind_before_minutes = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=1440,
                                                      default=None)
     announcement = serializers.CharField(max_length=300, required=False, allow_blank=True, default="")
+    # "In 5 minutes": the exact moment, seconds included (then due_date / due_time are not needed).
+    due_at = serializers.DateTimeField(required=False, allow_null=True, default=None)
 
     def validate(self, attrs):
-        if attrs.get("due_time") and not attrs.get("due_date"):
+        if attrs.get("due_time") and not attrs.get("due_date") and not attrs.get("due_at"):
             raise serializers.ValidationError({"due_date": "A date is required when a time is given."})
         return attrs
 
@@ -142,12 +144,33 @@ class InterpretSerializer(serializers.Serializer):
         return value
 
 
+class AboutSerializer(serializers.Serializer):
+    """The reminder or alert the phone's background part has just spoken and asked about; the words are the answer."""
+    kind = serializers.ChoiceField(choices=[("reminder", "reminder"), ("alert", "alert")])
+    key = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")   # reminder key
+    id = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")      # alert id
+    title = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    question = serializers.CharField(max_length=300, required=False, allow_blank=True, default="")
+
+
 class TurnSerializer(serializers.Serializer):
     """One thing the user said to the background listener (or a wake / reset event)."""
     text = serializers.CharField(max_length=1000, required=False, allow_blank=True, default="", trim_whitespace=True)
-    event = serializers.ChoiceField(choices=[("", ""), ("wake", "wake"), ("reset", "reset")], required=False, default="")
+    event = serializers.ChoiceField(choices=[("", ""), ("wake", "wake"), ("reset", "reset"), ("ask", "ask")],
+                                    required=False, default="")
     locked = serializers.BooleanField(required=False, default=False)
     private_ok = serializers.BooleanField(required=False, default=True)
+    about = AboutSerializer(required=False, allow_null=True, default=None)
+
+
+class SnoozeSerializer(serializers.Serializer):
+    """"Later" for one reminder (key) or alert (alert_id), or for whatever JARVIS said last (last). Until a moment,
+    or in a number of minutes; neither = the person's usual snooze."""
+    key = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    alert_id = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    last = serializers.BooleanField(required=False, default=False)
+    until = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    minutes = serializers.IntegerField(required=False, allow_null=True, min_value=1, max_value=1440, default=None)
 
 
 class AskSerializer(serializers.Serializer):

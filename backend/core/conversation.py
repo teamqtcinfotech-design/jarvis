@@ -14,8 +14,9 @@ from django.utils import timezone
 
 from . import ai_brain, assistant, services
 from . import lang as lang_mod
+from . import timeutils as tu
 from .assistant import TASK_ACTIONS
-from .models import ConversationState, IntegrationCommand, PrivateTask, SharedTask, StaffMember, Status, User
+from .models import Alert, ConversationState, IntegrationCommand, PrivateTask, ReminderAck, SharedTask, StaffMember, Status, User
 from .reminders import reminders_for
 from .services import ServiceError
 
@@ -27,7 +28,8 @@ CONFIRMABLE = TASK_ACTIONS | {"accept_request", "decline_request", "complete", "
 AI_DONE_OK = {"private_task", "pa_task", "pa_meeting", "md_request", "remember", "accept_request", "decline_request",
               "complete", "pa_self_task"}
 EMPTY = {"history": [], "pending": None, "choices": None, "offer": None,
-         "last_view": None}  # the list JARVIS showed last (see services.remember_last_view); kept, not used here
+         "last_view": None,  # the list JARVIS showed last (see services.remember_last_view); kept, not used here
+         "asked": None}      # the reminder / alert the phone's background part just spoke and asked about
 
 
 # ------------------------------------------------------------------ state
@@ -98,7 +100,8 @@ def _choices_for(draft: dict) -> dict | None:
 
 
 # ------------------------------------------------------------------ the turn
-def turn(user: User, text: str, *, event: str = "", locked: bool = False, private_ok: bool = True) -> dict:
+def turn(user: User, text: str, *, event: str = "", locked: bool = False, private_ok: bool = True,
+         about: dict | None = None) -> dict:
     address, address_hi = services.address_of(user), services.address_hi_of(user)
     state = _load(user)
     if event == "reset":
@@ -107,14 +110,23 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     if event == "wake":
         return _wake(user, state, address, private_ok)
 
+    if event == "ask" and about:
+        # The background part has just spoken a reminder or an alert and its question; the next words answer it.
+        state["asked"] = {k: str(about.get(k) or "")[:300] for k in ("kind", "key", "id", "title", "question")}
+        state["history"].append({"role": "jarvis", "text": f"{about.get('title') or ''} {about.get('question') or ''}".strip()})
+        _save(user, state)
+        return _resp("", listen=True, action="asking")
+
     text = (text or "").strip()
     if not text:
         return _resp(f"{address}?", *_twin(lang_mod.current(user), f"जी {address_hi}?"), listen=True, action="nudge")
     state["history"].append({"role": "user", "text": text})
-    pending, choices, offer = state.get("pending"), state.get("choices"), state.get("offer")
+    pending, choices, offer, asked = state.get("pending"), state.get("choices"), state.get("offer"), state.get("asked")
 
     previous, awaiting = "", ""
-    if offer:
+    if asked:
+        awaiting = f'JARVIS asked: "{asked.get("question") or "Done, or remind you later?"}" about "{asked.get("title", "")}"'
+    elif offer:
         awaiting = f'JARVIS asked: "{offer["question"]}" ({len(offer["items"])} reminders came while away)'
     elif pending:
         if pending.get("needs_clarification") or pending.get("action") == "choose_destination":
@@ -122,7 +134,7 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         else:
             awaiting = _describe(pending)
     draft = assistant.build_draft(user, text, previous, state["history"][:-1], awaiting, choices,
-                                  include_private=private_ok, pending=pending if awaiting and not offer else None)
+                                  include_private=private_ok, pending=pending if awaiting and not (offer or asked) else None)
     action = draft["action"]
     lang = draft.get("speak_lang", "en")
     speak = draft.get("speak_text") or draft["spoken_reply"]
@@ -130,9 +142,18 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     said_in = draft.get("reply_language", "en")  # the language of this sentence: every line below follows it
     if offer and action != "confirm_pending":
         state["offer"] = None  # he asked for something else: the reminders stay in his list
+    if asked and action not in {"confirm_pending", "cancel_pending", "snooze"}:
+        state["asked"] = None  # he asked for something else: the reminder stays where it is
 
-    if action == "confirm_pending":
-        if offer:
+    if action == "snooze":
+        until = datetime.fromisoformat(draft["snooze_until"])
+        state["asked"] = None
+        resp = _snooze(user, asked, until, show, speak, lang, said_in, address, address_hi)
+    elif action == "confirm_pending":
+        if asked:
+            state["asked"] = None
+            resp = _answer_asked(user, asked, True, address, address_hi, said_in)
+        elif offer:
             state["offer"] = None
             read = " ".join(i["spoken"] for i in offer["items"])
             resp = _resp(read, read, "hi" if lang_mod.DEVANAGARI.search(read) else "en", listen=True, action="read_missed")
@@ -142,6 +163,9 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         else:
             resp = _resp(f"{address}, there's nothing waiting to be confirmed.",
                          *_twin(said_in, f"{address_hi}, कुछ भी कन्फ़र्म होने के लिए नहीं है।"), listen=True, action="answer")
+    elif action == "cancel_pending" and asked:
+        state["asked"] = None
+        resp = _answer_asked(user, asked, False, address, address_hi, said_in)
     elif action == "cancel_pending":
         state["pending"], state["choices"], state["offer"] = None, None, None
         resp = _resp(show or f"Okay {address}, cancelled.", speak, lang, listen=True, action=action)
@@ -235,10 +259,89 @@ def _task_data(p: dict) -> dict:
         "priority": p.get("priority") or "NORMAL",
         "due_date": date.fromisoformat(p["due_date"]) if p.get("due_date") else None,
         "due_time": time.fromisoformat(p["due_time"]) if p.get("due_time") else None,
+        "due_at": datetime.fromisoformat(p["due_at"]) if p.get("due_at") else None,  # "in 5 minutes": exact
         "duration_minutes": p.get("duration_minutes") or None,
         "remind_before_minutes": p.get("remind_before_minutes") or None,
         "announcement": p.get("announcement") or "",
     }
+
+
+# ------------------------------------------------------------------ answering what the background part asked
+def _task_ref_from_key(key: str) -> dict | None:
+    """A reminder key ("private:<id>:t1700000000:due") -> the task it is about, with its current version."""
+    parts = (key or "").split(":")
+    if len(parts) < 2 or parts[0] not in ("private", "shared"):
+        return None
+    model = PrivateTask if parts[0] == "private" else SharedTask
+    task = model.objects.filter(id=parts[1]).first()
+    return {"scope": parts[0], "id": str(task.id), "version": task.version, "title": task.title} if task else None
+
+
+def _snooze(user: User, asked: dict | None, until: datetime, show: str, speak: str, lang: str, said_in: str,
+            address: str, address_hi: str) -> dict:
+    """"Later": the thing that was just asked about, else whatever JARVIS said last, comes back at `until`."""
+    try:
+        if asked and asked.get("kind") == "reminder" and asked.get("key"):
+            services.snooze_reminder(user, asked["key"], until)
+        elif asked and asked.get("kind") == "alert" and asked.get("id"):
+            services.snooze_alert(user, asked["id"], until)
+        elif services.snooze_last_told(user, until) is None:
+            return _resp(f"{address}, I'm not sure which reminder you mean. Say its name and I'll set it.",
+                         *_twin(said_in, f"{address_hi}, समझ नहीं आया कौन सा रिमाइंडर। उसका नाम बोलिए, मैं रख दूँगा।"),
+                         listen=True, action="answer")
+    except (ObjectDoesNotExist, ValueError):
+        return _resp(f"Sorry {address}, I couldn't find that any more.",
+                     *_twin(said_in, f"माफ़ कीजिए {address_hi}, वो अब नहीं मिला।"), listen=True, action="error")
+    return _resp(show, speak, lang, listen=True, action="snoozed")
+
+
+def _answer_asked(user: User, asked: dict, yes: bool, address: str, address_hi: str, lang: str) -> dict:
+    """His yes or no to the question the background part asked after a reminder or an alert."""
+    kind, title = asked.get("kind"), asked.get("title", "")
+    sir, sir_hi = services.md_address(), services.md_address_hi()
+    try:
+        if kind == "reminder":
+            key = asked.get("key", "")
+            if not yes:
+                ReminderAck.objects.get_or_create(user=user, key=key)  # leave it: it goes quiet, stays on the list
+                return _resp(f"Okay {address}, leaving it.", *_twin(lang, f"ठीक है {address_hi}, रहने देता हूँ।"), listen=True, action="answer")
+            ref = _task_ref_from_key(key)
+            if ref is None:
+                raise ObjectDoesNotExist
+            to_sir = _complete_one(user, ref)
+            ReminderAck.objects.get_or_create(user=user, key=key)
+            if to_sir:
+                return _resp(f"Sent to {sir} to confirm, {address}.", *_twin(lang, f"{sir_hi} को कन्फ़र्म करने के लिए भेज दिया, {address_hi}।"),
+                             listen=True, action="saved")
+            return _resp(f"Marked as done, {address}.", *_twin(lang, f"पूरा हुआ मार्क कर दिया, {address_hi}।"), listen=True, action="saved")
+        alert = Alert.objects.get(id=asked.get("id"), recipient=user)
+        q = services.alert_question(alert) or {}
+        if q.get("kind") == "accept" and alert.ref_id:
+            if yes:
+                services.accept_request(user, alert.ref_id)
+                line = (f"Accepted, {address}. It's on your list.", f"मंज़ूर कर दिया, {address_hi}। आपकी लिस्ट में आ गया।")
+            else:
+                services.decline_request(user, alert.ref_id)
+                line = (f"Declined, {address}.", f"मना कर दिया, {address_hi}।")
+        elif q.get("kind") == "move" and yes and isinstance(q.get("target"), dict):
+            t = q["target"]
+            _change_one(user, {"scope": t.get("scope"), "id": t.get("id"), "version": t.get("version") or 1},
+                        {"due_date": q.get("to") or (tu.today_local() + timedelta(days=1)).isoformat()}, "Moved from the morning briefing")
+            line = (f"Moved {t.get('title', title)} to tomorrow, {address}.", f"{t.get('title', title)} कल पर ले गया, {address_hi}।")
+        elif q.get("kind") == "seen" and yes:
+            services.tell_sender_seen(user, alert)
+            line = (f"Told {sir}, {address}.", f"{sir_hi} को बता दिया, {address_hi}।")
+        else:
+            line = (f"Okay {address}.", f"ठीक है {address_hi}।")
+        if not alert.acknowledged_at:
+            alert.acknowledged_at = timezone.now()
+            alert.save(update_fields=["acknowledged_at"])
+        return _resp(line[0], *_twin(lang, line[1]), listen=True, action="saved")
+    except ServiceError as err:
+        return _resp(f"Sorry {address}, {err.message}", *_twin(lang, f"माफ़ कीजिए {address_hi}, {err.message}"), listen=True, action="error")
+    except ObjectDoesNotExist:
+        return _resp(f"Sorry {address}, I couldn't find that any more.",
+                     *_twin(lang, f"माफ़ कीजिए {address_hi}, वो अब नहीं मिला।"), listen=True, action="error")
 
 
 def _complete_one(user: User, t: dict) -> bool:

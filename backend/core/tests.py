@@ -2180,6 +2180,166 @@ class TodayAndNarrowingTests(BaseCase):
             self.assertNotIn(SECRET, json.dumps(d), kind)
 
 
+class SnoozeAndQuestionTests(BaseCase):
+    """"Later" lives on the server and names its time; "in N minutes" is exact; every question JARVIS asks is a contract
+    both the app and the phone's background part read; told-once is keyed by the moment, not the version."""
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def turn(self, client, text, cmd=None, **extra):
+        if cmd is None:
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        else:
+            with mock.patch("core.ai_brain.interpret", return_value=cmd):
+                r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def reminders(self, client, title=None, hours=48):
+        rems = client.get(f"/api/v1/reminders/?hours={hours}").json()["reminders"]
+        return [r for r in rems if title is None or r["title"] == title]
+
+    def test_in_n_minutes_is_exact_and_never_asks_tomorrow(self):
+        d = self.interpret(self.md_client, "5 minute baad yaad dilana files lene hain", _cmd(
+            intent="create_task", title="Take the files", due_in_minutes=5, engine="rules"))
+        self.assertEqual(d["action"], "private_task")
+        self.assertFalse(d["needs_clarification"])
+        self.assertTrue(d["due_at"])
+        self.assertIn("in 5 minutes (", d["due_label"])
+        self.assertEqual(d["remind_before_minutes"], 0)
+        self.assertIn("in 5 minutes", d["spoken_reply"])
+        self.assertIn("5 मिनट में", d["speak_text"])
+        # Saved with the exact moment: the first reminder is the one JARVIS said, not a lead before it.
+        r = self.md_client.post("/api/v1/private-tasks/", {"title": "Take the files", "due_at": d["due_at"]}, format="json",
+                                HTTP_IDEMPOTENCY_KEY="exact-1")
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(datetime.fromisoformat(r.json()["due_at"]), datetime.fromisoformat(d["due_at"]))
+        rems = self.reminders(self.md_client, "Take the files")
+        self.assertEqual({x["label"] for x in rems} & {"before", "due"}, {"due"})
+        due = next(x for x in rems if x["label"] == "due")
+        self.assertEqual(datetime.fromisoformat(due["fire_at"]), datetime.fromisoformat(d["due_at"]))
+        self.assertEqual(due["question"]["kind"], "done")  # and it asks its one question
+
+    def test_later_is_kept_on_the_server_and_names_the_exact_time(self):
+        when = tu.now_local() + timedelta(minutes=20)
+        services.create_private_task(self.md, {"title": "Call the bank", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                               "due_date": when.date(), "due_time": when.time().replace(second=0, microsecond=0)})
+        due = next(x for x in self.reminders(self.md_client, "Call the bank") if x["label"] == "due")
+        # JARVIS asked "Done, or remind you later?" and he said "10 minute baad": the answer names the time.
+        d = self.interpret(self.md_client, "10 minute baad yaad dilana", _cmd(intent="snooze", snooze_minutes=10, engine="rules"),
+                           awaiting='JARVIS asked: "Done, or remind you later?" about "Call the bank"')
+        self.assertEqual(d["action"], "snooze")
+        until = datetime.fromisoformat(d["snooze_until"])
+        self.assertLess(abs((until - (tu.now_local() + timedelta(minutes=10))).total_seconds()), 90)
+        self.assertIn("I'll remind you at", d["spoken_reply"])
+        self.assertIn("याद दिला दूँगा", d["speak_text"])
+        self.assertEqual(services.get_prefs(self.md)["snoozeMinutes"], 10)  # learned: his usual "later" is now 10
+        # The phone sends it to the server: the reminder leaves the list and comes back under a new key at that time.
+        r = self.md_client.post("/api/v1/reminders/snooze/", {"key": due["key"], "until": d["snooze_until"]}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertIn("at ", r.json()["until_label"])
+        rems = self.reminders(self.md_client, "Call the bank")
+        self.assertNotIn(due["key"], [x["key"] for x in rems])
+        back = next(x for x in rems if x["label"] == "due")
+        self.assertTrue(back["key"].startswith(due["key"] + ":s"))
+        self.assertEqual(datetime.fromisoformat(back["fire_at"]), until)
+        self.assertIsNone(back["told_at"])  # announced afresh when it comes back
+        # "Baad mein" with nothing on screen means the thing JARVIS said last.
+        self.md_client.post("/api/v1/told/", {"keys": [back["key"]]}, format="json")
+        r = self.md_client.post("/api/v1/reminders/snooze/", {"last": True, "minutes": 5}, format="json")
+        self.assertEqual((r.status_code, r.json()["kind"]), (200, "reminder"), r.content)
+        # An alert can wait too: it is out of sight until then, and fresh again when it comes back.
+        self.pa_client.post("/api/v1/requests/", {"title": "Sign the vendor agreement"}, format="json", HTTP_IDEMPOTENCY_KEY="sn-req")
+        alert = self.md_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertEqual(alert["question"]["kind"], "accept")
+        r = self.md_client.post("/api/v1/reminders/snooze/", {"alert_id": alert["id"], "minutes": 30}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertNotIn(alert["id"], [a["id"] for a in self.md_client.get("/api/v1/alerts/").json()["results"]])
+        Alert.objects.filter(id=alert["id"]).update(snoozed_until=timezone.now() - timedelta(minutes=1))
+        again = next(a for a in self.md_client.get("/api/v1/alerts/").json()["results"] if a["id"] == alert["id"])
+        self.assertTrue(again["fresh"])
+        self.assertNotEqual(again["announce_key"], f"alert:{alert['id']}")  # a new announcement, not a repeat
+
+    def test_told_once_survives_a_rename_but_not_a_new_time(self):
+        when = tu.now_local() + timedelta(hours=2)
+        task = services.create_private_task(self.md, {"title": "Review the deck", "kind": Kind.TASK, "priority": Priority.NORMAL,
+                                                      "due_date": when.date(), "due_time": when.time().replace(second=0, microsecond=0)})
+        keys = {x["key"] for x in self.reminders(self.md_client, "Review the deck")}
+        self.md_client.patch(f"/api/v1/private-tasks/{task.id}/", {"expected_version": 1, "title": "Review the Pune deck"}, format="json")
+        self.assertEqual({x["key"] for x in self.reminders(self.md_client, "Review the Pune deck")}, keys)  # same moment, same keys
+        later = (when + timedelta(hours=1)).time().replace(second=0, microsecond=0)
+        self.md_client.patch(f"/api/v1/private-tasks/{task.id}/", {"expected_version": 2, "due_date": when.date().isoformat(),
+                                                                   "due_time": later.isoformat()}, format="json")
+        self.assertFalse({x["key"] for x in self.reminders(self.md_client, "Review the Pune deck")} & keys)  # a new time: new reminders
+
+    def test_every_question_is_a_contract_from_the_server(self):
+        when = tu.now_local() + timedelta(minutes=20)
+        services.create_private_task(self.md, {"title": "Review the deck", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                               "due_date": when.date(), "due_time": when.time().replace(second=0, microsecond=0)})
+        meeting_due = next(x for x in self.reminders(self.md_client, "Review the deck") if x["label"] == "due")
+        self.assertIsNone(meeting_due["question"])  # a meeting that is starting asks nothing
+        self.md_client.post("/api/v1/pa-tasks/", {"title": "Courier the contract"}, format="json", HTTP_IDEMPOTENCY_KEY="q-1")
+        hers = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
+        self.assertEqual(hers["question"]["kind"], "seen")
+        self.assertIn("Sir", hers["question"]["en"])
+        self.assertIn("सर", hers["question"]["hi"])
+
+    def test_the_background_part_hears_the_answer_to_its_question(self):
+        when = tu.now_local() + timedelta(minutes=20)
+        task = services.create_private_task(self.md, {"title": "Call the bank", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                      "due_date": when.date(), "due_time": when.time().replace(second=0, microsecond=0)})
+        due = next(x for x in self.reminders(self.md_client, "Call the bank") if x["label"] == "due")
+        about = {"kind": "reminder", "key": due["key"], "title": "Call the bank", "question": due["question"]["en"]}
+        r = self.turn(self.md_client, "", event="ask", about=about)
+        self.assertEqual((r["action"], r["listen"]), ("asking", True))
+        r = self.turn(self.md_client, "ho gaya", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved")
+        self.assertIn("Marked as done", r["show"])
+        self.assertEqual(PrivateTask.objects.get(id=task.id).status, "COMPLETED")
+        # "Later" to the same question: the server keeps the snooze.
+        when2 = tu.now_local() + timedelta(minutes=25)
+        services.create_private_task(self.md, {"title": "Pay the vendor", "kind": Kind.PAYMENT, "priority": Priority.NORMAL,
+                                               "due_date": when2.date(), "due_time": when2.time().replace(second=0, microsecond=0)})
+        due2 = next(x for x in self.reminders(self.md_client, "Pay the vendor") if x["label"] == "due")
+        self.turn(self.md_client, "", event="ask", about={"kind": "reminder", "key": due2["key"], "title": "Pay the vendor", "question": ""})
+        r = self.turn(self.md_client, "baad mein", _cmd(intent="snooze", engine="rules"))
+        self.assertEqual(r["action"], "snoozed", r)
+        from core.models import ReminderSnooze
+        self.assertTrue(ReminderSnooze.objects.filter(user=self.md, key=due2["key"]).exists())
+        # An alert's question too: "Accept it?" — "haan".
+        self.pa_client.post("/api/v1/requests/", {"title": "Sign the vendor agreement"}, format="json", HTTP_IDEMPOTENCY_KEY="bg-req")
+        alert = self.md_client.get("/api/v1/alerts/").json()["results"][0]
+        self.turn(self.md_client, "", event="ask", about={"kind": "alert", "id": alert["id"], "title": alert["title"], "question": "Accept it?"})
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertIn("Accepted", r["show"])
+        self.assertEqual(TaskRequest.objects.get(id=alert["ref_id"]).state, "ACCEPTED")
+
+    def test_date_only_items_still_remind_and_staff_dates_get_a_follow_up(self):
+        from core.reminders import LATE_DAY_REMINDER_BEFORE_CLOSE
+        now = tu.now_local()
+        close = now.replace(hour=19, minute=0, second=0, microsecond=0)
+        day_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        if day_time < now < close - LATE_DAY_REMINDER_BEFORE_CLOSE:
+            services.create_private_task(self.md, {"title": "Sign the cheque", "kind": Kind.TASK, "priority": Priority.NORMAL,
+                                                   "due_date": now.date()})
+            day = [x for x in self.reminders(self.md_client, "Sign the cheque") if x["label"] == "day"]
+            self.assertEqual(len(day), 1)
+            self.assertEqual(datetime.fromisoformat(day[0]["fire_at"]), close - LATE_DAY_REMINDER_BEFORE_CLOSE)
+        # A staff task with only a date: the PA who gave it gets a follow-up that day at her reminder hour.
+        staff = StaffMember.objects.filter(active=True).first()
+        tomorrow = tu.today_local() + timedelta(days=1)
+        services.delegate_to_staff(self.pa, {"title": "Send the GST file", "kind": Kind.TASK, "priority": Priority.NORMAL,
+                                             "due_date": tomorrow}, staff, category_key="", description="")
+        follow = [x for x in self.reminders(self.pa_client, f"{staff.name}: Send the GST file") if x["label"] == "followup"]
+        self.assertEqual(len(follow), 1)
+        self.assertEqual(tu.to_local(datetime.fromisoformat(follow[0]["fire_at"])).strftime("%H:%M"), "09:30")
+        self.assertIn("is due today", follow[0]["spoken"])
+
+
 class LanguageTests(BaseCase):
     """One language rule for everything JARVIS says: the sentence just spoken decides, a pinned setting overrides,
     and what is said with nothing just spoken (alerts, reminders) follows the language used lately."""

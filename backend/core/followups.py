@@ -36,12 +36,12 @@ def _already(key: str) -> bool:
 
 
 def _raise(recipient: User, key: str, title: str, body: str, spoken: str, priority: str = Priority.NORMAL,
-           spoken_hi: str = "") -> bool:
+           spoken_hi: str = "", question: dict | None = None) -> bool:
     if _already(key + f"@{recipient.id}"):
         return False
     Alert.objects.create(recipient=recipient, kind=Alert.Kind.INFO, priority=priority, title=title[:200], body=body[:2000],
                          spoken_text=spoken[:2000], spoken_text_hi=spoken_hi[:2000], ref_type="followup",
-                         ref_id=(key + f"@{recipient.id}")[:64])
+                         ref_id=(key + f"@{recipient.id}")[:64], question=question)
     return True
 
 
@@ -81,8 +81,16 @@ def morning_briefings(now=None) -> int:
         facts, fallback = services.briefing_facts(user, "morning", conceal_private=True)
         if scheduling.is_off_day(prefs, local.date()) and not facts["today"] and not facts["overdue"]:
             continue  # a quiet day off: nothing to say
+        move = (facts.get("day_load") or {}).pop("could_move_item", None)  # for the yes below, not for the model
         text, _engine = ai_brain.briefing(facts, fallback, user=user)
-        raised += _raise(user, key, "Good morning, here is your day", text, text)
+        # The briefing may have offered one move ("Shall I move X to tomorrow?"): the yes to it is a real move.
+        question = None
+        if move:
+            question = {"kind": "move", "en": f"Shall I move {move['title']} to tomorrow?",
+                        "hi": f"{move['title']} कल पर ले जाऊँ?",
+                        "target": {"id": move["id"], "scope": move["scope"], "title": move["title"], "version": move["version"]},
+                        "to": (local.date() + timedelta(days=1)).isoformat()}
+        raised += _raise(user, key, "Good morning, here is your day", text, text, question=question)
     return raised
 
 

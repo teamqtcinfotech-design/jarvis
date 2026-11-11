@@ -54,6 +54,7 @@ urlpatterns = [
     # Reminders + alerts
     path("reminders/", views.ReminderListView.as_view()),
     path("reminders/ack/", views.ReminderAckView.as_view()),
+    path("reminders/snooze/", views.ReminderSnoozeView.as_view()),
     path("told/", views.ToldView.as_view()),
     path("alerts/", views.AlertListView.as_view()),
     path("alerts/<uuid:alert_id>/ack/", views.AlertAckView.as_view()),

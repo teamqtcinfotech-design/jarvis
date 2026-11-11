@@ -5,7 +5,7 @@ then calls the normal, permission-checked endpoint with an Idempotency-Key.
 """
 import difflib
 import re
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
@@ -765,6 +765,12 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
 
     due_date = _safe_date(cmd.get("due_date", ""))
     due_time = _safe_time(cmd.get("due_time", ""))
+    # "In 5 minutes": the exact moment from now, seconds included, so the reminder fires when he said and no earlier
+    # (a lead would put it in the past; "tomorrow?" is never asked because the moment is ahead by construction).
+    due_in = max(0, min(int(cmd.get("due_in_minutes") or 0), 7 * 24 * 60))
+    exact_at = (tu.now_local() + timedelta(minutes=due_in)).replace(microsecond=0) if due_in else None
+    if exact_at:
+        due_date, due_time = exact_at.date().isoformat(), exact_at.strftime("%H:%M")
     if due_time and not due_date:
         due_date = tu.today_local().isoformat()
     kind = cmd.get("kind") if cmd.get("kind") in _KINDS else Kind.TASK
@@ -781,9 +787,12 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         "priority": priority,
         "due_date": due_date,
         "due_time": due_time,
-        "due_label": _due_label(due_date, due_time),
+        "due_at": exact_at.isoformat() if exact_at else "",       # the exact moment, when it was given as "in N minutes"
+        "due_in_minutes": due_in,
+        "due_label": (f"in {tu.minutes_phrase(due_in)} ({tu.fmt_time(exact_at)})" if exact_at else _due_label(due_date, due_time)),
         "duration_minutes": max(0, int(cmd.get("duration_minutes") or 0)) or None,
-        "remind_before_minutes": max(0, int(cmd.get("remind_before_minutes") or 0)) or None,
+        "remind_before_minutes": 0 if exact_at else (max(0, int(cmd.get("remind_before_minutes") or 0)) or None),
+        "snooze_until": "",     # snooze: when the reminder or alert comes back
         "announcement": (cmd.get("reminder_line") or "").strip()[:300],
         "staff": None,
         "staff_candidates": [],
@@ -988,6 +997,29 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         draft["question"] = ""
         if not draft["spoken_reply"]:
             _say(draft, f"Okay {address}, cancelled. Nothing was saved.", f"ठीक है {address_hi}, कैंसल कर दिया। कुछ सेव नहीं हुआ।")
+    elif intent == "snooze":
+        # "Later": the reminder or alert JARVIS just spoke comes back when he said: a duration, a moment, or his
+        # usual snooze. The phone (or the background conversation) applies it to the thing that was asked about.
+        draft["action"] = "snooze"
+        draft["needs_clarification"] = False
+        draft["question"] = ""
+        prefs = services.get_prefs(user)
+        now_local = tu.now_local()
+        minutes = max(0, min(int(cmd.get("snooze_minutes") or 0), 7 * 24 * 60))
+        if minutes:
+            until = now_local + timedelta(minutes=minutes)
+            services.set_pref_quiet(user, "snoozeMinutes", max(1, min(minutes, 1440)))  # learned: his usual "later"
+        elif due_date and due_time:
+            until = tu.combine_local(date.fromisoformat(due_date), time.fromisoformat(due_time))
+        elif due_date:
+            until = tu.combine_local(date.fromisoformat(due_date), services.day_reminder_time(prefs))
+        else:
+            until = now_local + timedelta(minutes=int(prefs.get("snoozeMinutes", 15)))
+        if until <= now_local:
+            until += timedelta(days=1)  # "4 baje" said at 5 PM means tomorrow at 4
+        draft["snooze_until"] = until.replace(microsecond=0).isoformat()
+        _say(draft, f"Okay {address}, I'll remind you {services.moment_label(until)}.",
+             f"ठीक है {address_hi}, {services.moment_label_hi(until)} याद दिला दूँगा।")
     elif intent == "dismiss_alert":
         draft["action"] = "dismiss"  # the phone clears the alert on screen
         draft["needs_clarification"] = False
@@ -1098,7 +1130,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         elif not draft["title"]:
             draft["needs_clarification"] = True
         pa_name = draft.get("pa_name") or "your PA"
-        due_hi = _due_label_hi(draft["due_date"], draft["due_time"])
+        due_hi = (f"{tu.minutes_phrase_hi(due_in)} में ({tu.fmt_time_hi(exact_at)})" if exact_at
+                  else _due_label_hi(draft["due_date"], draft["due_time"]))
         if draft["action"] == "pa_meeting":
             # Always state clearly that the PA will be informed.
             when = f" {draft['due_label']}" if draft["due_label"] else ""

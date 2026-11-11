@@ -337,6 +337,11 @@ class Alert(models.Model):
     # never announced again by anybody. Acknowledged = seen or acted on; after that it leaves the lists.
     delivered_at = models.DateTimeField(null=True, blank=True)
     acknowledged_at = models.DateTimeField(null=True, blank=True)
+    # "Later": hidden until this moment, then announced afresh (kept here so it survives the phone restarting).
+    snoozed_until = models.DateTimeField(null=True, blank=True)
+    # The one question JARVIS asks after this alert and what a yes does ({"kind": "move", "en": ..., "hi": ...,
+    # "target": {...}}); empty = the standard question for its kind, if any (see services.alert_question).
+    question = models.JSONField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -373,6 +378,18 @@ class ReminderTold(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "key"], name="unique_reminder_told")]
+
+
+class ReminderSnooze(models.Model):
+    """"Later" for one reminder: it comes back at this moment as a fresh announcement. Kept on the server, so a phone
+    restart does not lose it and the app and the phone's background part honour the same time."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    key = models.CharField(max_length=200)
+    until = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "key"], name="unique_reminder_snooze")]
 
 
 class CommandReceipt(models.Model):

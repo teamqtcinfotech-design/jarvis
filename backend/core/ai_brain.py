@@ -42,6 +42,7 @@ INTENTS = [
     "remember",
     "confirm_pending",
     "cancel_pending",
+    "snooze",
     "dismiss_alert",
     "end_conversation",
     "small_talk",
@@ -60,6 +61,8 @@ COMMAND_SCHEMA = {
         "due_time": {"type": "string", "description": "HH:MM 24-hour or empty"},
         "duration_minutes": {"type": "integer"},
         "remind_before_minutes": {"type": "integer"},
+        "due_in_minutes": {"type": "integer", "description": "the moment given as a span FROM NOW ('5 minute baad', 'in two hours' = 120, 'aadhe ghante mein' = 30): that many minutes; else 0. When set, leave due_date and due_time empty"},
+        "snooze_minutes": {"type": "integer", "description": "snooze only: minutes from now when a duration was said ('10 minute baad' = 10, 'after an hour' = 60); 0 when a moment was said instead (then due_date / due_time carry it) or nothing was said"},
         "staff_name": {"type": "string"},
         "team_name": {"type": "string", "description": "'all' for the whole team, or a department name, else empty"},
         "category_key": {"type": "string", "description": "key from task_categories, or empty"},
@@ -110,7 +113,8 @@ COMMAND_SCHEMA = {
     },
     "required": [
         "intent", "title", "notes", "kind", "priority", "due_date", "due_time", "duration_minutes",
-        "remind_before_minutes", "staff_name", "team_name", "category_key", "target_ref", "target_refs", "changed_fields",
+        "remind_before_minutes", "due_in_minutes", "snooze_minutes", "staff_name", "team_name", "category_key", "target_ref",
+        "target_refs", "changed_fields",
         "setting_key", "setting_value", "keep_original", "people", "new_contacts", "view_kind", "screen_action", "view_who", "view_from",
         "view_to", "view_by", "view_filter", "view_types", "view_from_whom", "view_priority", "view_words", "view_group", "view_missing",
         "needs_clarification",
@@ -159,6 +163,8 @@ Intents that are not tasks:
   - anything unrelated (a general question, small talk, a different new task): handle the reply on its own as usual and do not mention the draft; it stays waiting on screen.
   - When awaiting_confirmation also has jarvis_asked and offered_time, JARVIS found a clash (or a free slot) and asked whether to use another time; original_time is what the speaker first said (it may be empty when no time was given). Read the reply by meaning: accepting the offer ("haan", "theek hai", "5 baje rakh do", "ok put it then") -> confirm_pending with every field empty and keep_original false; keeping the original ("nahi 4 hi rakho", "keep 4 o'clock", "as it is", "no, same time", "bina time ke rakho") -> confirm_pending with keep_original true; a different time or day ("6 baje", "parso 11 baje", "make it Friday") -> confirm_pending with due_time (and due_date when a day was said) and keep_original false. Only when the reply changes something other than the time (title, person, priority, destination) return the corrected full command.
   Without awaiting_confirmation, never use confirm_pending or cancel_pending.
+- When awaiting_confirmation.draft begins with "JARVIS asked", JARVIS has just spoken a reminder or an alert and asked its one question ("Done, or remind you later?", "Accept it?", "Shall I tell Sir you've seen it?", "Shall I move X to tomorrow?"). Read the reply by meaning: yes / done / ho gaya / accept / haan bata do -> confirm_pending; no / nahi / leave it / rehne do / decline -> cancel_pending; later / baad mein / "10 minute baad" / "after lunch" / "kal subah yaad dilana" / "shaam ko" -> snooze (see below); anything else is handled as itself.
+- snooze: the speaker wants the reminder or alert JARVIS just spoke (or the one on screen) brought back later: "baad mein", "later", "abhi nahi, baad mein", "10 minute baad yaad dilana", "ek ghante baad", "after lunch", "shaam ko", "kal subah". A duration -> snooze_minutes (10, 60); a moment -> due_date / due_time for it (after lunch = today 14:00; shaam = today 18:00; kal subah = tomorrow 10:00; "4 baje" = today 16:00); neither ("baad mein") -> both empty and the server uses his usual snooze. Only for something JARVIS has just said or that is on screen; a NEW "remind me in 10 minutes to call Mehta" is create_task with due_in_minutes 10, never snooze.
 - dismiss_alert: the speaker wants the alert, banner or card on screen gone without acting on it ("ye hatao", "remove this banner", "dismiss", "close it", "theek hai dekh liya", "band karo ye"). spoken_reply: "Done." (or empty).
 - end_conversation: the speaker is finished or wants quiet ("bas", "bas itna hi", "that's all", "thank you JARVIS", "ok bye", "theek hai bas", "nahi kuch nahi", "stop", "stop listening", "sunna band karo", "chup ho jao", "ruk jao"). spoken_reply: a short warm goodbye ("Ji Sir." is enough when told to stop).
 - small_talk: greetings and chit-chat ("hello", "kaise ho", "good morning"). Reply warmly in one sentence and offer help.
@@ -166,6 +172,7 @@ Intents that are not tasks:
 
 Rules:
 - Resolve relative dates and times (aaj, kal, parso, subah, dopahar, shaam, raat, "saade gyarah", weekday names) from the current India date/time given in the context. In instructions "kal" means tomorrow. Output due_date as YYYY-MM-DD and due_time as 24-hour HH:MM, or empty strings when not stated. Do not invent a time that was not said. If only a part of the day was said ("shaam ko"), use morning 10:00, afternoon 14:00, evening 18:00 or night 21:00 and say so in spoken_reply.
+- A moment given as a span from now ("5 minute baad yaad dilana", "remind me in 2 hours", "aadhe ghante mein", "ek ghante baad call") goes in due_in_minutes (5, 120, 30, 60) with due_date and due_time EMPTY: the server works out the exact moment to the second and the reminder fires then, not earlier. spoken_reply and done_reply say "in 5 minutes", never a clock time you worked out yourself.
 - priority: urgent / turant / ASAP / emergency -> URGENT; zaroori / important / high -> HIGH; low -> LOW; otherwise NORMAL.
 - kind: MEETING for meetings, CALL for calls, PAYMENT for payments, bills and EMIs (this is only a reminder; never treat it as making a payment), FOLLOW_UP for follow-ups, otherwise TASK.
 - duration_minutes: meeting length if said, 60 for meetings when not said, else 0. remind_before_minutes: only if the user asked ("15 minute pehle yaad dilana"), else 0.

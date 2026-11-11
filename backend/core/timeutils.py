@@ -94,6 +94,14 @@ def due_phrase_hi(due_kind: str, due_date: date | None, due_at: datetime | None)
     return ""
 
 
+def minutes_phrase(minutes: int) -> str:
+    """'30 minutes' / '2 hours' / '1 hour' / '1 minute'."""
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} hour{'s' if hours > 1 else ''}"
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
 def minutes_phrase_hi(minutes: int) -> str:
     """'30 मिनट' / '2 घंटे' / '1 घंटा'."""
     if minutes >= 60 and minutes % 60 == 0:

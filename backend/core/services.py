@@ -33,6 +33,9 @@ from .models import (
     Memory,
     Priority,
     PrivateTask,
+    ReminderAck,
+    ReminderSnooze,
+    ReminderTold,
     SharedTask,
     StaffMember,
     Status,
@@ -148,9 +151,14 @@ def apply_schedule(task, data: dict, *, creating: bool):
     priority = data.get("priority", task.priority)
     due_date_val: date | None = data.get("due_date")
     due_time_val: time | None = data.get("due_time")
+    exact: datetime | None = data.get("due_at")  # "in 5 minutes": the exact moment, seconds included
 
-    if "due_date" in data or "due_time" in data or creating:
-        if due_date_val and due_time_val:
+    if "due_date" in data or "due_time" in data or exact or creating:
+        if exact:
+            task.due_kind = DueKind.TIMED
+            task.due_date = tu.to_local(exact).date()
+            task.due_at = exact
+        elif due_date_val and due_time_val:
             task.due_kind = DueKind.TIMED
             task.due_date = due_date_val
             task.due_at = tu.combine_local(due_date_val, due_time_val)
@@ -320,8 +328,25 @@ ALERT_FRESH_FOR = timedelta(hours=24)   # older than this it is history, never n
 ALERT_LIST_FOR = timedelta(days=7)      # and older than this it is not even listed
 
 
+def alert_question(alert: Alert) -> dict | None:
+    """The one question JARVIS asks aloud right after this alert, and what a yes does. Kept tight so JARVIS never
+    nags: a request to the MD ("Accept it?"), a task the MD gave the PA ("Shall I tell Sir you've seen it?"), a
+    briefing that found the day too full ("Shall I move X to tomorrow?"). Decisions and staff news are spoken only.
+    Both the app and the phone's background part read this contract; neither spells its own."""
+    if isinstance(alert.question, dict) and alert.question.get("kind"):
+        return alert.question
+    if alert.kind == Alert.Kind.NEW_REQUEST and alert.ref_type == "request" and alert.recipient.is_md:
+        return {"kind": "accept", "en": "Accept it?", "hi": "मंज़ूर करूँ?"}
+    if alert.kind == Alert.Kind.TASK_ASSIGNED and alert.recipient.is_pa:
+        return {"kind": "seen", "en": f"Shall I tell {md_address()} you've seen it?",
+                "hi": f"{md_address_hi()} को बता दूँ कि आपने देख लिया?"}
+    return None
+
+
 def alert_item(alert: Alert, lang: str = "en") -> dict:
     """lang = the recipient's current language: the spoken line comes in Hindi when it has a Hindi twin."""
+    now = timezone.now()
+    snoozed = alert.snoozed_until if alert.snoozed_until and alert.snoozed_until > now else None
     return {
         "id": str(alert.id),
         "kind": alert.kind,
@@ -335,9 +360,65 @@ def alert_item(alert: Alert, lang: str = "en") -> dict:
         "ref_id": alert.ref_id,
         "created_at": alert.created_at.isoformat(),
         "delivered_at": alert.delivered_at.isoformat() if alert.delivered_at else None,
-        # Worth announcing: not told yet, and recent. Everything else is only for the list.
-        "fresh": alert.delivered_at is None and alert.created_at >= timezone.now() - ALERT_FRESH_FOR,
+        "snoozed_until": snoozed.isoformat() if snoozed else None,
+        # The key the phone announces under: a snoozed alert comes back as a new announcement, not a repeat.
+        "announce_key": f"alert:{alert.id}" + (f":s{int(alert.snoozed_until.timestamp())}" if alert.snoozed_until else ""),
+        "question": alert_question(alert),
+        # Worth announcing: not told yet, and recent (a snooze that has come due counts as new). Everything else is
+        # only for the list.
+        "fresh": alert.delivered_at is None and not snoozed and (
+            alert.created_at >= now - ALERT_FRESH_FOR or (alert.snoozed_until is not None and alert.snoozed_until >= now - ALERT_FRESH_FOR)),
     }
+
+
+# --------------------------------------------------------------------------- "later"
+SNOOZE_LOOKBACK = timedelta(hours=3)  # "baad mein yaad dilana" means the thing JARVIS said within this long
+
+
+def moment_label(at: datetime) -> str:
+    """"at 4:25 PM" today, "tomorrow at 10 AM", "Mon 17 Nov at 9 AM": for a confirmation that names the exact time."""
+    local = tu.to_local(at)
+    day = tu.fmt_day(local.date())
+    return f"at {tu.fmt_time(local)}" if day == "today" else f"{day} at {tu.fmt_time(local)}"
+
+
+def moment_label_hi(at: datetime) -> str:
+    local = tu.to_local(at)
+    day = tu.fmt_day_hi(local.date())
+    return tu.fmt_time_hi(local) if day == "आज" else f"{day} {tu.fmt_time_hi(local)}"
+
+
+def snooze_reminder(user: User, key: str, until: datetime) -> None:
+    """This reminder comes back at `until`, as a fresh announcement (the list serves it under a new key)."""
+    ReminderSnooze.objects.update_or_create(user=user, key=key[:200], defaults={"until": until})
+
+
+def snooze_alert(user: User, alert_id, until: datetime) -> Alert:
+    alert = Alert.objects.get(id=alert_id, recipient=user)
+    alert.snoozed_until = until
+    alert.delivered_at = None  # announced afresh when it comes back
+    alert.save(update_fields=["snoozed_until", "delivered_at"])
+    return alert
+
+
+def snooze_last_told(user: User, until: datetime) -> dict | None:
+    """"Later" with nothing on screen: the reminder or alert JARVIS spoke to this person most recently (within
+    SNOOZE_LOOKBACK) is the one meant. Returns what was snoozed ({"kind", "title"}) or None when nothing was."""
+    since = timezone.now() - SNOOZE_LOOKBACK
+    told = ReminderTold.objects.filter(user=user, told_at__gte=since).order_by("-told_at").first()
+    alert = (Alert.objects.filter(recipient=user, acknowledged_at__isnull=True, delivered_at__gte=since)
+             .exclude(priority=Priority.LOW).order_by("-delivered_at").first())
+    if told and (not alert or told.told_at >= alert.delivered_at):
+        from .reminders import reminders_for  # local import: reminders imports services
+        if ReminderAck.objects.filter(user=user, key=told.key).exists():
+            return None  # already dealt with
+        snooze_reminder(user, told.key, until)
+        title = next((r["title"] for r in reminders_for(user, hours=48)["reminders"] if r["key"].startswith(told.key)), "")
+        return {"kind": "reminder", "key": told.key, "title": title}
+    if alert:
+        snooze_alert(user, alert.id, until)
+        return {"kind": "alert", "id": str(alert.id), "title": alert.title}
+    return None
 
 
 def _sort_key(item: dict):
@@ -1250,6 +1331,13 @@ PREF_SCHEMA = {
     "remindBeforeCall": {"type": "int", "min": 0, "max": 240, "default": 5, "say": "call reminder (minutes before)"},
     "remindBeforeTask": {"type": "int", "min": 0, "max": 1440, "default": 30, "say": "task reminder (minutes before)"},
     "dayReminderTime": {"type": "time", "default": "09:30", "say": "time for reminders of date-only items"},
+    # "Later" on a reminder: how long, when no time is said. JARVIS learns it from what the person says by voice.
+    "snoozeMinutes": {"type": "int", "min": 1, "max": 1440, "default": 15, "say": "snooze (minutes)"},
+    # The notification sound for reminders that arrive while the app is closed.
+    "reminderSound": {"type": "enum", "values": ["default", "silent"], "default": "default", "say": "reminder sound",
+                      "aliases": {"phone": "default", "normal": "default", "on": "default", "sound": "default",
+                                  "silent": "silent", "off": "silent", "vibrate": "silent", "quiet": "silent"},
+                      "labels": {"default": "reminder sound on", "silent": "reminders silent (vibrate only)"}},
     # Morning briefing, raised by the server and spoken when he picks up the phone.
     "briefingEnabled": {"type": "bool", "default": True, "say": "morning briefing"},
     "briefingTime": {"type": "time", "default": "09:00", "say": "morning briefing time"},
@@ -1710,6 +1798,9 @@ def briefing_facts(user: User, kind: str, conceal_private: bool = False) -> tupl
     if load["heavy"] and load["movable"]:
         m = load["movable"]
         facts["day_load"]["could_move"] = {"title": span_name(m), "to": tu.fmt_day(today + timedelta(days=1))}
+        # The item itself (never sent to the model: it is what a "yes" to the offer moves).
+        facts["day_load"]["could_move_item"] = {"id": m.get("id"), "scope": "private" if m.get("private") else "shared",
+                                                "title": span_name(m), "version": m.get("version", 1)}
 
     from . import lang as _lang
     address = address_of(user)
