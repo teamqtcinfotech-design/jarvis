@@ -31,6 +31,9 @@ class BaseCase(TestCase):
         TaskPanelLink.objects.create(user=self.pa, actor_key="staff_002", grant="mock-grant-pa-0123456789abcdef")
         services.sync_staff(self.md)
         now = tu.now_local() + timedelta(hours=1)
+        if now.date() != tu.today_local():
+            # Late in the evening "in an hour" is tomorrow; the fixture's meeting must stay today (and ahead of now).
+            now = tu.now_local().replace(hour=23, minute=58, second=0, microsecond=0)
         self.private = services.create_private_task(self.md, {
             "title": SECRET, "notes": SECRET + " notes", "kind": Kind.MEETING, "priority": Priority.URGENT,
             "due_date": now.date(), "due_time": now.time().replace(second=0, microsecond=0), "duration_minutes": 30,
@@ -1187,7 +1190,7 @@ class SchedulingTests(BaseCase):
         self.assertIsNone(latest.due_at)
 
     def test_full_day_is_mentioned_but_not_blocked(self):
-        day = _workday()
+        day = _workday(2)  # two days ahead: late in the evening the fixture's "in an hour" item can land on tomorrow
         for i in range(7):
             services.create_private_task(self.md, {"title": f"Errand {i}", "kind": Kind.TASK, "priority": Priority.NORMAL,
                                                    "due_date": day})
