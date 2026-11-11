@@ -13,7 +13,7 @@ from . import timeutils as tu
 from .models import Kind, PrivateTask, SharedTask, Status
 
 VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
-              "requests", "busy", "performance", "done", "people", "tasks", "person"]
+              "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person"]
 
 _PROGRESS = {Status.OPEN: 0, Status.IN_PROGRESS: 50, Status.BLOCKED: 50, Status.COMPLETED: 100, Status.CANCELLED: 0}
 _REMOTE_PROGRESS = {"todo": 0, "working": 50, "waiting": 50, "done": 100}
@@ -361,6 +361,99 @@ def _done_view(user, include_private: bool) -> dict:
     return view
 
 
+def _closed_items(user, include_private: bool, statuses: tuple, since: datetime | None):
+    """(when, item dict) for everything this person may see with one of these statuses, newest first."""
+    items = []
+    if user.is_md and include_private:
+        qs = PrivateTask.objects.filter(owner=user, status__in=statuses)
+        if since:
+            qs = qs.filter(updated_at__gte=since)
+        items += [(t.completed_at or t.updated_at, services.private_item(t)) for t in qs]
+    shared = SharedTask.objects.filter(status__in=statuses).select_related("staff")
+    if since:
+        shared = shared.filter(updated_at__gte=since)
+    if user.is_pa:
+        shared = shared.exclude(assignee_type=SharedTask.Assignee.MD) | shared.filter(origin=SharedTask.Origin.PA_REQUEST)
+    items += [(t.completed_at or t.updated_at, services.shared_item(t)) for t in shared.distinct()]
+    items.sort(key=lambda x: x[0] or timezone.now(), reverse=True)
+    return items
+
+
+def _cancelled_view(user, include_private: bool) -> dict:
+    """Everything cancelled in the last 30 days, newest first: a cancel is undone from here ("restore")."""
+    since = timezone.now() - timedelta(days=30)
+    items = _closed_items(user, include_private, (Status.CANCELLED,), since)
+    rows = []
+    for when, item in items[:60]:
+        row = _row(item, include_private)
+        if not row:
+            continue
+        row.update({"status": "Cancelled", "when": tu.fmt_time(when) if when else "", "day": tu.fmt_day(tu.to_local(when).date()) if when else "",
+                    "progress": 0, "overdue": False, "restorable": True})
+        rows.append(row)
+    view = _table("cancelled", "Cancelled", rows, [("day", "Day"), ("title", "What"), ("who", "Who")],
+                  subtitle="Last 30 days. Tap one to restore it." if rows else "Nothing cancelled in the last 30 days")
+    view["stats"] = [{"label": "Cancelled", "value": len(rows), "tone": "muted", "icon": "close-circle-outline"}]
+    return view
+
+
+def _history_view(user, include_private: bool, p: dict) -> dict:
+    """The past of one thing or person: "when did I last meet Sharma", "what did I give Suraj last month". Every
+    status counts (done, cancelled, still open); newest first; the outcome is said with each item."""
+    words = [w.lower() for w in (p.get("words") or "").split() if len(w) > 2]
+    who = (p.get("who") or "").strip().lower()
+    start, end = p.get("from"), p.get("to")
+    items = _closed_items(user, include_private, (Status.COMPLETED, Status.CANCELLED, Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED), None)
+
+    def moment(when, item):
+        if item.get("status") == Status.COMPLETED and item.get("completed_at"):
+            return datetime.fromisoformat(item["completed_at"])
+        if item.get("due_at"):
+            return datetime.fromisoformat(item["due_at"])
+        if item.get("due_date"):
+            return tu.combine_local(date.fromisoformat(item["due_date"]), time(23, 59))
+        return when or timezone.now()
+
+    def matches(item):
+        title = (item.get("title") or "").lower()
+        hay = title + " " + (item.get("assignee", {}).get("staff_name") or "").lower()
+        if words and not any(w in hay for w in words):
+            return False
+        if who and who not in ("me", "all", "sir", "pa", "staff"):
+            if who not in hay:
+                return False
+        if who == "pa" and item.get("assignee", {}).get("type") != "PA":
+            return False
+        if who == "staff" and item.get("assignee", {}).get("type") != "STAFF":
+            return False
+        if start:
+            d = tu.to_local(moment(None, item)).date()
+            if not (start <= d <= (end or start)):
+                return False
+        return True
+
+    found = [(moment(when, item), item) for when, item in items if matches(item)]
+    found.sort(key=lambda x: x[0], reverse=True)
+    today = tu.today_local()
+    rows = []
+    for at, item in found[:60]:
+        row = _row(item, include_private)
+        if not row:
+            continue
+        status = item.get("status")
+        outcome = "Done" if status == Status.COMPLETED else "Cancelled" if status == Status.CANCELLED else "Late" if item.get("overdue") else "Open"
+        row.update({"status": outcome, "when": tu.fmt_time(at), "day": tu.fmt_day(tu.to_local(at).date()),
+                    "past": tu.to_local(at).date() <= today})
+        rows.append(row)
+    what = " ".join(p.get("words", "").split()) or (p.get("who") if who not in ("me", "all") else "") or "this"
+    view = _table("history", f"History: {what}", rows, [("day", "Day"), ("when", "At"), ("title", "What"), ("status", "Outcome"), ("who", "Who")],
+                  subtitle="Newest first, every outcome" if rows else f"Nothing about {what} so far")
+    view["stats"] = [{"label": "Done", "value": sum(1 for r in rows if r["status"] == "Done"), "tone": "success", "icon": "checkmark-done-outline"},
+                     {"label": "Open", "value": sum(1 for r in rows if r["status"] in ("Open", "Late")), "tone": "accent", "icon": "time-outline"},
+                     {"label": "Cancelled", "value": sum(1 for r in rows if r["status"] == "Cancelled"), "tone": "muted", "icon": "close-circle-outline"}]
+    return view
+
+
 def _pending_view(user, dash: dict, include_private: bool, official_only: bool = False) -> dict:
     """Everything still open, late first. Sir's rows say Official or Personal (personal rows only when the phone
     is unlocked, never in the official view); Mansi's say whether Sir gave it or it is her own. She has no
@@ -459,6 +552,18 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         return listviews.tasks_view(user, p, include_private, mode="person", missing=missing)
     if kind == "people":
         return listviews.people_view(user, p, missing=missing)
+    if kind == "history":
+        view = _history_view(user, include_private, p)
+        address, address_hi = _addr(user)
+        rows = view["rows"]
+        what = view["title"].removeprefix("History: ")
+        if not rows:
+            return _summ(view, address, address_hi, f"I have nothing about {what}.", f"{what} के बारे में मेरे पास कुछ नहीं है।")
+        last = next((r for r in rows if r["past"] and r["status"] != "Cancelled"), rows[0])
+        n = len(rows)
+        en = f"the last one about {what} was {last['title']} {last['day']} ({last['status'].lower()})" + (f"; {n} in all." if n > 1 else ".")
+        hi = f"{what} के बारे में पिछला {last['title']} {last['day']} ({last['status']})" + (f"; कुल {n}।" if n > 1 else "।")
+        return _summ(view, address, address_hi, en, hi)
     if kind == "performance" and p["who"] and p["who"].lower() not in listviews._STAFF | listviews._ALL:
         return listviews.tasks_view(user, p, include_private, mode="performance", missing=missing)
     if kind == "tasks" or (kind in _AS_TASKS and listviews.has_request(p)):
@@ -631,11 +736,22 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         en = f"{by['Today']} finished today, {by['This week']} this week; latest {rows[0]['title']}" + (f" by {rows[0]['who']}." if rows[0]["who"] not in ("You", "") else ".")
         hi = f"आज {by['Today']} पूरे हुए, इस हफ़्ते {by['This week']}; सबसे ताज़ा {rows[0]['title']}।"
         return _summ(view, address, address_hi, en, hi)
+    if kind == "cancelled":
+        view = _cancelled_view(user, include_private)
+        rows = view["rows"]
+        if not rows:
+            return _summ(view, address, address_hi, "nothing was cancelled in the last 30 days.", "पिछले 30 दिन में कुछ कैंसल नहीं हुआ।")
+        n = len(rows)
+        en = f"{n} cancelled in the last 30 days; latest {rows[0]['title']} {rows[0]['day']}. Say restore to bring one back."
+        hi = f"पिछले 30 दिन में {n} कैंसल; सबसे ताज़ा {rows[0]['title']} {rows[0]['day']}। वापस लाना हो तो रीस्टोर बोलिए।"
+        return _summ(view, address, address_hi, en, hi)
     return None
 
 
 _QUERY_HINTS = [
     ("performance", ("performance", "report", "kaisa kaam", "kis ne kitna", "productivity", "kaun late", "who is late", "on time")),
+    ("history", ("last time", "pichhli baar", "pichli baar", "kab mila", "last met", "last meeting with", "history", "kab diya tha", "pehle kab")),
+    ("cancelled", ("cancelled", "canceled", "cancel kiye", "cancel hue", "hataye", "deleted", "restore")),
     ("done", ("completed", "finished", "ho gaya", "ho gaye", "khatam", "kya kya hua", "what got done")),
     ("requests", ("request", "approve", "approval", "ok karna", "waiting for", "pending request", "manzoori")),
     ("busy", ("busy", "free kab", "khaali", "khali", "free time")),

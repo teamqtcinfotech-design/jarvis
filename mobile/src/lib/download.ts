@@ -84,7 +84,8 @@ async function shareFile(uri: string, mimeType: string, title: string) {
 
 export async function downloadCsv(view: DataView) {
   const file = new File(Paths.cache, `${view.file_name}.csv`);
-  file.write(toCsv(view));
+  // The byte-order mark makes Excel read the Hindi letters correctly instead of showing boxes.
+  file.write(`﻿${toCsv(view)}`);
   await shareFile(file.uri, 'text/csv', view.title);
 }
 

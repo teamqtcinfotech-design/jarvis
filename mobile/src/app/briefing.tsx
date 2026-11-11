@@ -5,7 +5,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { DataCard } from '@/components/DataCard';
 import { Button, Chip, IconButton, Tag, Txt } from '@/components/ui';
+import { useAlertEngine } from '@/lib/alertEngine';
 import { ApiError, api } from '@/lib/api';
+import { langOfText } from '@/lib/lang';
 import { useLayout } from '@/lib/layout';
 import { say, stopSpeaking } from '@/lib/speech';
 import { colors, radius } from '@/lib/theme';
@@ -16,6 +18,9 @@ type Kind = 'morning' | 'now' | 'evening';
 export default function Briefing() {
   const router = useRouter();
   const { isTablet } = useLayout();
+  const { presence } = useAlertEngine();
+  // In a meeting (or quiet hours) the briefing is read, not spoken, unless he taps "Read aloud" himself.
+  const quietNow = presence.state === 'meeting' || presence.state === 'quiet';
   const [kind, setKind] = useState<Kind>(() => (new Date().getHours() >= 17 ? 'evening' : new Date().getHours() < 11 ? 'morning' : 'now'));
   const [text, setText] = useState('');
   const [engine, setEngine] = useState('');
@@ -31,13 +36,13 @@ export default function Briefing() {
       setText(res.data.text);
       setEngine(res.data.engine);
       setView(res.data.view ?? null);
-      if (speak) say(res.data.text, { interrupt: true });
+      if (speak && !quietNow) say(res.data.text, { interrupt: true, lang: langOfText(res.data.text) });
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not load the briefing.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [quietNow]);
 
   const initialKind = useRef(kind);
   useEffect(() => {
@@ -77,12 +82,13 @@ export default function Briefing() {
             <>
               <Txt style={s.text}>{text}</Txt>
               {engine ? <Tag label={engine === 'ai' ? 'Written by JARVIS AI from your live tasks' : 'Summary (AI offline)'} color={colors.inkSoft} /> : null}
+              {quietNow ? <Txt variant="caption" style={{ marginTop: 8 }}>Not read aloud: you are {presence.state === 'meeting' ? 'in a meeting' : 'in quiet hours'}. Tap Read aloud if you want it.</Txt> : null}
             </>
           )}
         </View>
         <View style={{ flexDirection: 'row', marginTop: 16 }}>
           <Button title="Stop" kind="secondary" icon="stop" onPress={stopSpeaking} style={{ flex: 1, marginRight: 8 }} />
-          <Button title="Read aloud" icon="volume-high-outline" onPress={() => say(text, { interrupt: true })} disabled={!text} style={{ flex: 1.4 }} />
+          <Button title="Read aloud" icon="volume-high-outline" onPress={() => say(text, { interrupt: true, lang: langOfText(text) })} disabled={!text} style={{ flex: 1.4 }} />
         </View>
         {view && !loading ? (
           <View style={{ marginTop: 18 }}>

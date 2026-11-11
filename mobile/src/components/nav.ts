@@ -30,6 +30,8 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
         ]),
     { key: 'staff', label: 'Given to staff', icon: 'briefcase-outline', count: open(data?.delegated) },
     { key: 'held', label: 'Held alerts', icon: 'notifications-outline', count: engine.held.length, tone: colors.danger, detail: 'Kept quiet while you were busy' },
+    { key: 'updates', label: 'Updates', icon: 'newspaper-outline', count: engine.news?.length, detail: 'Small news, decisions and nudges' },
+    { key: 'cancelled', label: 'Cancelled', icon: 'close-circle-outline', detail: 'Last 30 days · restore from here' },
     { key: 'briefing', label: 'Briefing', icon: 'sunny-outline' },
     { key: 'settings', label: 'Settings', icon: 'settings-outline' },
   ];
@@ -38,5 +40,5 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
 /** Which server data view a list key maps to (for the tablet workspace). */
 export const VIEW_FOR_KEY: Record<string, string> = {
   today: 'today', late: 'late', upcoming: 'upcoming', nodate: 'nodate', private: 'private', requests: 'requests',
-  pa: 'pa', md_tasks: 'pa', busy: 'busy', staff: 'staff',
+  pa: 'pa', md_tasks: 'pa', busy: 'busy', staff: 'staff', cancelled: 'cancelled',
 };

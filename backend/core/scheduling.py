@@ -198,7 +198,8 @@ def day_load(user: User, day: date, prefs: dict, exclude_ids=()) -> dict:
         o_start, o_end = office_hours(prefs, day)
         capacity = int((o_end - o_start).total_seconds() // 60 * (1 - BUFFER))
     count = len(timed) + len(dated)
-    heavy = count >= HEAVY_DAY_ITEMS or (capacity > 0 and minutes > capacity)
+    full_at = int(prefs.get("heavyDayItems") or HEAVY_DAY_ITEMS)  # the person's own idea of a full day
+    heavy = count >= full_at or (capacity > 0 and minutes > capacity)
     movable = None
     candidates = [d for d in dated if d["kind"] in MOVABLE_KINDS and d["priority"] in (Priority.LOW, Priority.NORMAL)]
     if candidates:

@@ -146,6 +146,10 @@ interface EngineValue {
   lastSync: number | null;
   notificationsGranted: boolean | null;
   upcomingCount: number;
+  /** Every unseen server message (news, decisions, nudges), newest first, for the Updates screen. */
+  news: ServerAlert[];
+  /** The Updates screen was opened: the small news on it counts as seen. */
+  markRead: (ids: string[]) => Promise<void>;
 }
 
 const EngineContext = createContext<EngineValue | null>(null);
@@ -363,6 +367,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const [lastSync, setLastSync] = useState<number | null>(null);
   const [notificationsGranted, setNotificationsGranted] = useState<boolean | null>(null);
   const [upcomingCount, setUpcomingCount] = useState(0);
+  const [news, setNews] = useState<ServerAlert[]>([]);
+  // What the server lists right now (reminder keys and alert keys): a snoozed or repeating item whose task was
+  // finished elsewhere in the meantime must not ring when its moment comes.
+  const liveKeys = useRef(new Set<string>());
   const [offer, setOffer] = useState<HeldOffer | null>(null);
   const offerSeq = useRef(0);
   const voiceProbe = useRef<(() => Promise<boolean>) | null>(null);
@@ -630,12 +638,14 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     for (const [k, s] of snoozed.current) {
       if (s.until <= now) {
         snoozed.current.delete(k);
+        if (!liveKeys.current.has(k)) continue; // finished or cancelled elsewhere meanwhile: nothing to ring about
         due.push({ ...s.item, followups: Math.max(s.item.followups, 0) });
       }
     }
     for (const [k, f] of followups.current) {
       if (f.at <= now) {
         followups.current.delete(k);
+        if (!liveKeys.current.has(k)) continue;
         // Already shown? Re-alert only if still not acknowledged.
         if (currentRef.current?.key === k) queueRef.current = queueRef.current.filter((q) => q.key !== k);
         due.push(f.item);
@@ -711,9 +721,12 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       ]);
       remindersRef.current = rem.data.reminders;
       alertsRef.current = alerts.data.results;
+      setNews(alerts.data.results);
       setBusyWindows(rem.data.busy_windows);
       setLastSync(Date.now());
-      pruneGone(new Set([...rem.data.reminders.map((r) => r.key), ...alerts.data.results.map(alertKey)]));
+      const live = new Set([...rem.data.reminders.map((r) => r.key), ...alerts.data.results.map(alertKey)]);
+      liveKeys.current = live;
+      pruneGone(live);
       await scheduleOs(rem.data.reminders).catch(() => undefined);
       tick();
     } catch {
@@ -998,10 +1011,23 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [decideRequest, complete, snooze, clearKey, address, addressHi, md.en, md.hi],
   );
 
+  const markRead = useCallback(
+    async (ids: string[]) => {
+      for (const id of ids) {
+        await api(`/alerts/${id}/ack/`, { method: 'POST' }).catch(() => undefined);
+      }
+      setNews((prev) => prev.filter((a) => !ids.includes(a.id)));
+      alertsRef.current = alertsRef.current.filter((a) => !ids.includes(a.id));
+    },
+    [],
+  );
+
   const value: EngineValue = {
     presence,
     setPresenter,
     answerQuestion,
+    news,
+    markRead,
     meetingMode,
     setMeetingMode,
     offer,

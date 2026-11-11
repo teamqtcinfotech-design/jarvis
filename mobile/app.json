@@ -3,7 +3,7 @@
     "name": "JARVIS",
     "slug": "jarvis",
     "scheme": "jarvis",
-    "version": "1.3.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.qtcinfotech.jarvis",
-      "versionCode": 5,
+      "versionCode": 6,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#13233A",

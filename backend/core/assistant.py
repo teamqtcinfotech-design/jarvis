@@ -1094,6 +1094,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
                 names_private = any(r.get("private") for r in (view.get("rows") or [])) or any(
                     t.get("private") for t in (view.get("timeline") or []))
                 services.remember_last_view(user, view.get("request") or {"kind": kind}, view.get("summary", ""), names_private)
+                services.learn_view(user, view.get("kind") or kind)  # the lists he asks for most come first on the home screen
             draft["view"] = view
         if not draft["spoken_reply"]:
             if intent == "query":

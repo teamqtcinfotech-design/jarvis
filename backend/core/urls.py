@@ -10,6 +10,8 @@ urlpatterns = [
     path("auth/device-token/", views.DeviceTokenView.as_view()),
     path("me/", views.MeView.as_view()),
     path("me/prefs/", views.MePrefsView.as_view()),
+    path("me/habits/", views.MeHabitsView.as_view()),
+    path("me/habits/<str:key>/", views.MeHabitsView.as_view()),
     path("me/push-token/", views.PushTokenView.as_view()),
     path("health/", views.HealthView.as_view()),
     path("today/", views.TodayView.as_view()),

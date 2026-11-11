@@ -471,6 +471,18 @@ class MePrefsView(APIView):
         return Response(services.set_prefs(request.user, patch))
 
 
+class MeHabitsView(APIView):
+    """What JARVIS has learned or been told about how this person works, in plain words; any one can be forgotten."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        return Response({"results": services.habits(request.user)})
+
+    def delete(self, request, key):
+        services.forget_habit(request.user, key)
+        return Response({"forgotten": key, "results": services.habits(request.user)})
+
+
 class PushTokenView(APIView):
     """The phone's Firebase token, so alerts reach it the moment they are created (even with the app closed)."""
     permission_classes = [IsMDOrPA]

@@ -110,11 +110,24 @@ def run(now=None) -> int:
         return raised
     pa_name = pa.spoken_name if pa else "your PA"
     sir, sir_hi = services.md_address(), services.md_address_hi()
+    # The rules are the MD's settings, not constants: how long staff may go quiet, how long a request may wait,
+    # and when each person's evening summary comes.
+    md_prefs = get_prefs(md)
+    staff_stale = timedelta(days=int(md_prefs.get("staleStaffDays") or STAFF_STALE.days))
+    request_stale = timedelta(hours=int(md_prefs.get("requestWaitHours") or REQUEST_STALE.total_seconds() // 3600))
 
-    # 1) Staff tasks with no update for 2 days
+    def digest_due(prefs: dict) -> bool:
+        raw = str(prefs.get("digestTime") or f"{DIGEST_AT[0]:02d}:{DIGEST_AT[1]:02d}")
+        try:
+            hh, mm = int(raw[:2]), int(raw[3:5])
+        except ValueError:
+            hh, mm = DIGEST_AT
+        return (local.hour, local.minute) >= (hh, mm)
+
+    # 1) Staff tasks with no update for a while
     for task in delegated_qs().filter(status__in=OPEN):
         last = task.updated_at or task.created_at
-        if not last or now - last < STAFF_STALE:
+        if not last or now - last < staff_stale:
             continue
         who = task.staff.name if task.staff else "a staff member"
         age, age_hi = _days(now - last), _days_hi(now - last)
@@ -130,7 +143,7 @@ def run(now=None) -> int:
                              spoken_hi=f"{pa_name}, {who} के टास्क '{task.title}' पर {age_hi} से कोई अपडेट नहीं है। कृपया उनसे पूछ लीजिए।")
 
     # 2) Mansi's requests waiting for Sir
-    for req in TaskRequest.objects.filter(state=TaskRequest.State.PENDING, created_at__lte=now - REQUEST_STALE).select_related("requested_by"):
+    for req in TaskRequest.objects.filter(state=TaskRequest.State.PENDING, created_at__lte=now - request_stale).select_related("requested_by"):
         hours = int((now - req.created_at).total_seconds() // 3600)
         title = (req.payload or {}).get("title") or "a request"
         raised += _raise(md, f"request:{req.id}", "Request waiting for your decision", title,
@@ -147,15 +160,15 @@ def run(now=None) -> int:
                              spoken_hi=f"{pa_name}, {sir_hi} का टास्क '{task.title}' अभी शुरू नहीं हुआ। "
                                        f"आप कह सकते हैं: शुरू करो, या कारण के साथ होल्ड पर रखो।")
 
-    # 4) End of day: what slipped, for each of them about their own list
-    if (local.hour, local.minute) >= DIGEST_AT:
+    # 4) End of day: what slipped, for each of them about their own list, at each one's own summary time
+    if digest_due(md_prefs) or (pa and digest_due(get_prefs(pa))):
         today = local.date()
 
         def due_day(t):
             return tu.to_local(t.due_at).date() if t.due_at else t.due_date
 
         key = f"digest:{today.isoformat()}"
-        if not _already(key + f"@{md.id}"):
+        if digest_due(md_prefs) and not _already(key + f"@{md.id}"):
             slipped = [t.title for t in shared_md_tasks_qs().filter(status__in=OPEN) if (d := due_day(t)) and d <= today]
             private_count = sum(1 for t in md_private_qs(md).filter(status__in=OPEN) if (d := due_day(t)) and d <= today)
             total = private_count + len(slipped)
@@ -171,7 +184,7 @@ def run(now=None) -> int:
                           ". Tell me if you want them moved to tomorrow.")
                 spoken_hi = f"{sir_hi}, आज {total} काम रह गए: " + " और ".join(parts_hi) + "। बताइए अगर कल पर ले जाऊँ।"
                 raised += _raise(md, key, f"{total} slipped today", " · ".join(parts), spoken, spoken_hi=spoken_hi)
-        if pa and not _already(key + f"@{pa.id}"):
+        if pa and digest_due(get_prefs(pa)) and not _already(key + f"@{pa.id}"):
             hers = [t.title for t in pa_tasks_qs().filter(status__in=OPEN).exclude(origin=SharedTask.Origin.MD_MEET_PA)
                     if (d := due_day(t)) and d <= today]
             if hers:

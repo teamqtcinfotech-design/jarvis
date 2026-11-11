@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { Modal, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Alert, Modal, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ApiError, api } from '@/lib/api';
 import { dataChanged } from '@/lib/bus';
 import { dayLabel, timeOf } from '@/lib/format';
-import { addressOf, mdWord } from '@/lib/names';
+import { twin } from '@/lib/lang';
+import { addressHiOf, addressOf, mdWord, mdWordHi } from '@/lib/names';
 import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors, kindLabel, radius } from '@/lib/theme';
@@ -47,23 +48,46 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
     api(`/pa-tasks/${item.id}/status/`, { method: 'POST', body: { status, expected_version: item.version, note } });
   const base = item.scope === 'private' ? `/private-tasks/${item.id}/` : `/shared-tasks/${item.id}/`;
   const address = addressOf(user);
+  const addressHi = addressHiOf(user);
+  const mdHi = mdWordHi(dash);
+  const closed = item.status === 'COMPLETED' || item.status === 'CANCELLED';
 
-  const run = async (label: string, fn: () => Promise<{ status: number }>, spokenOk: string) => {
+  const run = async (label: string, fn: () => Promise<{ status: number }>, spokenOk: string, spokenOkHi = '') => {
     setBusy(label);
     setMessage('');
     try {
       const res = await fn();
       const proposed = res.status === 202;
-      say(proposed ? `${address}, sent to ${md} for approval.` : spokenOk, { interrupt: true });
+      const t = proposed ? twin(`${address}, sent to ${md} for approval.`, `${addressHi}, ${mdHi} को मंज़ूरी के लिए भेज दिया।`) : twin(spokenOk, spokenOkHi);
+      say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback });
       dataChanged.emit();
       if (proposed) setMessage(`Sent to ${md} for approval. The task stays as it is until ${md} accepts.`);
       else onClose();
     } catch (e) {
-      setMessage(e instanceof ApiError ? e.message : 'Could not reach the server.');
+      // Changed on the other phone meanwhile (409): the lists refresh; the buttons work again with the new version.
+      if (e instanceof ApiError && e.status === 409) setMessage('This task changed a moment ago. Refreshed, please try again.');
+      else setMessage(e instanceof ApiError ? e.message : 'Could not reach the server.');
       dataChanged.emit();
     } finally {
       setBusy('');
     }
+  };
+
+  // A cancel is undone from the Cancelled list, but it still asks first.
+  const confirmCancel = () => {
+    Alert.alert(
+      isMD ? 'Cancel this task?' : 'Propose cancelling this task?',
+      isMD ? 'It goes to the Cancelled list, where you can restore it.' : `${md} will be asked to agree.`,
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: isMD ? 'Cancel task' : 'Propose',
+          style: 'destructive',
+          onPress: () => run('cancel', () => api(base, { method: 'PATCH', body: { expected_version: item.version, status: 'CANCELLED' } }),
+            `Cancelled, ${address}.`, `कैंसल कर दिया, ${addressHi}।`),
+        },
+      ],
+    );
   };
 
   const when = item.scheduled_start
@@ -128,7 +152,16 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
         {message ? <Txt variant="small" style={{ marginTop: 12, color: colors.warn }}>{message}</Txt> : null}
 
         <View style={s.actions}>
-          {isPaTask && !isMD ? (
+          {closed && (item.scope === 'private' || isMD || ownPaTask) ? (
+            <Button
+              title={item.status === 'CANCELLED' ? 'Restore' : 'Reopen'}
+              icon="refresh-outline"
+              loading={busy === 'restore'}
+              onPress={() => run('restore',
+                () => (ownPaTask && !isMD ? paStatus('OPEN') : api(base, { method: 'PATCH', body: { expected_version: item.version, status: 'OPEN' } })),
+                `${item.status === 'CANCELLED' ? 'Restored' : 'Reopened'}, ${address}.`, `${item.status === 'CANCELLED' ? 'वापस ले आया' : 'फिर से खोल दिया'}, ${addressHi}।`)}
+            />
+          ) : isPaTask && !isMD ? (
             <>
               {askHold ? (
                 <>
@@ -145,7 +178,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                     kind="danger"
                     loading={busy === 'hold'}
                     disabled={!holdReason.trim()}
-                    onPress={() => run('hold', () => paStatus('BLOCKED', holdReason.trim()), `On hold.${toldSir} ${address}.`)}
+                    onPress={() => run('hold', () => paStatus('BLOCKED', holdReason.trim()), `On hold.${toldSir} ${address}.`, `होल्ड पर रख दिया${ownPaTask ? '' : `, ${mdHi} को बता दिया`}, ${addressHi}।`)}
                     style={{ marginTop: 8 }}
                   />
                 </>
@@ -155,7 +188,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                     title="Done"
                     icon="checkmark-done"
                     loading={busy === 'done'}
-                    onPress={() => run('done', () => paStatus('COMPLETED'), `Done.${toldSir} ${address}.`)}
+                    onPress={() => run('done', () => paStatus('COMPLETED'), `Done.${toldSir} ${address}.`, `हो गया${ownPaTask ? '' : `, ${mdHi} को बता दिया`}, ${addressHi}।`)}
                   />
                   <View style={{ flexDirection: 'row', marginTop: 8 }}>
                     <Button
@@ -164,7 +197,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                       compact
                       disabled={item.status === 'IN_PROGRESS'}
                       loading={busy === 'start'}
-                      onPress={() => run('start', () => paStatus('IN_PROGRESS'), `Started, ${address}.`)}
+                      onPress={() => run('start', () => paStatus('IN_PROGRESS'), `Started, ${address}.`, `शुरू कर दिया, ${addressHi}।`)}
                       style={{ flex: 1, marginRight: 8 }}
                     />
                     <Button title="Hold" kind="danger" compact onPress={() => setAskHold(true)} style={{ flex: 1 }} />
@@ -186,7 +219,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                 title={isMD ? 'Mark done' : 'Propose: mark done'}
                 icon="checkmark-done"
                 loading={busy === 'done'}
-                onPress={() => run('done', () => api(`${base}complete/`, { method: 'POST', body: { expected_version: item.version } }), `Marked done, ${address}.`)}
+                onPress={() => run('done', () => api(`${base}complete/`, { method: 'POST', body: { expected_version: item.version } }), `Marked done, ${address}.`, `पूरा हुआ मार्क कर दिया, ${addressHi}।`)}
               />
               <View style={{ flexDirection: 'row', marginTop: 8 }}>
                 <Button
@@ -194,7 +227,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                   kind="secondary"
                   compact
                   loading={busy === 'move'}
-                  onPress={() => run('move', () => api(base, { method: 'PATCH', body: shiftDay(item, 1) }), `Moved to tomorrow, ${address}.`)}
+                  onPress={() => run('move', () => api(base, { method: 'PATCH', body: shiftDay(item, 1) }), `Moved to tomorrow, ${address}.`, `कल पर ले गया, ${addressHi}।`)}
                   style={{ flex: 1, marginRight: 8 }}
                 />
                 <Button
@@ -202,7 +235,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                   kind="danger"
                   compact
                   loading={busy === 'cancel'}
-                  onPress={() => run('cancel', () => api(base, { method: 'PATCH', body: { expected_version: item.version, status: 'CANCELLED' } }), `Cancelled, ${address}.`)}
+                  onPress={confirmCancel}
                   style={{ flex: 1 }}
                 />
               </View>

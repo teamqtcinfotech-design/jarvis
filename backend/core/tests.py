@@ -2340,6 +2340,118 @@ class SnoozeAndQuestionTests(BaseCase):
         self.assertIn("is due today", follow[0]["spoken"])
 
 
+class HabitsAndRulesTests(BaseCase):
+    """Names by voice from either phone, rules as settings rather than constants, habits JARVIS learns and shows,
+    the history template, and the cancelled list with restore."""
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_names_by_voice_from_either_phone(self):
+        # The MD names the PA; the PA hears it; every phone reads the new name from the server.
+        d = self.interpret(self.md_client, "meri PA ka naam Suraj hai", _cmd(intent="set_setting", setting_key="paName", setting_value="Suraj"))
+        self.assertEqual(d["action"], "set_setting")
+        self.assertEqual(d["setting_patch"], {"paName": "Suraj"})
+        r = self.md_client.patch("/api/v1/me/prefs/", d["setting_patch"], format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        # (the test client keeps the same user object; a real phone reads /me/ afresh and sees the new name)
+        self.assertEqual(User.objects.get(username="pa").spoken_name, "Suraj")
+        fresh_pa = APIClient()
+        fresh_pa.force_authenticate(User.objects.get(username="pa"))
+        self.assertEqual(fresh_pa.get("/api/v1/me/").json()["name"], "Suraj")
+        self.assertEqual(self.md_client.get("/api/v1/today/").json()["pa_name"], "Suraj")
+        told = [a for a in self.pa_client.get("/api/v1/alerts/").json()["results"] if a["ref_type"] == "profile"]
+        self.assertTrue(told and "Suraj" in told[0]["spoken_text"], told)
+        # The PA sets her own name; the MD is told.
+        r = fresh_pa.patch("/api/v1/me/prefs/", {"myName": "Mansi"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(User.objects.get(username="pa").spoken_name, "Mansi")
+        self.assertTrue(any("Mansi" in a["spoken_text"] for a in self.md_client.get("/api/v1/alerts/").json()["results"]))
+        # The PA cannot rename the MD or herself through paName.
+        self.assertEqual(self.pa_client.patch("/api/v1/me/prefs/", {"paName": "Someone"}, format="json").status_code, 403)
+        # The model is told the names as settings it may change.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="small_talk", spoken_reply="Hi")) as fake:
+            self.md_client.post("/api/v1/assistant/interpret/", {"text": "hello"}, format="json")
+        settings_ctx = fake.call_args.args[1]["settings"]
+        self.assertEqual((settings_ctx["myName"]["now"], settings_ctx["paName"]["now"]), ("Sir", "Mansi"))
+        self.assertNotIn("paName", json.dumps(self.pa_client.get("/api/v1/me/prefs/").json()))
+
+    def test_rules_are_settings_and_habits_are_learned_and_forgettable(self):
+        from core import scheduling
+        # A full day is the person's own number.
+        day = tu.today_local() + timedelta(days=3)
+        for i in range(4):
+            services.create_private_task(self.md, {"title": f"Thing {i}", "kind": Kind.TASK, "priority": Priority.NORMAL, "due_date": day})
+        self.assertFalse(scheduling.day_load(self.md, day, services.get_prefs(self.md))["heavy"])
+        self.md_client.patch("/api/v1/me/prefs/", {"heavyDayItems": 4}, format="json")
+        self.assertTrue(scheduling.day_load(self.md, day, services.get_prefs(self.md))["heavy"])
+        # The check-in delay too.
+        self.md_client.patch("/api/v1/me/prefs/", {"checkinAfterMinutes": 20}, format="json")
+        when = tu.now_local() + timedelta(hours=1)
+        services.create_private_task(self.md, {"title": "Call the auditor", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                               "due_date": when.date(), "due_time": when.time().replace(second=0, microsecond=0)})
+        rems = self.md_client.get("/api/v1/reminders/?hours=48").json()["reminders"]
+        due = next(r for r in rems if r["title"] == "Call the auditor" and r["label"] == "due")
+        check = [r for r in rems if r["title"] == "Call the auditor" and r["label"] == "checkin"]
+        if check:
+            self.assertEqual(datetime.fromisoformat(check[0]["fire_at"]) - datetime.fromisoformat(due["fire_at"]), timedelta(minutes=20))
+        # Meeting lengths he mentions become his usual length; a meeting with none said takes it.
+        for minutes in (30, 30, 45):
+            services.create_private_task(self.md, {"title": "Review", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                   "due_date": day, "due_time": time(11, 0), "duration_minutes": minutes})
+        self.assertEqual(services.get_prefs(self.md)["meetingMinutes"], 30)
+        plain = services.create_private_task(self.md, {"title": "Plain meeting", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                       "due_date": day, "due_time": time(15, 0)})
+        self.assertEqual(plain.scheduled_end - plain.scheduled_start, timedelta(minutes=30))
+        # What he asks for is remembered; the habits are listed in plain words and any one can be forgotten.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="late")):
+            for _ in range(2):
+                self.md_client.post("/api/v1/assistant/interpret/", {"text": "late wale dikhao"}, format="json")
+        habits = {h["key"]: h for h in self.md_client.get("/api/v1/me/habits/").json()["results"]}
+        self.assertEqual(habits["meetingMinutes"]["value"], "30 minutes")
+        self.assertIn("late", habits["viewsRecent"]["value"])
+        self.assertEqual(habits["heavyDayItems"]["value"], "4 items")
+        r = self.md_client.delete("/api/v1/me/habits/meetingMinutes/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(services.get_prefs(self.md)["meetingMinutes"], 60)
+        self.assertEqual(self.md_client.delete("/api/v1/me/habits/nonsense/").status_code, 422)
+
+    def test_history_and_cancelled_lists(self):
+        from core import datacards
+        last_week = tu.today_local() - timedelta(days=7)
+        done = services.create_private_task(self.md, {"title": "Meeting with Sharma ji – Pune", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                      "due_date": last_week, "due_time": time(11, 0)})
+        services.update_private_task(self.md, done.id, {"status": "COMPLETED"}, 1)
+        services.create_private_task(self.md, {"title": "Call Sharma ji again", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                               "due_date": tu.today_local() + timedelta(days=2), "due_time": time(16, 0)})
+        gone = services.create_private_task(self.md, {"title": "Old Sharma dinner", "kind": Kind.TASK, "priority": Priority.NORMAL})
+        services.update_private_task(self.md, gone.id, {"status": "CANCELLED"}, 1)
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="history", view_words="Sharma")):
+            d = self.md_client.post("/api/v1/assistant/interpret/", {"text": "Sharma ji se pichhli baar kab mila tha"}, format="json").json()
+        view = d["view"]
+        self.assertEqual(view["kind"], "history")
+        self.assertEqual([r["status"] for r in view["rows"]], ["Open", "Cancelled", "Done"])
+        self.assertIn("Meeting with Sharma ji – Pune", d["spoken_reply"])
+        self.assertIn("(done)", d["spoken_reply"])
+        # The words the server guesses from the question when the model files it elsewhere.
+        self.assertEqual(datacards.guess_kind("pichhli baar Sharma ji se kab mila"), "history")
+        # Cancelled list, and a restore through the ordinary edit.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="cancelled")):
+            d = self.md_client.post("/api/v1/assistant/interpret/", {"text": "cancel kiye hue dikhao"}, format="json").json()
+        self.assertEqual([r["title"] for r in d["view"]["rows"]], ["Old Sharma dinner"])
+        self.assertTrue(d["view"]["rows"][0]["restorable"])
+        r = self.md_client.patch(f"/api/v1/private-tasks/{gone.id}/", {"expected_version": 2, "status": "OPEN"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()["status"], "OPEN")
+        # The PA never sees the MD's private history.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="history", view_words="Sharma")):
+            d = self.pa_client.post("/api/v1/assistant/interpret/", {"text": "Sharma"}, format="json").json()
+        self.assertNotIn("Sharma", json.dumps(d["view"]["rows"]))
+
+
 class LanguageTests(BaseCase):
     """One language rule for everything JARVIS says: the sentence just spoken decides, a pinned setting overrides,
     and what is said with nothing just spoken (alerts, reminders) follows the language used lately."""

@@ -1,3 +1,4 @@
+import Constants from 'expo-constants';
 import { Redirect, useRouter } from 'expo-router';
 import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 import React, { useEffect, useState } from 'react';
@@ -14,7 +15,7 @@ import { presenceLabel } from '@/lib/presence';
 import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
-import type { AiUsageSummary, ContactItem, MemoryItem } from '@/lib/types';
+import type { AiUsageSummary, ContactItem, HabitItem, MemoryItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { type WakeStatus, wakeSetListening, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
 
@@ -56,6 +57,7 @@ function SettingsScreen() {
   const [health, setHealth] = useState<Health | null>(null);
   const [memories, setMemories] = useState<MemoryItem[] | null>(null);
   const [contacts, setContacts] = useState<ContactItem[] | null>(null);
+  const [habits, setHabits] = useState<HabitItem[] | null>(null);
   const [usage, setUsage] = useState<AiUsageSummary | null>(null);
   const [wake, setWake] = useState<WakeStatus | null>(null);
   const [wakeBusy, setWakeBusy] = useState(false);
@@ -67,6 +69,7 @@ function SettingsScreen() {
       api<Health>('/health/').then((r) => setHealth(r.data)).catch(() => setHealth(null));
       api<{ results: MemoryItem[] }>('/memories/').then((r) => setMemories(r.data.results)).catch(() => setMemories([]));
       api<{ results: ContactItem[] }>('/contacts/').then((r) => setContacts(r.data.results)).catch(() => setContacts([]));
+      api<{ results: HabitItem[] }>('/me/habits/').then((r) => setHabits(r.data.results)).catch(() => setHabits([]));
       api<AiUsageSummary>('/assistant/usage/').then((r) => setUsage(r.data)).catch(() => setUsage(null));
       refresh();
     }, 0);
@@ -139,6 +142,15 @@ function SettingsScreen() {
   const forgetContact = async (id: number) => {
     setContacts((list) => (list ?? []).filter((c) => c.id !== id));
     await api(`/contacts/${id}/`, { method: 'DELETE' }).catch(() => undefined);
+  };
+
+  const forgetHabit = async (key: string) => {
+    try {
+      const r = await api<{ results: HabitItem[] }>(`/me/habits/${key}/`, { method: 'DELETE' });
+      setHabits(r.data.results);
+    } catch {
+      // keep the list as it is
+    }
   };
 
   const testVoice = () => {
@@ -217,11 +229,11 @@ function SettingsScreen() {
             right={wake?.running ? <Tag label="On" color={colors.success} bg={colors.successSoft} /> : null}
           />
           <Row
-            title="Listen for “Hey JARVIS”"
+            title="Listen for “Hey JARVIS” on this phone"
             detail={
               !wakeSupported ? 'Not included in this build.'
-                : wake?.listening ? 'On. Say “Hey JARVIS” any time, even with the app closed.'
-                : 'Off. Switch on to wake JARVIS by voice from anywhere.'
+                : wake?.listening ? 'On. Say “Hey JARVIS” any time, even with the app closed. This switch is per phone.'
+                : 'Off. Switch on to wake JARVIS by voice from anywhere. This switch is per phone.'
             }
             right={<Switch value={prefs.wakeWordEnabled && !!wake?.listening} disabled={!wakeSupported || wakeBusy} onValueChange={toggleWake} trackColor={{ true: colors.gold }} />}
           />
@@ -273,6 +285,28 @@ function SettingsScreen() {
             </View>
           ))}
           <Txt variant="caption" style={{ marginTop: 8 }}>Only you can see these notes.</Txt>
+        </Card>
+
+        <Txt variant="label" style={{ marginTop: 22 }}>How JARVIS has learned you work</Txt>
+        <Card style={s.card}>
+          {habits === null ? <Txt variant="small">Loading…</Txt> : null}
+          {habits?.map((h) => (
+            <View key={h.key} style={s.memory}>
+              <Icon name={h.set ? 'sparkles-outline' : 'ellipse-outline'} size={16} color={h.set ? colors.gold : colors.faint} />
+              <View style={{ flex: 1, marginLeft: 8 }}>
+                <Txt variant="body">{h.label}: <Txt variant="heading" style={{ fontSize: 14 }}>{h.value}</Txt></Txt>
+                <Txt variant="caption">{h.learned}</Txt>
+              </View>
+              {h.set ? (
+                <Pressable onPress={() => forgetHabit(h.key)} hitSlop={10} accessibilityLabel={`Forget ${h.label}`}>
+                  <Icon name="refresh-outline" size={18} color={colors.muted} />
+                </Pressable>
+              ) : null}
+            </View>
+          ))}
+          <Txt variant="caption" style={{ marginTop: 8 }}>
+            Learned from what you say and ask, or set here and by voice (“meri meetings aam taur par 30 minute ki hoti hain”). The arrow puts one back to the default.
+          </Txt>
         </Card>
 
         <Txt variant="label" style={{ marginTop: 22 }}>People JARVIS knows</Txt>
@@ -383,7 +417,9 @@ function SettingsScreen() {
           {!isMD ? <Txt variant="small" style={{ marginTop: 8 }}>{mdWord(dash)}’s personal tasks are private and never shown in this app.</Txt> : null}
           <Button title="Sign out" kind="danger" icon="log-out-outline" onPress={signOut} style={{ marginTop: 14 }} />
         </Card>
-        <Txt variant="caption" style={{ textAlign: 'center', marginTop: 20 }}>JARVIS 1.1 · private build for QTC INFOTECH</Txt>
+        <Txt variant="caption" style={{ textAlign: 'center', marginTop: 20 }}>
+          JARVIS {Constants.expoConfig?.version ?? ''}{Constants.expoConfig?.android?.versionCode ? ` (${Constants.expoConfig.android.versionCode})` : ''} · private build for QTC INFOTECH
+        </Txt>
       </ScrollView>
     </SafeAreaView>
   );

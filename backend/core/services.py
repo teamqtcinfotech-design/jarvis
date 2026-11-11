@@ -179,7 +179,8 @@ def apply_schedule(task, data: dict, *, creating: bool):
         task.estimated_minutes = duration
     if kind == Kind.MEETING and task.due_at:
         task.scheduled_start = task.due_at
-        task.scheduled_end = task.due_at + timedelta(minutes=task.estimated_minutes or DEFAULT_MEETING_MINUTES)
+        usual = int((data.get("_prefs") or {}).get("meetingMinutes") or DEFAULT_MEETING_MINUTES)  # the person's usual length
+        task.scheduled_end = task.due_at + timedelta(minutes=task.estimated_minutes or usual)
     elif kind != Kind.MEETING:
         task.scheduled_start = None
         task.scheduled_end = None
@@ -608,9 +609,11 @@ def create_private_task(md: User, data: dict, source: str = PrivateTask.Source.M
         priority=data.get("priority", Priority.NORMAL),
         source=source,
     )
-    apply_schedule(task, data, creating=True)
+    apply_schedule(task, {**data, "_prefs": get_prefs(md)}, creating=True)
     task.announcement = (data.get("announcement") or "")[:300]
     task.save()
+    if task.kind == Kind.MEETING and data.get("duration_minutes"):
+        learn_meeting_minutes(md, int(data["duration_minutes"]))
     audit(md, "private_task.create", "private_task", task.id)  # no title in audit, by design
     return task
 
@@ -685,10 +688,12 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
         created_by=md, description=(data.get("description") or "").strip()[:5000],
         sync_state=SharedTask.Sync.NOT_REQUIRED,
     )
-    apply_schedule(task, {**data, "kind": task.kind}, creating=True)
+    apply_schedule(task, {**data, "kind": task.kind, "_prefs": get_prefs(md)}, creating=True)
     sir, sir_hi = md_address(), md_address_hi()
     task.announcement = (data.get("announcement") or "")[:300]
     task.save()
+    if task.kind == Kind.MEETING and data.get("duration_minutes"):
+        learn_meeting_minutes(md, int(data["duration_minutes"]))
     when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
     when_hi = tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at)
     pr_en = {"URGENT": "urgent ", "HIGH": "high-priority "}.get(task.priority, "")
@@ -729,7 +734,9 @@ def create_pa_self_task(pa: User, data: dict) -> SharedTask:
         origin=SharedTask.Origin.PA_SELF, created_by=pa, description=(data.get("description") or "").strip()[:5000],
         sync_state=SharedTask.Sync.NOT_REQUIRED,
     )
-    apply_schedule(task, data, creating=True)
+    apply_schedule(task, {**data, "_prefs": get_prefs(pa)}, creating=True)
+    if task.kind == Kind.MEETING and data.get("duration_minutes"):
+        learn_meeting_minutes(pa, int(data["duration_minutes"]))
     task.announcement = (data.get("announcement") or "")[:300]
     task.save()
     audit(pa, "pa_self_task.create", "shared_task", task.id)
@@ -913,7 +920,7 @@ def accept_request(md: User, request_id) -> TaskRequest:
                 priority=data.get("priority", Priority.NORMAL), assignee_type=SharedTask.Assignee.MD,
                 origin=SharedTask.Origin.PA_REQUEST, created_by=req.requested_by,
             )
-            apply_schedule(task, data, creating=True)
+            apply_schedule(task, {**data, "_prefs": get_prefs(md)}, creating=True)
             task.announcement = (data.get("announcement") or "")[:300]
             task.save()
             req.resulting_task = task
@@ -1275,8 +1282,14 @@ def ai_context(user: User, include_private: bool = True) -> dict:
                 "days": "day names: sunday / sat,sun / weekdays / none",
                 "blocks": "set with routineAdd / routineRemove",
                 "text": v.get("hint", "short text")}.get(v["type"]) or f"{v['min']}-{v['max']}"
-    ctx["settings"] = {k: {"now": current[k], "allowed": allowed(v), "means": v["say"]}
-                       for k, v in PREF_SCHEMA.items() if not v.get("hidden")}
+    ctx["settings"] = {k: {"now": current.get(k, ""), "allowed": allowed(v), "means": v["say"]}
+                       for k, v in PREF_SCHEMA.items() if not v.get("hidden") and not (v.get("md_only") and not user.is_md)}
+    ctx["settings"]["myName"]["now"] = user.spoken_name
+    if user.is_md:
+        ctx["settings"]["paName"]["now"] = pa.spoken_name if pa else ""
+    # How this person works, as JARVIS has learned it (the profile block): the model shapes its replies with it.
+    ctx["habits"] = {"snooze_minutes": current["snoozeMinutes"], "meeting_minutes": current["meetingMinutes"],
+                     "favourite_lists": favourite_views(current)}
     ctx["settings"]["quietHours"] = {"now": f"{current['quietStartHour']}-{current['quietEndHour']}", "allowed": "START-END in 24h",
                                      "means": "quiet hours start and end together"}
     ctx["settings"]["officeHours"] = {"now": f"{current['officeStart']}-{current['officeEnd']}", "allowed": "START-END in 24h, e.g. 10-19",
@@ -1333,6 +1346,23 @@ PREF_SCHEMA = {
     "dayReminderTime": {"type": "time", "default": "09:30", "say": "time for reminders of date-only items"},
     # "Later" on a reminder: how long, when no time is said. JARVIS learns it from what the person says by voice.
     "snoozeMinutes": {"type": "int", "min": 1, "max": 1440, "default": 15, "say": "snooze (minutes)"},
+    # The person's usual meeting length when none is said (learned from the lengths they do say).
+    "meetingMinutes": {"type": "int", "min": 5, "max": 480, "default": 60, "say": "usual meeting length (minutes)"},
+    "meetingMinutesRecent": {"type": "text", "default": "", "say": "recent meeting lengths", "hidden": True},
+    # The lists this person asks for most (learned), for the home screen's shortcuts.
+    "viewsRecent": {"type": "text", "default": "", "say": "recent lists", "hidden": True},
+    # The rules JARVIS applies, as settings rather than constants: when a day is "full", how long after a timed
+    # task's time the check-in comes, how many minutes an urgent alert repeats after, when the evening summary is,
+    # how many days of staff silence or hours of a waiting request earn a nudge.
+    "heavyDayItems": {"type": "int", "min": 3, "max": 20, "default": 7, "say": "items that make a day full"},
+    "checkinAfterMinutes": {"type": "int", "min": 10, "max": 240, "default": 45, "say": "check-in after a due time (minutes)"},
+    "urgentRepeatMinutes": {"type": "int", "min": 2, "max": 60, "default": 5, "say": "urgent alert repeats after (minutes)"},
+    "digestTime": {"type": "time", "default": "18:30", "say": "evening summary time"},
+    "staleStaffDays": {"type": "int", "min": 1, "max": 14, "default": 2, "say": "days of staff silence before a nudge"},
+    "requestWaitHours": {"type": "int", "min": 1, "max": 72, "default": 4, "say": "hours a request waits before a nudge"},
+    # Names, set by voice from either phone. Not stored as settings: they go to the person (see set_prefs).
+    "myName": {"type": "text", "default": "", "say": "your name", "hint": "the name JARVIS calls you by", "virtual": True},
+    "paName": {"type": "text", "default": "", "say": "the PA's name", "hint": "the PA's name (MD only)", "virtual": True, "md_only": True},
     # The notification sound for reminders that arrive while the app is closed.
     "reminderSound": {"type": "enum", "values": ["default", "silent"], "default": "default", "say": "reminder sound",
                       "aliases": {"phone": "default", "normal": "default", "on": "default", "sound": "default",
@@ -1459,7 +1489,93 @@ def pref_defaults() -> dict:
 def get_prefs(user: User) -> dict:
     row = UserPrefs.objects.filter(user=user).first()
     stored = (row.data if row else None) or {}
-    return {**pref_defaults(), **{k: v for k, v in stored.items() if k in PREF_SCHEMA}}
+    real = {k: v for k, v in PREF_SCHEMA.items() if not v.get("virtual")}  # names are not settings (see set_names)
+    return {**{k: v["default"] for k, v in real.items()}, **{k: v for k, v in stored.items() if k in real}}
+
+
+# --------------------------------------------------------------------------- what JARVIS has learned
+def _recent_ints(prefs: dict, key: str) -> list[int]:
+    out = []
+    for x in str(prefs.get(key) or "").split(","):
+        try:
+            out.append(int(x))
+        except ValueError:
+            continue
+    return out
+
+
+def learn_meeting_minutes(user: User, minutes: int) -> None:
+    """A meeting length the person said: after a few, their usual length is the middle of the recent ones."""
+    if not minutes or minutes <= 0:
+        return
+    prefs = get_prefs(user)
+    recent = (_recent_ints(prefs, "meetingMinutesRecent") + [int(minutes)])[-7:]
+    set_pref_quiet(user, "meetingMinutesRecent", ",".join(str(m) for m in recent))
+    if len(recent) >= 3:
+        usual = sorted(recent)[len(recent) // 2]
+        if usual != prefs.get("meetingMinutes"):
+            set_pref_quiet(user, "meetingMinutes", max(5, min(usual, 480)))
+
+
+def learn_view(user: User, kind: str) -> None:
+    """Which lists the person asks for: the last 30 are kept, so the home screen can offer the usual ones first."""
+    if not kind:
+        return
+    prefs = get_prefs(user)
+    recent = ([k for k in str(prefs.get("viewsRecent") or "").split(",") if k] + [kind])[-30:]
+    set_pref_quiet(user, "viewsRecent", ",".join(recent))
+
+
+def favourite_views(prefs: dict, limit: int = 4) -> list[str]:
+    recent = [k for k in str(prefs.get("viewsRecent") or "").split(",") if k]
+    counts: dict[str, int] = {}
+    for k in recent:
+        counts[k] = counts.get(k, 0) + 1
+    return [k for k, _ in sorted(counts.items(), key=lambda kv: (-kv[1], recent[::-1].index(kv[0])))][:limit]
+
+
+HABIT_KEYS = ("snoozeMinutes", "meetingMinutes", "langRecent", "viewsRecent", "heavyDayItems", "checkinAfterMinutes",
+              "urgentRepeatMinutes", "digestTime", "staleStaffDays", "requestWaitHours")
+
+
+def habits(user: User) -> list[dict]:
+    """What JARVIS has learned or been told about how this person works, in plain words, each one deletable."""
+    from . import lang as _lang
+    prefs = get_prefs(user)
+    row = UserPrefs.objects.filter(user=user).first()
+    stored = (row.data if row else None) or {}
+    out = []
+
+    def add(key, label, value, learned):
+        out.append({"key": key, "label": label, "value": value, "learned": learned, "set": key in stored})
+
+    add("snoozeMinutes", "“Later” means", f"{prefs['snoozeMinutes']} minutes", "from what you say (“10 minute baad”)")
+    add("meetingMinutes", "Usual meeting length", f"{prefs['meetingMinutes']} minutes", "from the lengths you mention")
+    add("langRecent", "Language lately", {"hi": "Hindi", "en": "English"}[_lang.current(user)], "from how you speak")
+    favs = favourite_views(prefs)
+    add("viewsRecent", "Lists you ask for most", ", ".join(favs) if favs else "none yet", "from what you ask")
+    add("heavyDayItems", "A day is full at", f"{prefs['heavyDayItems']} items", "a rule you can change")
+    add("checkinAfterMinutes", "Check-in after a due time", f"{prefs['checkinAfterMinutes']} minutes", "a rule you can change")
+    add("urgentRepeatMinutes", "Urgent alerts repeat after", f"{prefs['urgentRepeatMinutes']} minutes", "a rule you can change")
+    add("digestTime", "Evening summary at", prefs["digestTime"], "a rule you can change")
+    add("staleStaffDays", "Staff silence before a nudge", f"{prefs['staleStaffDays']} days", "a rule you can change")
+    add("requestWaitHours", "A request waits before a nudge", f"{prefs['requestWaitHours']} hours", "a rule you can change")
+    return out
+
+
+def forget_habit(user: User, key: str) -> None:
+    """Back to the default (or to nothing learned) for one habit."""
+    if key not in HABIT_KEYS:
+        raise ServiceError("invalid", "There is no such habit.", 422)
+    row = UserPrefs.objects.filter(user=user).first()
+    if not row:
+        return
+    data = dict(row.data or {})
+    for k in (key, "meetingMinutesRecent" if key == "meetingMinutes" else key):
+        data.pop(k, None)
+    row.data = data
+    row.save(update_fields=["data"])
+    audit(user, "habit.forget", "user", user.id, key)
 
 
 def coerce_pref(key: str, value) -> tuple[str, object]:
@@ -1598,11 +1714,61 @@ def set_pref_quiet(user: User, key: str, value) -> None:
     row.save(update_fields=["data"])
 
 
+def set_names(user: User, names: dict) -> list[str]:
+    """Names by voice, from either phone: the speaker's own (myName) and, from the MD, the PA's (paName). The other
+    person is told in one short note, and every phone re-reads the names from the server. Returns what changed."""
+    changed = []
+    pa, md = get_pa(), get_md()
+    for key, raw in names.items():
+        name = " ".join(str(raw or "").split())[:40]
+        if not name:
+            raise ServiceError("invalid", "Say the name.", 422)
+        if key == "myName":
+            target = user
+        elif key == "paName":
+            if not user.is_md:
+                raise ServiceError("forbidden", f"Only {md_address()} can set the PA's name.", 403)
+            if pa is None:
+                raise ServiceError("invalid", "There is no PA account yet.", 422)
+            target = pa
+        else:
+            continue
+        if target.spoken_name == name:
+            continue
+        old = target.spoken_name
+        target.display_name = name
+        if target.is_pa:
+            target.first_name = name
+        target.save(update_fields=["display_name", "first_name"])
+        audit(user, "name.set", "user", target.id, f"{old} -> {name}")
+        changed.append(name)
+        other = pa if target.is_md else md
+        if other and other.id != user.id:
+            if target.is_md:
+                en, hi = f"{other.spoken_name}, {md_address()} has asked me to use the name {name} from now.", \
+                         f"{other.spoken_name}, {md_address_hi()} ने कहा है कि अब से {name} नाम इस्तेमाल करूँ।"
+            else:
+                en, hi = f"{address_of(other)}, {old} will be called {name} from now.", f"{address_hi_of(other)}, {old} को अब से {name} कहा जाएगा।"
+            Alert.objects.create(recipient=other, kind=Alert.Kind.INFO, priority=Priority.LOW, title="A name has changed",
+                                 body=en, spoken_text=en, spoken_text_hi=hi, ref_type="profile", ref_id=str(target.id))
+        elif other and target.is_pa:
+            en, hi = f"{name}, {md_address()} has set your name to {name}.", f"{name}, {md_address_hi()} ने आपका नाम {name} रखा है।"
+            Alert.objects.create(recipient=target, kind=Alert.Kind.INFO, priority=Priority.NORMAL, title="Your name",
+                                 body=en, spoken_text=en, spoken_text_hi=hi, ref_type="profile", ref_id=str(target.id))
+    return changed
+
+
 def set_prefs(user: User, patch: dict) -> dict:
     expanded = expand_pref_patch(patch or {}, get_prefs(user))
+    # Names are not settings: they go to the person (and the other one is told).
+    names = {k: expanded.pop(k) for k in list(expanded) if PREF_SCHEMA.get(k, {}).get("virtual")}
+    if names:
+        set_names(user, names)
     clean = dict(coerce_pref(k, v) for k, v in expanded.items())
-    if not clean:
+    if not clean and not names:
         raise ServiceError("invalid", "Nothing to change.", 422)
+    if not clean:
+        return get_prefs(user)
     # Meeting mode switched OFF while the diary says he is in a meeting: he is overriding the diary, and the
     # override must outlive the app (it is applied in reminders_for, which the phone reads every few seconds).
     if clean.get("meetingMode") is False:

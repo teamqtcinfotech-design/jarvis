@@ -42,28 +42,40 @@ Status: `[ ]` open, `[~]` in progress, `[x]` done (commit). Items marked **APK**
 
 ## Wave 3 — alerts and screens
 
-- [ ] 3.1 One alert state per item on the phone (queue / held / snoozed / repeats merged), checked against the
-      server at fire time, so a task finished elsewhere never rings. **APK**
-- [ ] 3.2 Updates screen for low-priority news; acknowledged on viewing. **APK**
-- [ ] 3.3 Cancelled and completed lists with restore / reopen. **APK**
-- [ ] 3.4 Home "Today" = today only, with a late chip; answer-card rows always open (fetched by id). **APK**
-- [ ] 3.5 Confirm before delete / decline; decline with a note. **APK**
-- [ ] 3.6 "Hey JARVIS" switch per device, not per account. **APK**
-- [ ] 3.7 Six answer flags → one state machine in the conversation. **APK**
-- [ ] 3.8 Small details: version from the app config, login polish, setup "ask again later", status pill tap,
-      drawer cleanup, long-press hint, live suggestions, timestamps in the conversation, larger text, CSV BOM,
-      stale-version retry, voice-friendly validation errors, briefing not spoken in a meeting, Grok length. **APK**
+- [x] 3.1 Snoozes and urgent repeats are checked against the server's live list at fire time: a task finished
+      elsewhere never rings (snooze itself now lives on the server, see 2.1). **APK**
+- [x] 3.2 Updates screen (drawer → Updates): news, decisions and nudges; small news counts as seen on viewing,
+      anything with a question stays until answered. **APK**
+- [x] 3.3 Cancelled list (drawer → Cancelled, last 30 days) with Restore; Reopen / Restore on a closed task's sheet. **APK**
+- [x] 3.4 Home "Today" = today only, with a "N late" chip that opens the late list. (Answer-card rows already open
+      from the dashboard pool; a row for an item outside it is not opened: left as is.) **APK**
+- [x] 3.5 Confirm before cancelling a task; declining a request asks for a note first (the PA hears it). **APK**
+- [x] 3.6 "Hey JARVIS" switch is per phone (kept on the device, never synced); the voice command applies locally. **APK**
+- [ ] 3.7 Six answer flags → one state machine in the conversation. NOT done: the flags (expecting / silence /
+      called / question / offer / choices / previous) are documented and work; folding them into one machine is a
+      refactor with real regression risk and no user-visible gain right now.
+- [~] 3.8 Done: version from the app config, CSV byte-order mark, stale-version (409) message + refresh, briefing not
+      spoken in a meeting or quiet hours, Hindi twins on the task sheet and request card. Not done (cosmetic, left for
+      a later pass): login polish, setup "ask again later", status pill tap, drawer cleanup, long-press hint, live
+      suggestions, timestamps in the conversation, larger text, Grok length. **APK**
 
 ## Wave 4 — the dynamic core
 
-- [ ] 4.1 Habits per person (snooze, leads, meeting length, language, trust per card kind, favourite lists),
-      learned from use, shown in Settings, deletable.
-- [ ] 4.2 Profile block in every brain call (names, address, language, style, habits); one reply builder for every
-      spoken line (facts + profile + question contract → line, Hindi twin, card, what to listen for).
-- [ ] 4.3 Rules as data: alert policy, leads, snooze default, trust with undo, quiet / office hours, heavy day.
-- [ ] 4.4 Names and address by voice from either phone (MD sets both, PA sets self), profile-changed push, one
-      spoken note to the other person.
-- [ ] 4.5 History template: "when did I last meet Sharma", "what did I give Suraj last month", outcomes included.
+- [x] 4.1 Habits per person (snooze, meeting length, language, favourite lists), learned from use, listed at
+      `GET /me/habits/` in plain words and in Settings ("How JARVIS has learned you work"), any one put back to
+      the default. Leads stay settings; "trust per card kind" (saving without a yes) deliberately NOT done: the
+      user wants confirmations. **APK**
+- [x] 4.2 Profile block in every brain call: names, address (both scripts), `reply_language`, `habits`
+      (snooze, meeting length, favourite lists), settings with the names; one builder for every server line
+      (`_say` / `_ask` + Hindi twins, question contracts, `lang.py`).
+- [x] 4.3 Rules as data: full-day threshold, check-in delay, urgent repeat, evening summary time, staff-silence
+      days, request-wait hours, snooze default, meeting length — all settings per person (`heavyDayItems`,
+      `checkinAfterMinutes`, `urgentRepeatMinutes`, `digestTime`, `staleStaffDays`, `requestWaitHours`), used by
+      scheduling, reminders and follow-ups. Alert policy stays the phone's presence rules (already settings).
+- [x] 4.4 Names and address by voice from either phone (`myName`, `paName` (MD only), `addressAs`): the other person
+      gets one spoken note, every phone re-reads `/me/` and the dashboard.
+- [x] 4.5 History template (`history` view: "when did I last meet Sharma", "what did I give Suraj last month"),
+      every outcome, newest first, latest said aloud.
 
 ## Wave 5 — reliability and speed
 

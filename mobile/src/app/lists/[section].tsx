@@ -1,18 +1,21 @@
 import { Redirect, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { RequestCard } from '@/components/RequestCard';
 import { TaskRow } from '@/components/TaskRow';
 import { TaskSheet } from '@/components/TaskSheet';
-import { Empty, IconButton, Tag, Txt } from '@/components/ui';
+import { Button, Card, Empty, Icon, IconButton, Tag, Txt } from '@/components/ui';
+import { useAlertEngine } from '@/lib/alertEngine';
+import { ApiError, api } from '@/lib/api';
+import { dataChanged } from '@/lib/bus';
 import { relativeAgo } from '@/lib/format';
 import { useLayout } from '@/lib/layout';
 import { mdHe, mdWord } from '@/lib/names';
 import { useSession } from '@/lib/session';
-import { colors } from '@/lib/theme';
-import type { Dashboard, TaskItem } from '@/lib/types';
+import { colors, radius } from '@/lib/theme';
+import type { Dashboard, DataView, ServerAlert, TaskItem, ViewRow } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 
 interface Section {
@@ -43,6 +46,80 @@ export default function ListScreen() {
   return <ListBody user={user} />;
 }
 
+/** Small news, decisions and nudges from the server: read here, and counted as seen once looked at. */
+function UpdatesList() {
+  const engine = useAlertEngine();
+  const items = engine.news;
+  // Low-priority news is seen by being looked at; anything with a question stays until it is answered.
+  useEffect(() => {
+    const quiet = items.filter((a) => a.priority === 'LOW' && !a.question).map((a) => a.id);
+    if (quiet.length) engine.markRead(quiet).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, when the screen opens
+  }, []);
+  if (!items.length) return <Empty text="Nothing new. Decisions, staff progress and nudges collect here." />;
+  const when = (a: ServerAlert) => relativeAgo(Date.parse(a.created_at));
+  return (
+    <>
+      {items.map((a) => (
+        <Card key={a.id} style={s.update}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Icon name={a.kind === 'REQUEST_DECIDED' ? 'checkmark-circle-outline' : a.kind === 'STAFF_UPDATE' ? 'briefcase-outline' : 'information-circle-outline'} size={16} color={colors.accent} />
+            <Txt variant="label" style={{ marginLeft: 8, flex: 1 }}>{a.title}</Txt>
+            <Txt variant="caption">{when(a)}</Txt>
+          </View>
+          {a.body ? <Txt variant="small" style={{ marginTop: 6 }}>{a.body}</Txt> : null}
+          <Pressable onPress={() => engine.markRead([a.id]).catch(() => undefined)} hitSlop={8} style={{ alignSelf: 'flex-end', marginTop: 8 }}>
+            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>Got it</Txt>
+          </Pressable>
+        </Card>
+      ))}
+      {items.length > 1 ? (
+        <Button title="Mark all as seen" kind="ghost" compact onPress={() => engine.markRead(items.map((a) => a.id)).catch(() => undefined)} style={{ alignSelf: 'center', marginTop: 6 }} />
+      ) : null}
+    </>
+  );
+}
+
+/** What was cancelled in the last 30 days; any one comes back with a tap. */
+function CancelledList() {
+  const [view, setView] = useState<DataView | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState('');
+  const load = () => api<DataView>('/views/cancelled/').then((r) => setView(r.data)).catch(() => setError('Could not load the list.'));
+  useEffect(() => {
+    const kick = setTimeout(load, 0);
+    return () => clearTimeout(kick);
+  }, []);
+  const restore = async (row: ViewRow) => {
+    setBusy(row.id);
+    setError('');
+    try {
+      const path = row.scope === 'private' ? `/private-tasks/${row.id}/` : `/shared-tasks/${row.id}/`;
+      await api(path, { method: 'PATCH', body: { expected_version: row.version ?? 1, status: 'OPEN' } });
+      dataChanged.emit();
+      await load();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Could not restore it.');
+    } finally {
+      setBusy('');
+    }
+  };
+  if (!view) return <Txt variant="small" style={{ textAlign: 'center', marginTop: 30 }}>{error || 'Loading…'}</Txt>;
+  if (!view.rows.length) return <Empty text="Nothing cancelled in the last 30 days." />;
+  return (
+    <>
+      {error ? <Txt variant="small" style={{ color: colors.danger, marginBottom: 8 }}>{error}</Txt> : null}
+      {view.rows.map((row) => (
+        <Card key={`${row.scope}-${row.id}`} style={s.update}>
+          <Txt variant="heading" numberOfLines={2}>{row.title}</Txt>
+          <Txt variant="small" style={{ marginTop: 2 }}>{[row.day, row.who].filter(Boolean).join(' · ')}{row.private ? ' · private' : ''}</Txt>
+          <Button title="Restore" kind="secondary" compact icon="refresh-outline" loading={busy === row.id} onPress={() => restore(row)} style={{ alignSelf: 'flex-end', marginTop: 8 }} />
+        </Card>
+      ))}
+    </>
+  );
+}
+
 function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['user']> }) {
   const { section = 'today' } = useLocalSearchParams<{ section: string }>();
   const router = useRouter();
@@ -57,9 +134,15 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
   if (section === 'requests') title = isMD ? 'Need your OK' : `Waiting for ${md}`;
   if (section === 'md_tasks') title = `${md}’s tasks from your requests`;
   if (section === 'busy') title = `When ${md} is busy today`;
+  if (section === 'updates') title = 'Updates';
+  if (section === 'cancelled') title = 'Cancelled';
 
   let body: React.ReactNode = null;
-  if (!data) {
+  if (section === 'updates') {
+    body = <UpdatesList />;
+  } else if (section === 'cancelled') {
+    body = <CancelledList />;
+  } else if (!data) {
     body = <Txt variant="small" style={{ textAlign: 'center', marginTop: 30 }}>{error || 'Loading…'}</Txt>;
   } else if (section === 'requests') {
     const list = isMD ? data.requests.filter((r) => r.state === 'PENDING') : data.requests.slice(0, 20);
@@ -105,4 +188,5 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
 const s = StyleSheet.create({
   top: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingTop: 6 },
   busyCard: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 6, backgroundColor: colors.surface, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: colors.line },
+  update: { marginBottom: 10, borderRadius: radius.md },
 });

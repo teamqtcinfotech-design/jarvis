@@ -103,8 +103,8 @@ def _task_reminders(task, scope: str, is_private: bool, address: str, prefs: dic
                         "spoken": due_spoken, "spoken_hi": due_hi,
                         "question": None if task.kind == Kind.MEETING else Q_DONE})
         # Still open well after its time: one check-in, in working hours on a working day, then it is left to the
-        # evening summary.
-        at = start + CHECKIN_AFTER
+        # evening summary. How long after is the person's own setting.
+        at = start + timedelta(minutes=int(prefs.get("checkinAfterMinutes") or CHECKIN_AFTER.total_seconds() // 60))
         at_local = tu.to_local(at)
         if checkin and at_local.hour in CHECKIN_HOURS and not scheduling.is_off_day(prefs, at_local.date()):
             what = {Kind.MEETING: "your meeting", Kind.CALL: "your call"}.get(task.kind, "")

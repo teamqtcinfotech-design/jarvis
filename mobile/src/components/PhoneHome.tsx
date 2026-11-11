@@ -97,7 +97,9 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const items = navItems(user, data, engine);
   const pending = data?.requests.filter((r) => r.state === 'PENDING').length ?? 0;
   const next = data ? nextTimed([...data.today, ...data.overdue], now) : null;
-  const todayList = data ? [...data.overdue, ...data.today].filter((t) => t.status !== 'COMPLETED').slice(0, 6) : [];
+  // Today means today: late items from earlier days are a separate chip, not rows that crowd out the day.
+  const todayList = data ? data.today.filter((t) => t.status !== 'COMPLETED').slice(0, 6) : [];
+  const lateCount = data?.overdue.length ?? 0;
   // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
   const voiceItem = conv.itemToOpen && data
     ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
@@ -225,7 +227,15 @@ export function PhoneHome({ user }: { user: SessionUser }) {
 
         {/* Today */}
         <View style={s.sectionHead}>
-          <Txt variant="label">Today</Txt>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Txt variant="label">Today</Txt>
+            {lateCount ? (
+              <Pressable onPress={() => select('late')} hitSlop={8} style={s.lateChip} accessibilityLabel={`${lateCount} late from before`}>
+                <Icon name="alert-circle-outline" size={12} color={colors.danger} />
+                <Txt variant="caption" style={{ color: colors.danger, fontWeight: '600', marginLeft: 4 }}>{lateCount} late</Txt>
+              </Pressable>
+            ) : null}
+          </View>
           <Pressable onPress={() => select('today')} hitSlop={8}>
             <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
           </Pressable>
@@ -312,6 +322,7 @@ const s = StyleSheet.create({
   tileIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   tileValue: { fontSize: 24, fontWeight: '700', color: colors.ink, lineHeight: 30 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 24, marginBottom: 10 },
+  lateChip: { flexDirection: 'row', alignItems: 'center', marginLeft: 10, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: colors.dangerSoft },
   report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 16 },
   listCard: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 4, ...shadow },
   empty: { alignItems: 'center', paddingVertical: 22, paddingHorizontal: 16, borderRadius: radius.lg, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.line },

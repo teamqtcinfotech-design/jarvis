@@ -29,7 +29,7 @@ import { useSession } from './session';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang } from './speech';
 import type { AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
-import { onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeStart, wakeStatus, wakeSupported } from './wake';
+import { onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeSetListening, wakeStart, wakeStatus, wakeSupported } from './wake';
 
 export interface Msg {
   id: string;
@@ -121,7 +121,7 @@ const newId = () => `m${Date.now()}-${seq++}`;
 
 export function ConversationProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
-  const { prefs, applyServerPrefs } = usePrefs();
+  const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
     setHeldVisible, held, setPresenter, answerQuestion, snooze } = useAlertEngine();
   const { data: dash } = useDashboard();
@@ -620,10 +620,18 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return;
     }
     if (d.action === 'set_setting' && !d.needs_clarification && d.setting_patch) {
-      // Settings change straight away (no yes needed): the server already validated them.
-      api('/me/prefs/', { method: 'PATCH', body: d.setting_patch })
-        .then((r) => applyServerPrefs(r.data))
-        .catch(() => undefined);
+      // Settings change straight away (no yes needed): the server already validated them. "Hey JARVIS" is this
+      // phone's own switch (one microphone per device), so it is applied here, not through the server.
+      const { wakeWordEnabled, ...shared } = d.setting_patch as Record<string, unknown>;
+      if (typeof wakeWordEnabled === 'boolean') {
+        updatePrefs({ wakeWordEnabled });
+        wakeSetListening(wakeWordEnabled).catch(() => undefined);
+      }
+      if (Object.keys(shared).length) {
+        api('/me/prefs/', { method: 'PATCH', body: shared })
+          .then((r) => applyServerPrefs(r.data))
+          .catch(() => undefined);
+      }
       reply(d.spoken_reply, speakText, lang, true);
       return;
     }

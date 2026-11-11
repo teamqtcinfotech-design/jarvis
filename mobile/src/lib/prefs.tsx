@@ -101,6 +101,16 @@ function clean(data: Partial<Prefs> | null | undefined): Partial<Prefs> {
   return out;
 }
 
+/** Settings that belong to THIS phone, not to the person: never sent to the server, never taken from it.
+ *  "Hey JARVIS" is a microphone on one device; switching it on here must not switch it on on the other phone. */
+const DEVICE_ONLY: (keyof Prefs)[] = ['wakeWordEnabled'];
+
+function withoutDeviceOnly(patch: Partial<Prefs>): Partial<Prefs> {
+  const out = { ...patch };
+  for (const k of DEVICE_ONLY) delete out[k];
+  return out;
+}
+
 export function PrefsProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const [prefs, setPrefs] = useState<Prefs>(DEFAULTS);
@@ -123,7 +133,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const applyServerPrefs = useCallback((data: Partial<Prefs>) => {
-    const patch = clean(data);
+    const patch = withoutDeviceOnly(clean(data));
     if (!Object.keys(patch).length) return;
     setPrefs((prev) => {
       const next = { ...prev, ...patch };
@@ -144,7 +154,9 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
       return next;
     });
     const sentAt = Date.now();
-    api<Partial<Prefs>>('/me/prefs/', { method: 'PATCH', body: patch })
+    const shared = withoutDeviceOnly(patch);
+    if (!Object.keys(shared).length) return; // a device-only setting: nothing for the server
+    api<Partial<Prefs>>('/me/prefs/', { method: 'PATCH', body: shared })
       .then((r) => {
         if (sentAt >= lastLocalChange.current) applyServerPrefs(r.data); // the server's copy after our change
       })

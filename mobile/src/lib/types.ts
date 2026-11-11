@@ -344,6 +344,16 @@ export interface MemoryItem {
   created_at: string;
 }
 
+/** One thing JARVIS has learned (or been told) about how this person works, in plain words. */
+export interface HabitItem {
+  key: string;
+  label: string;
+  value: string;
+  learned: string;
+  /** Something is stored for it (learned or set); false = still the default. */
+  set: boolean;
+}
+
 /** A person JARVIS knows for this user who is not on the staff list (learned when they say who someone is). */
 export interface ContactItem {
   id: number;
