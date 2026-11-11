@@ -50,6 +50,31 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     return () => apiClient.onAuthLost(null);
   }, []);
 
+  // The profile can change on the server (a new name, "call me Ma'am"): re-read it at start and whenever the app
+  // comes back to the front, so no sign-out is ever needed for a name to follow.
+  const signedIn = Boolean(user);
+  useEffect(() => {
+    if (!signedIn) return;
+    let cancelled = false;
+    const refresh = () => {
+      apiClient.api<SessionUser>('/me/')
+        .then((r) => {
+          if (cancelled || !r.data?.username) return;
+          const next: SessionUser = { username: r.data.username, role: r.data.role, name: r.data.name, address: r.data.address, address_hi: r.data.address_hi };
+          setUser((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+          apiClient.storeUser(next).catch(() => undefined);
+        })
+        .catch(() => undefined);
+    };
+    const kick = setTimeout(refresh, 500);
+    const sub = AppState.addEventListener('change', (s) => s === 'active' && refresh());
+    return () => {
+      cancelled = true;
+      clearTimeout(kick);
+      sub.remove();
+    };
+  }, [signedIn]);
+
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'background') backgroundedAt.current = Date.now();

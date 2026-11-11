@@ -59,6 +59,11 @@ export async function loadStoredSession(): Promise<{ server: string; user: Sessi
   return { server: serverUrl, user };
 }
 
+/** Keep the profile the server sent (name, how this person is addressed) with the session, so it survives a restart. */
+export async function storeUser(user: SessionUser) {
+  await SecureStore.setItemAsync(K_USER, JSON.stringify(user));
+}
+
 async function storeTokens(access: string, refresh?: string) {
   accessToken = access;
   await SecureStore.setItemAsync(K_ACCESS, access);
