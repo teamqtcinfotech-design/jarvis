@@ -634,7 +634,8 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
             due = item.get("due_at") or (f"{item['due_date']}T23:59:00+05:30" if item.get("due_date") else "")
             days = (today - tu.to_local(datetime.fromisoformat(due)).date()).days if due else 0
             row["late_days"] = days
-            row["when"] = f"{row['day'] or row['when']} · {days} day{'s' if days != 1 else ''} late" if days > 0 else f"{row['when']} · today"
+            if days > 1:  # "yesterday" and "today" already say it; from two days on, say the count
+                row["when"] = f"{row['day'] or row['when']} · {days} days late"
         rows.sort(key=lambda r: -r.get("late_days", 0))
         view = _table("late", "Late", rows, [("when", "Was due"), ("title", "What"), ("kind", "Type")],
                       subtitle="Nothing is late." if not rows else f"{len(rows)} items, oldest first")
