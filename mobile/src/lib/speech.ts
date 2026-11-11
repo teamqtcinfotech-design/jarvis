@@ -17,7 +17,32 @@ interface Utterance {
 }
 
 let queue: Utterance[] = [];
-let current: { item: Utterance; watchdog: ReturnType<typeof setTimeout> } | null = null;
+let current: { item: Utterance; watchdog: ReturnType<typeof setTimeout>; startedAt: number } | null = null;
+// The sentence that was cut short last (he talked over it, or tapped): what it was and how long it had been playing,
+// so "continue" can pick it up where it stopped.
+let cutShort: { text: string; lang: SpeakLang; fallback?: string; playedMs: number; at: number } | null = null;
+const noteCut = () => {
+  if (!current) return;
+  cutShort = { text: current.item.text, lang: current.item.lang, fallback: current.item.fallback,
+    playedMs: Date.now() - current.startedAt, at: Date.now() };
+};
+
+/** The rest of the sentence that was cut short in the last few seconds (from the start of the sentence it was in). */
+export function restOfCutShort(withinMs = 4000): { text: string; lang: SpeakLang } | null {
+  const c = cutShort;
+  if (!c || Date.now() - c.at > withinMs) return null;
+  // About 13 letters a second, after the half second the voice takes to start.
+  const spoken = Math.max(0, ((c.playedMs - 600) / 1000) * 13);
+  const parts = c.text.match(/[^।.!?]+[।.!?]*\s*/g) ?? [c.text];
+  let upTo = 0;
+  let from = 0;
+  for (let i = 0; i < parts.length; i += 1) {
+    upTo += parts[i].length;
+    if (upTo <= spoken) from = i + 1; // this sentence was said in full
+  }
+  const rest = parts.slice(Math.min(from, parts.length - 1)).join('').trim();
+  return rest ? { text: rest, lang: c.lang } : null;
+}
 // Voice used for English sentences. 'hi-IN' = Hindi accent (default), 'en-IN' = Indian English.
 let accent = 'hi-IN';
 let seq = 0;
@@ -43,6 +68,7 @@ function notify(speaking: boolean) {
 function finish(id: string, event: 'done' | 'error' | 'stopped' | 'timeout') {
   if (!current || current.item.id !== id) return;
   clearTimeout(current.watchdog);
+  if (event === 'stopped') noteCut();
   const { item } = current;
   current = null;
   notify(false);
@@ -58,7 +84,7 @@ function pump() {
   const language = item.lang === 'hi' ? 'hi-IN' : accent;
   // If the engine never answers (lost connection, missing voice), give up after a generous reading time.
   const watchdog = setTimeout(() => finish(item.id, 'timeout'), 5000 + item.text.length * 90);
-  current = { item, watchdog };
+  current = { item, watchdog, startedAt: Date.now() };
   notify(true);
   if (ttsAvailable) {
     if (!ttsSpeak(item.id, item.text, language, item.fallback ?? null, 0.95)) finish(item.id, 'error');
@@ -95,6 +121,7 @@ export function stopSpeaking() {
   if (ttsAvailable) ttsStop();
   else Speech.stop();
   if (current) {
+    noteCut();
     clearTimeout(current.watchdog);
     current = null;
     notify(false);

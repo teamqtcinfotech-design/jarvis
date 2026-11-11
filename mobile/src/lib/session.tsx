@@ -7,7 +7,6 @@ import { setReplyLang } from './lang';
 import type { SessionUser } from './types';
 import { pushForget, pushToken, wakeStop } from './wake';
 
-const LOCK_AFTER_MS = 60_000; // re-lock after 1 minute in the background
 
 interface SessionValue {
   ready: boolean;
@@ -83,7 +82,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const sub = AppState.addEventListener('change', (state) => {
       if (state === 'background') backgroundedAt.current = Date.now();
       if (state === 'active' && backgroundedAt.current && user && biometricAvailable) {
-        if (Date.now() - backgroundedAt.current > LOCK_AFTER_MS) setLocked(true);
+        // No fingerprint lock: the app opens straight to JARVIS (asked for on 11 Nov 2026).
         backgroundedAt.current = null;
       }
     });

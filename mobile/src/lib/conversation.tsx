@@ -26,7 +26,7 @@ import { CONFIRMABLE, TASK_DRAFTS, describeDraft } from './drafts';
 import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
 import { useSession } from './session';
-import { onSpeakingChange, say, stopSpeaking, type SpeakLang } from './speech';
+import { onSpeakingChange, say, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
 import type { AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
 import { onBarge, onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeSetListening, wakeStart, wakeStatus, wakeSupported } from './wake';
@@ -120,6 +120,12 @@ const isFiller = (text: string) => {
 let seq = 0;
 const newId = () => `m${Date.now()}-${seq++}`;
 
+/** "Go on from where you stopped", as people say it and as the recogniser writes it. */
+const CONTINUE_WORDS = /(continue|carry on|go on|go ahead|keep going|resume|aage (bolo|badho|sunao|padho|batao|bataiye|boliye)|jaari rakho|jari rakho|wahi(n)? se|jahan (se )?(ruke|roka|chhoda|chhode)|phir se (bolo|sunao)|bolte raho|कंटिन्यू|कन्टिन्यू|आगे (बोलो|बढ़ो|सुनाओ|पढ़ो|बताओ|बताइए|बोलिए)|जारी रखो|वहीं से|जहाँ (से )?(रुके|रोका|छोड़ा))/i;
+
+/** What he talked over is offered back for three minutes. */
+const stillFresh = (at: number) => Date.now() - at < 3 * 60_000;
+
 export function ConversationProvider({ children }: { children: React.ReactNode }) {
   const { user } = useSession();
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
@@ -161,6 +167,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const calledRef = useRef(false); // he has just called JARVIS ("Ji Sir?") and has not said anything yet
   // JARVIS just spoke an alert and asked its question ("Accept it?", "Done, or later?"): the next words answer it.
   const questionRef = useRef<{ item: EngineItem; q: AlertQuestion; spoken: string } | null>(null);
+  // What JARVIS was saying when he talked over it (the part not yet said), for "continue".
+  const cutRef = useRef<{ text: string; lang: SpeakLang; at: number } | null>(null);
   // JARVIS just asked "which one?": the options, so the next words are matched against them by the AI.
   const choicesRef = useRef<{
     intent: 'complete_task' | 'accept_request' | 'decline_request' | 'change_task' | 'delete_task';
@@ -330,6 +338,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       wakeNoteEmpty();
       return;
     }
+    // "Continue" / "aage bolo" after he talked over JARVIS: the rest of what it was saying, from the sentence it
+    // stopped in. Nothing is asked of the server; the words are already here.
+    const cut = cutRef.current;
+    if (cut && stillFresh(cut.at) && CONTINUE_WORDS.test(text) && text.split(/\s+/).length <= 8) {
+      cutRef.current = null;
+      calledRef.current = false;
+      push('user', text);
+      expectingRef.current = true;
+      say(cut.text, { interrupt: true, lang: cut.lang, onDone: listen });
+      return;
+    }
     calledRef.current = false;
     push('user', text);
     lastQuestion.current = text;
@@ -427,6 +446,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // reader's language (the server picks); the question follows the line.
   const presentAlert = (item: EngineItem, spoken: string) => {
     const q = questionFor(item, isMD, { en: md, hi: mdHi });
+    cancelVoice(); // the microphone closes first: JARVIS must never hear its own reminder as an answer
     questionRef.current = q ? { item, q, spoken } : null;
     offerRef.current = null;
     setHeldVisible(false);
@@ -556,6 +576,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       if (yes || no) {
         expectingRef.current = false;
         answerQuestion(pq.item, pq.q, yes).catch(() => undefined);
+        return;
+      }
+      // Not a yes, not a no, and no instruction either (a stray word, or the room): the question still stands.
+      // Listen once more instead of answering "Ji?" and losing it.
+      if ((d.intent === 'small_talk' || d.intent === 'unknown') && !d.view && silenceRef.current < 2) {
+        silenceRef.current += 1;
+        questionRef.current = pq;
+        expectingRef.current = true;
+        listen();
         return;
       }
     }
@@ -991,6 +1020,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const barge = () => {
     if (!user) return;
     stopSpeaking();
+    const rest = restOfCutShort();
+    cutRef.current = rest ? { ...rest, at: Date.now() } : null;
     expectingRef.current = true;
     silenceRef.current = 0;
     listen();

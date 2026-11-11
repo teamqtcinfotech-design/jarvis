@@ -49,7 +49,7 @@ export default function Settings() {
 
 function SettingsScreen() {
   const router = useRouter();
-  const { user, server, signOut, biometricAvailable } = useSession();
+  const { user, server, signOut } = useSession();
   const { prefs, update } = usePrefs();
   const engine = useAlertEngine();
   const { data: dash } = useDashboard();
@@ -430,7 +430,6 @@ function SettingsScreen() {
         <Card style={s.card}>
           <Row title={isMD ? 'Managing Director' : `PA · ${user?.name}`} detail={`Signed in as ${user?.username}`} right={null} />
           <Row title="Server" detail={server} right={null} />
-          <Row title="Fingerprint lock" detail={biometricAvailable ? 'On — needed after 1 minute away' : 'No fingerprint or face set up on this phone'} right={null} />
           <Row
             title="Send diagnostics"
             detail={diagNote || `${diag.recent().length} error line${diag.recent().length === 1 ? '' : 's'} noted on this phone (no task titles). Sent to the JARVIS server only.`}

@@ -108,6 +108,14 @@ def _changes_from(cmd: dict) -> dict:
             out["priority"] = value
         elif field == "kind" and value in _KINDS:
             out["kind"] = value
+    # "5 minute baad kar do" / "in the next 5 minutes": the new moment, counted from now.
+    try:
+        span = max(0, min(int(cmd.get("due_in_minutes") or 0), 7 * 24 * 60))
+    except (TypeError, ValueError):
+        span = 0
+    if span and cmd.get("intent") == "change_task":
+        when = tu.now_local() + timedelta(minutes=span)
+        out["due_date"], out["due_time"] = when.date().isoformat(), when.strftime("%H:%M")
     return out
 
 
@@ -463,6 +471,11 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     prefs = services.get_prefs(subject)
     review = scheduling.review(subject, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes, prefs=prefs,
                                exclude_ids=exclude)
+    # A task, a payment or a follow-up can be given for any moment, a meeting included: only being in two places
+    # at once (a meeting or a call over something in the diary) is a clash to ask about. Work handed to the PA
+    # still gets its one-line note that the PA is busy then.
+    if kind not in (Kind.MEETING, Kind.CALL) and whose != "pa":
+        review["clashes"], review["suggested"] = [], None
     anonymous = whose == "md"  # the PA only ever hears that the MD is busy, never with what
     pa = services.get_pa()
     pa_name = pa.spoken_name if pa else "your PA"
