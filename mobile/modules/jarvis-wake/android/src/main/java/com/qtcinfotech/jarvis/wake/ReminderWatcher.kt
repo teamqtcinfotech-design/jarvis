@@ -44,8 +44,15 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
     /** Returns false when the login has expired for good (the service should stop and let the app re-issue it). */
     fun check(): Boolean {
         if (WakeBus.appInForeground || WakeBus.inConversation) return true
-        val reminders = Api.get(context, "/reminders/?hours=1") ?: return !Api.tokensDead
-        val alerts = Api.get(context, "/alerts/")
+        // The next hour's list is kept on the phone: with no connection, the reminders still fire from this copy.
+        val fetched = Api.get(context, "/reminders/?hours=1")
+        if (fetched != null) {
+            prefs.edit().putString(WakeBus.KEY_REMINDERS_CACHE, fetched.toString()).putLong(WakeBus.KEY_REMINDERS_CACHED_AT, System.currentTimeMillis()).apply()
+        } else if (Api.tokensDead) {
+            return false
+        }
+        val reminders = fetched ?: cachedReminders() ?: return true
+        val alerts = if (fetched != null) Api.get(context, "/alerts/") else null
         val nowSec = System.currentTimeMillis() / 1000
         val spoken = prefs.getStringSet(WakeBus.KEY_SPOKEN, emptySet())?.toMutableSet() ?: mutableSetOf()
         val due = ArrayList<Item>()
@@ -107,12 +114,16 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         return true
     }
 
-    /** A live push (see PushService): show and speak it now, and remember it so the next check does not repeat it. */
+    /**
+     * A live push (see PushService): show and speak it now, and remember it so the next check does not repeat it.
+     * An alert comes with its id in the key ("alert:<id>"); a reminder comes with its own key (reminderKey).
+     */
     fun deliverPush(key: String, title: String, spoken: String, urgent: Boolean, priority: String = "NORMAL",
-                    question: JSONObject? = null) {
+                    question: JSONObject? = null, reminderKey: String? = null, isPrivate: Boolean = false) {
         val spokenKeys = prefs.getStringSet(WakeBus.KEY_SPOKEN, emptySet())?.toMutableSet() ?: mutableSetOf()
         if (key in spokenKeys) return
-        val item = Item(key, null, key.removePrefix("alert:").substringBefore(":s"), title, spoken, false, urgent, question)
+        val alertId = if (reminderKey == null) key.removePrefix("alert:").substringBefore(":s") else null
+        val item = Item(key, reminderKey, alertId, title, spoken, isPrivate, urgent, question)
         if (!WakeBus.inConversation && priority != "LOW") announce(listOf(item))
         spokenKeys.add(key)
         prefs.edit().putStringSet(WakeBus.KEY_SPOKEN, spokenKeys).apply()
@@ -120,6 +131,14 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
     }
 
     private fun silentSound(): Boolean = prefs.getString(WakeBus.KEY_REMINDER_SOUND, "default") == "silent"
+
+    /** The last list fetched, if it is less than an hour old (older than that, its items have all come and gone). */
+    private fun cachedReminders(): JSONObject? {
+        val at = prefs.getLong(WakeBus.KEY_REMINDERS_CACHED_AT, 0L)
+        if (at == 0L || System.currentTimeMillis() - at > 60 * 60 * 1000L) return null
+        val raw = prefs.getString(WakeBus.KEY_REMINDERS_CACHE, null) ?: return null
+        return try { JSONObject(raw) } catch (_: Throwable) { null }
+    }
 
     /** What the voice-only conversation needs to take the answer to this item's question. */
     private fun aboutOf(item: Item): JSONObject = JSONObject()

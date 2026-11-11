@@ -380,6 +380,21 @@ class ReminderTold(models.Model):
         constraints = [models.UniqueConstraint(fields=["user", "key"], name="unique_reminder_told")]
 
 
+class PhoneLog(models.Model):
+    """What went wrong on a phone (errors, failed calls, crashes), sent by the app so a problem can be read here
+    instead of guessed at. Short lines only; never task titles."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    level = models.CharField(max_length=8, default="error")
+    where = models.CharField(max_length=80, blank=True, default="")
+    message = models.CharField(max_length=500)
+    at = models.DateTimeField()               # when it happened on the phone
+    app_version = models.CharField(max_length=20, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-at"]
+
+
 class ReminderSnooze(models.Model):
     """"Later" for one reminder: it comes back at this moment as a fresh announcement. Kept on the server, so a phone
     restart does not lose it and the app and the phone's background part honour the same time."""

@@ -29,18 +29,34 @@ class PushService : FirebaseMessagingService() {
         val prefs = WakeBus.prefs(this)
         if (!prefs.getBoolean(WakeBus.KEY_ENABLED, false)) return // signed out: ignore anything still arriving
         val data = message.data
-        if (data["type"] != "alert") return
-        Log.i(TAG, "push: ${data["kind"]} ${data["priority"]}")
+        val type = data["type"]
+        if (type != "alert" && type != "reminder") return
+        Log.i(TAG, "push: $type ${data["kind"]} ${data["priority"]}")
         if (WakeBus.appInForeground) {
             WakeBus.onPush() // the app is open: its own alert engine fetches and decides (speak / vibrate / hold)
             return
         }
-        val id = data["id"] ?: return
         val question = data["question"]?.takeIf { it.isNotBlank() }?.let {
             try { JSONObject(it) } catch (_: Throwable) { null }
         }
         val watcher = ReminderWatcher(this, WakeNotifier(this))
         watcher.onAsk = { about -> WakeService.askAbout(this, about) }
+        if (type == "reminder") {
+            // A reminder at its exact moment (the half-minute poll stays as the safety net).
+            val key = data["key"] ?: return
+            watcher.deliverPush(
+                key = key,
+                title = data["title"] ?: "JARVIS",
+                spoken = data["spoken"] ?: "",
+                urgent = data["priority"] == "URGENT",
+                priority = data["priority"] ?: "NORMAL",
+                question = question,
+                reminderKey = key,
+                isPrivate = data["is_private"] == "1",
+            )
+            return
+        }
+        val id = data["id"] ?: return
         watcher.deliverPush(
             key = data["announce_key"]?.takeIf { it.isNotBlank() } ?: "alert:$id",
             title = data["title"] ?: "JARVIS",

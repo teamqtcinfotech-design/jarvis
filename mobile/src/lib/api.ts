@@ -80,6 +80,7 @@ async function rawFetch(path: string, init: RequestInit & { timeoutMs?: number }
     return await fetch(`${serverUrl}/api/v1${path}`, { ...init, signal: controller.signal });
   } catch (e: any) {
     const aborted = e?.name === 'AbortError';
+    diagNote?.('warn', `api ${init.method ?? 'GET'} ${path.split('?')[0]}`, aborted ? 'timeout' : `network: ${e?.message ?? e}`);
     throw new ApiError(0, aborted ? 'timeout' : 'network', aborted ? 'The server took too long to respond.' : 'Cannot reach the JARVIS server. Check Wi-Fi.');
   } finally {
     clearTimeout(timer);
@@ -180,7 +181,14 @@ export async function api<T = any>(path: string, opts: ApiOptions = {}): Promise
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) {
+    if (res.status >= 500) diagNote?.('error', `api ${opts.method ?? 'GET'} ${path.split('?')[0]}`, `server ${res.status} ${data?.code ?? ''}`);
     throw new ApiError(res.status, data?.code ?? 'error', data?.message ?? `Request failed (${res.status}).`, data);
   }
   return { status: res.status, data: data as T };
+}
+
+/** Diagnostics hook (set by lib/diag, which imports this file: no import cycle). Short lines, never task titles. */
+let diagNote: ((level: 'error' | 'warn' | 'info', where: string, message: string) => void) | null = null;
+export function setDiagNote(fn: typeof diagNote) {
+  diagNote = fn;
 }

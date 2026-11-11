@@ -34,6 +34,7 @@ from .serializers import (
     LoginSerializer,
     PaTaskInputSerializer,
     PaTaskStatusSerializer,
+    DiagnosticsSerializer,
     RequestInputSerializer,
     SnoozeSerializer,
     TeamDelegationSerializer,
@@ -469,6 +470,35 @@ class MePrefsView(APIView):
     def patch(self, request):
         patch = request.data if isinstance(request.data, dict) else {}
         return Response(services.set_prefs(request.user, patch))
+
+
+class DiagnosticsView(APIView):
+    """The phone sends what went wrong on it (short lines, never task titles); the same person can read them back.
+    Kept to the last 300 lines per person."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        from .models import PhoneLog
+
+        s = DiagnosticsSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        rows = [PhoneLog(user=request.user, level=e["level"], where=e["where"][:80], message=e["message"][:500], at=e["at"],
+                         app_version=d["app_version"][:20]) for e in d["events"]]
+        PhoneLog.objects.bulk_create(rows)
+        extra = PhoneLog.objects.filter(user=request.user).order_by("-at").values_list("id", flat=True)[300:]
+        if extra:
+            PhoneLog.objects.filter(id__in=list(extra)).delete()
+        for e in d["events"][:20]:
+            log.warning("phone %s [%s] %s: %s", request.user.username, e["level"], e["where"], e["message"][:200])
+        return Response({"stored": len(rows)})
+
+    def get(self, request):
+        from .models import PhoneLog
+
+        rows = PhoneLog.objects.filter(user=request.user).order_by("-at")[:100]
+        return Response({"results": [{"level": r.level, "where": r.where, "message": r.message, "at": r.at.isoformat(),
+                                      "app_version": r.app_version} for r in rows]})
 
 
 class MeHabitsView(APIView):

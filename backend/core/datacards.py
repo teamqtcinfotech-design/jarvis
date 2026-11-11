@@ -628,11 +628,23 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         return _summ(view, address, address_hi, en, hi)
     if kind == "late":
         rows = _rows(dash["overdue"], include_private)
+        # How long each has been late: the oldest first, and said plainly ("3 days late").
+        today = tu.today_local()
+        for row, item in zip(rows, [i for i in dash["overdue"] if include_private or i.get("scope") != "private"]):
+            due = item.get("due_at") or (f"{item['due_date']}T23:59:00+05:30" if item.get("due_date") else "")
+            days = (today - tu.to_local(datetime.fromisoformat(due)).date()).days if due else 0
+            row["late_days"] = days
+            row["when"] = f"{row['day'] or row['when']} · {days} day{'s' if days != 1 else ''} late" if days > 0 else f"{row['when']} · today"
+        rows.sort(key=lambda r: -r.get("late_days", 0))
         view = _table("late", "Late", rows, [("when", "Was due"), ("title", "What"), ("kind", "Type")],
-                      subtitle="Nothing is late." if not rows else f"{len(rows)} items")
+                      subtitle="Nothing is late." if not rows else f"{len(rows)} items, oldest first")
         if not rows:
             return _summ(view, address, address_hi, "nothing is late.", "कुछ भी लेट नहीं है।")
+        oldest = rows[0].get("late_days", 0)
         first_en, first_hi = _first_two(rows)
+        if oldest > 1:
+            first_en = f"{rows[0]['title']} ({oldest} days late)" + (f", {rows[1]['title']}" if len(rows) > 1 else "")
+            first_hi = f"{rows[0]['title']} ({oldest} दिन लेट)" + (f", {rows[1]['title']}" if len(rows) > 1 else "")
         n = len(rows)
         return _summ(view, address, address_hi, f"{n} {'item is' if n == 1 else 'items are'} late: {first_en}" + (f" and {n - 2} more." if n > 2 else "."),
                      f"{n} काम लेट {'है' if n == 1 else 'हैं'}: {first_hi}" + (f" और {n - 2} और।" if n > 2 else "।"))

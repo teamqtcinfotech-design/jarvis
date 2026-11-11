@@ -98,6 +98,9 @@ object WakeBus {
     const val KEY_REPLY_LANG = "reply_lang"
     /** Notification sound for reminders that arrive while the app is closed: "default" (the phone's) or "silent". */
     const val KEY_REMINDER_SOUND = "reminder_sound"
+    /** The last reminder list fetched (the next hour), so reminders still fire with no connection. */
+    const val KEY_REMINDERS_CACHE = "reminders_cache"
+    const val KEY_REMINDERS_CACHED_AT = "reminders_cached_at"
     const val KEY_SPEAK_LOCKED = "speak_locked"
     const val KEY_SPOKEN = "spoken_keys"
     const val KEY_PUSH_TOKEN = "push_token"

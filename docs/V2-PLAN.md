@@ -79,14 +79,23 @@ Status: `[ ]` open, `[~]` in progress, `[x]` done (commit). Items marked **APK**
 
 ## Wave 5 — reliability and speed
 
-- [ ] 5.1 Reminders pushed by the server at the exact second; the watcher keeps the next hour's list offline.
-- [ ] 5.2 Context trimming and caching of the stable part; "the AI is slow" said once instead of the rule parser
-      guessing.
-- [ ] 5.3 Diagnostics: errors and crashes logged to the server, "send diagnostics" in Settings. **APK**
-- [ ] 5.4 TaskPanel honesty: JARVIS knows when the staff door is closed and says so.
-- [ ] 5.5 Fewer pollers: push-driven refresh, slower when idle. **APK**
-- [ ] 5.6 Recurrence; "did the meeting happen?"; escalation wording for days overdue.
-- [ ] 5.7 Barge-in while JARVIS speaks (if the phone allows it). **APK**
+- [x] 5.1 Reminders pushed by the server at their moment (`reminderpush.run()` every worker cycle, type "reminder"
+      push with the question contract); the closed-app watcher keeps the last hour's list on the phone and fires
+      from it with no connection. The half-minute poll stays as the safety net. **APK**
+- [~] 5.2 The system prompts were already cached (`cache_control`); the context is already trimmed per item. When
+      the AI cannot be reached and the rule parser reads the sentence, JARVIS now says so once in ten minutes
+      ("my brain is slow right now, so I read this myself; please check it") and the card carries the warning.
+- [x] 5.3 Diagnostics: errors, failed calls and crashes are kept on the phone (short lines, never task titles),
+      sent with Settings → "Send diagnostics" or by themselves after a crash; `GET /diagnostics/` reads them back. **APK**
+- [x] 5.4 TaskPanel honesty: in test mode or when not connected, the delegation confirmation says the task stays in
+      JARVIS, and the card carries the warning.
+- [x] 5.5 Fewer pollers: with live push the alert poll is once a minute and the dashboard every two minutes; a
+      push refreshes both at once. **APK**
+- [~] 5.6 Late items say how late ("Pay the vendor (3 days late)", oldest first); the evening summary names the
+      oldest. "Did the meeting happen?" is the existing check-in. Recurrence NOT done (a separate design: repeat
+      rules, exceptions, "skip this week").
+- [ ] 5.7 Barge-in while JARVIS speaks. NOT done: the recogniser and the voice cannot hold the microphone at
+      once on this phone without echo; a tap or "Hey JARVIS" interrupts as before.
 
 ## Done before this plan (10–11 Nov)
 

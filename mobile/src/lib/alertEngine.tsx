@@ -37,7 +37,8 @@ Notifications.setNotificationHandler({
 
 const CHANNELS = { URGENT: 'jarvis-urgent', HIGH: 'jarvis-normal', NORMAL: 'jarvis-normal', LOW: 'jarvis-low' } as const;
 const RANK: Record<Priority, number> = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
-const POLL_MS = 20_000;
+// With live push (reminders and alerts arrive by themselves on this build) the poll is only a safety net.
+const POLL_MS = wakeSupported ? 60_000 : 20_000;
 const TICK_MS = 4_000;
 const STALE_MS = 2 * 60_000;
 const FOLLOWUP_MINUTES = [5, 15];

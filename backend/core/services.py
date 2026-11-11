@@ -1319,6 +1319,7 @@ PREF_SCHEMA = {
                       "labels": {"auto": "the language you speak", "hi": "Hindi", "en": "English"}},
     # The languages of the last few sentences spoken (kept by core.lang; never set by hand).
     "langRecent": {"type": "text", "default": "", "say": "recent languages", "hidden": True},
+    "aiSlowToldAt": {"type": "text", "default": "", "say": "last told the AI is slow", "hidden": True},
     "voiceAccent": {"type": "enum", "values": ["hi-IN", "en-IN"], "default": "hi-IN", "say": "voice",
                     "aliases": {"hindi": "hi-IN", "hi": "hi-IN", "hi-in": "hi-IN", "english": "en-IN", "en": "en-IN",
                                 "en-in": "en-IN", "indian english": "en-IN"},

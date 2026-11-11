@@ -14,7 +14,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 
-from core import followups
+from core import followups, reminderpush
 from core import timeutils as tu
 from core.taskpanel import dispatcher, sync
 
@@ -39,6 +39,10 @@ class Command(BaseCommand):
             close_old_connections()
             now = time.monotonic()
             try:
+                # Reminders at their exact moment: pushed to the phones as soon as they come due (every cycle).
+                pushed = reminderpush.run()
+                if pushed:
+                    self.stdout.write(f"{tu.now_local():%H:%M:%S}  pushed {pushed} reminder(s)")
                 if now - last_follow >= FOLLOWUP_EVERY_SECONDS:
                     raised = followups.run()
                     last_follow = now

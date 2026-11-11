@@ -5,7 +5,7 @@ then calls the normal, permission-checked endpoint with an Idempotency-Key.
 """
 import difflib
 import re
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
@@ -322,6 +322,16 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str, addres
              f"{address_hi}, {person.name} {until_hi} तक छुट्टी पर हैं। किसी और को दे दूँ?")
         return
 
+    # Honesty about the staff door: in test mode, or not connected, the task is recorded here and waits.
+    door = tp_client().describe()
+    if door.get("mode") == "mock":
+        draft["door_note"] = ("The staff app is in test mode on this server, so this stays in JARVIS and does not reach TaskPanel.",
+                              "स्टाफ़ ऐप अभी टेस्ट मोड में है, इसलिए ये JARVIS में ही रहेगा, TaskPanel तक नहीं जाएगा।")
+        draft["warnings"].append(draft["door_note"][0])
+    elif not door.get("configured"):
+        draft["door_note"] = ("The staff app is not connected to JARVIS yet, so this will wait here until it is.",
+                              "स्टाफ़ ऐप अभी JARVIS से जुड़ा नहीं है, इसलिए ये यहीं इंतज़ार करेगा।")
+        draft["warnings"].append(draft["door_note"][0])
     # Ask TaskPanel to check its own rules now (category/department, dates) — nothing is saved by this.
     link = services.user_link(user)
     if link is None:
@@ -1157,6 +1167,26 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             bits_hi = [b for b in (due_hi, f"{_PRIORITY_HI[priority]} प्रायोरिटी" if priority != "NORMAL" else "") if b]
             _say(draft, f"{address}, {what}: {draft['title']}" + (f", {', '.join(bits)}" if bits else "") + ". Shall I save it?",
                  f"{address_hi}, {what_hi}: {draft['title']}" + (f", {', '.join(bits_hi)}" if bits_hi else "") + "। सेव कर दूँ?")
+        # The staff door is closed or in test mode: said once in the confirmation, not hidden in a warning.
+        door = draft.pop("door_note", None)
+        if door and draft.get("reply_en") and draft["spoken_reply"] == draft["reply_en"]:
+            _say(draft, _insert_notes(draft["reply_en"], [door[0]]), _insert_notes(draft["reply_hi"], [door[1]], hindi=True) if draft["reply_hi"] else "")
+
+    # The AI could not be reached and the rule parser read the sentence instead: say so once in a while, so a
+    # rough reading is never mistaken for JARVIS understanding.
+    if draft["engine"] == "rules" and ai_brain.ai_available() and draft["action"] in TASK_ACTIONS and not draft["needs_clarification"]:
+        last = str(services.get_prefs(user).get("aiSlowToldAt") or "")
+        told_recently = False
+        if last:
+            try:
+                told_recently = tu.now_local() - tu.to_local(datetime.fromisoformat(last)) < timedelta(minutes=10)
+            except ValueError:
+                told_recently = False
+        draft["warnings"].append("JARVIS's brain is slow right now; this is a rough reading, please check it.")
+        if not told_recently and draft.get("reply_en") and draft["spoken_reply"] == draft["reply_en"]:
+            services.set_pref_quiet(user, "aiSlowToldAt", tu.now_local().isoformat())
+            _say(draft, _insert_notes(draft["reply_en"], ["My brain is slow right now, so I read this myself; please check it."]),
+                 _insert_notes(draft["reply_hi"], ["मेरा दिमाग़ अभी धीमा है, इसलिए मैंने खुद पढ़ा है; ज़रा देख लीजिए।"], hindi=True) if draft["reply_hi"] else "")
 
     # Does it fit the diary? (clash, free slot, a very full day) — may replace the question above.
     if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"]:

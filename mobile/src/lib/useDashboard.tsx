@@ -4,6 +4,10 @@ import { AppState } from 'react-native';
 import { ApiError, api } from './api';
 import { dataChanged } from './bus';
 import type { Dashboard } from './types';
+import { onPush, wakeSupported } from './wake';
+
+// With live push on this build, a change reaches the phone by itself; the timer is only a safety net.
+const REFRESH_MS = wakeSupported ? 120_000 : 45_000;
 
 interface DashboardValue {
   data: Dashboard | null;
@@ -41,13 +45,15 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const kick = setTimeout(() => load(true), 0);
-    const timer = setInterval(() => load(false), 45_000);
+    const timer = setInterval(() => load(false), REFRESH_MS);
     const unsub = dataChanged.subscribe(() => load(false));
+    const offPush = onPush(() => load(false)); // something changed on the server: refresh now, not in two minutes
     const sub = AppState.addEventListener('change', (s) => s === 'active' && load(true));
     return () => {
       clearTimeout(kick);
       clearInterval(timer);
       unsub();
+      offPush();
       sub.remove();
     };
   }, [load]);

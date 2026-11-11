@@ -2452,6 +2452,59 @@ class HabitsAndRulesTests(BaseCase):
         self.assertNotIn("Sharma", json.dumps(d["view"]["rows"]))
 
 
+class ReliabilityTests(BaseCase):
+    """Reminders pushed at their moment, the phone's diagnostics, honesty about the staff door, and late wording."""
+
+    def test_reminders_are_pushed_once_at_their_moment(self):
+        from core import push, reminderpush
+        push.register_device(self.md, "tok-md-1")
+        task = services.create_private_task(self.md, {"title": "Call the bank", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                      "due_at": timezone.now() - timedelta(seconds=5)})
+        self.assertEqual(task.due_kind, "TIMED")
+        sent = []
+        with mock.patch("core.push.configured", return_value=True), \
+             mock.patch("core.push._deliver", side_effect=lambda tokens, data, urgent: (sent.append(data), [(True, "")] * len(tokens))[1]):
+            reminderpush.STATE.update(checked_at=None, pushed=[])
+            self.assertEqual(reminderpush.run(), 1)
+            self.assertEqual(reminderpush.run(), 0)  # once, not on every cycle
+        self.assertEqual(sent[0]["type"], "reminder")
+        self.assertIn("Call the bank", sent[0]["spoken"])
+        self.assertTrue(sent[0]["key"].startswith("private:"))
+        self.assertEqual(json.loads(sent[0]["question"])["kind"], "done")
+        # Nothing is marked told by the push itself: the phone does that when it speaks.
+        due = next(r for r in self.md_client.get("/api/v1/reminders/").json()["reminders"] if r["key"] == sent[0]["key"])
+        self.assertIsNone(due["told_at"])
+
+    def test_phone_diagnostics_are_kept_per_person(self):
+        now = timezone.now().isoformat()
+        r = self.md_client.post("/api/v1/diagnostics/", {"app_version": "2.0.0", "events": [
+            {"level": "error", "where": "save", "message": "Network request failed", "at": now},
+            {"level": "warn", "where": "voice", "message": "no-speech", "at": now},
+        ]}, format="json")
+        self.assertEqual((r.status_code, r.json()["stored"]), (200, 2), r.content)
+        mine = self.md_client.get("/api/v1/diagnostics/").json()["results"]
+        self.assertEqual([e["message"] for e in mine], ["Network request failed", "no-speech"])
+        self.assertEqual(self.pa_client.get("/api/v1/diagnostics/").json()["results"], [])
+
+    def test_the_staff_door_is_described_honestly(self):
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="assign_to_staff", title="Send the GST file",
+                                                                       staff_name="QTC Developer", engine="rules")):
+            d = self.md_client.post("/api/v1/assistant/interpret/", {"text": "QTC Developer ko bolo GST file bheje"}, format="json").json()
+        self.assertEqual(d["action"], "delegation")
+        self.assertTrue(any("test mode" in w for w in d["warnings"]), d["warnings"])
+        self.assertIn("test mode", d["spoken_reply"])              # said in the confirmation, not hidden
+        self.assertTrue(d["spoken_reply"].endswith("Shall I save it?"))
+
+    def test_late_items_say_how_late(self):
+        services.create_private_task(self.md, {"title": "Pay the vendor", "kind": Kind.PAYMENT, "priority": Priority.NORMAL,
+                                               "due_date": tu.today_local() - timedelta(days=3)})
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="query", view_kind="late")):
+            d = self.md_client.post("/api/v1/assistant/interpret/", {"text": "late wale"}, format="json").json()
+        self.assertIn("Pay the vendor (3 days late)", d["spoken_reply"])
+        self.assertEqual(d["view"]["rows"][0]["title"], "Pay the vendor")  # oldest first
+        self.assertIn("3 days late", d["view"]["rows"][0]["when"])
+
+
 class LanguageTests(BaseCase):
     """One language rule for everything JARVIS says: the sentence just spoken decides, a pinned setting overrides,
     and what is said with nothing just spoken (alerts, reminders) follows the language used lately."""

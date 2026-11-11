@@ -163,6 +163,19 @@ class TurnSerializer(serializers.Serializer):
     about = AboutSerializer(required=False, allow_null=True, default=None)
 
 
+class PhoneLogEventSerializer(serializers.Serializer):
+    level = serializers.ChoiceField(choices=[("error", "error"), ("warn", "warn"), ("info", "info")], required=False, default="error")
+    where = serializers.CharField(max_length=80, required=False, allow_blank=True, default="")
+    message = serializers.CharField(max_length=500, trim_whitespace=True)
+    at = serializers.DateTimeField()
+
+
+class DiagnosticsSerializer(serializers.Serializer):
+    """What went wrong on the phone lately, sent in one go ("send diagnostics", or after a crash)."""
+    app_version = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
+    events = PhoneLogEventSerializer(many=True, max_length=100)
+
+
 class SnoozeSerializer(serializers.Serializer):
     """"Later" for one reminder (key) or alert (alert_id), or for whatever JARVIS said last (last). Until a moment,
     or in a number of minutes; neither = the person's usual snooze."""

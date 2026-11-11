@@ -10,10 +10,14 @@ import { HeldSheet } from '@/components/HeldSheet';
 import { LockScreen } from '@/components/LockScreen';
 import { AlertEngineProvider } from '@/lib/alertEngine';
 import { ConversationProvider } from '@/lib/conversation';
+import * as diag from '@/lib/diag';
 import { PrefsProvider } from '@/lib/prefs';
 import { SessionProvider, useSession } from '@/lib/session';
 import { colors } from '@/lib/theme';
 import { DashboardProvider } from '@/lib/useDashboard';
+
+// Errors and crashes are kept on the phone (short lines) and sent with "Send diagnostics", or after a crash.
+diag.install();
 
 function Shell() {
   const { user, locked } = useSession();

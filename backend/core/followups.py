@@ -169,20 +169,32 @@ def run(now=None) -> int:
 
         key = f"digest:{today.isoformat()}"
         if digest_due(md_prefs) and not _already(key + f"@{md.id}"):
-            slipped = [t.title for t in shared_md_tasks_qs().filter(status__in=OPEN) if (d := due_day(t)) and d <= today]
+            # Oldest first, and how long it has been waiting: a thing three days late is said as such.
+            def late_label(t, hindi=False):
+                days = (today - due_day(t)).days
+                if days <= 0:
+                    return t.title
+                return f"{t.title} ({days} {'दिन से' if hindi else 'day' + ('s' if days > 1 else '')})"
+            open_md = sorted([t for t in shared_md_tasks_qs().filter(status__in=OPEN) if (d := due_day(t)) and d <= today],
+                             key=lambda t: due_day(t))
+            slipped = [t.title for t in open_md]
             private_count = sum(1 for t in md_private_qs(md).filter(status__in=OPEN) if (d := due_day(t)) and d <= today)
             total = private_count + len(slipped)
             if total:
                 parts, parts_hi = [], []
                 if slipped:
-                    parts.append("; ".join(slipped[:3]))
-                    parts_hi.append("; ".join(slipped[:3]))
+                    parts.append("; ".join(late_label(t) for t in open_md[:3]))
+                    parts_hi.append("; ".join(late_label(t, True) for t in open_md[:3]))
                 if private_count:
                     parts.append(f"{private_count} private")
                     parts_hi.append(f"{private_count} पर्सनल")
-                spoken = (f"{sir}, {total} thing{'s' if total > 1 else ''} slipped today: " + " and ".join(parts) +
-                          ". Tell me if you want them moved to tomorrow.")
-                spoken_hi = f"{sir_hi}, आज {total} काम रह गए: " + " और ".join(parts_hi) + "। बताइए अगर कल पर ले जाऊँ।"
+                oldest = (today - due_day(open_md[0])).days if open_md else 0
+                head = (f"{sir}, {total} thing{'s' if total > 1 else ''} still open, the oldest {oldest} days: " if oldest > 1
+                        else f"{sir}, {total} thing{'s' if total > 1 else ''} slipped today: ")
+                head_hi = (f"{sir_hi}, {total} काम अभी भी बाकी, सबसे पुराना {oldest} दिन से: " if oldest > 1
+                           else f"{sir_hi}, आज {total} काम रह गए: ")
+                spoken = head + " and ".join(parts) + ". Tell me if you want them moved to tomorrow."
+                spoken_hi = head_hi + " और ".join(parts_hi) + "। बताइए अगर कल पर ले जाऊँ।"
                 raised += _raise(md, key, f"{total} slipped today", " · ".join(parts), spoken, spoken_hi=spoken_hi)
         if pa and digest_due(get_prefs(pa)) and not _already(key + f"@{pa.id}"):
             hers = [t.title for t in pa_tasks_qs().filter(status__in=OPEN).exclude(origin=SharedTask.Origin.MD_MEET_PA)

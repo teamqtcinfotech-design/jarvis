@@ -8,6 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui';
 import { useAlertEngine } from '@/lib/alertEngine';
 import { api, currentServer, deviceTokens } from '@/lib/api';
+import * as diag from '@/lib/diag';
 import { relativeAgo, timeLabel } from '@/lib/format';
 import { addressHiOf, addressOf, mdWord } from '@/lib/names';
 import { usePrefs } from '@/lib/prefs';
@@ -62,6 +63,16 @@ function SettingsScreen() {
   const [wake, setWake] = useState<WakeStatus | null>(null);
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeNote, setWakeNote] = useState('');
+  const [diagNote, setDiagNoteText] = useState('');
+
+  const sendDiagnostics = async () => {
+    try {
+      const n = await diag.send();
+      setDiagNoteText(n ? `Sent ${n} line${n === 1 ? '' : 's'} to the server.` : 'Nothing to send: no errors noted on this phone.');
+    } catch {
+      setDiagNoteText('Could not reach the server. Try again in a moment.');
+    }
+  };
 
   useEffect(() => {
     const refresh = () => wakeStatus().then(setWake).catch(() => undefined);
@@ -414,6 +425,11 @@ function SettingsScreen() {
           <Row title={isMD ? 'Managing Director' : `PA · ${user?.name}`} detail={`Signed in as ${user?.username}`} right={null} />
           <Row title="Server" detail={server} right={null} />
           <Row title="Fingerprint lock" detail={biometricAvailable ? 'On — needed after 1 minute away' : 'No fingerprint or face set up on this phone'} right={null} />
+          <Row
+            title="Send diagnostics"
+            detail={diagNote || `${diag.recent().length} error line${diag.recent().length === 1 ? '' : 's'} noted on this phone (no task titles). Sent to the JARVIS server only.`}
+            right={<Button title="Send" kind="secondary" compact icon="cloud-upload-outline" onPress={sendDiagnostics} />}
+          />
           {!isMD ? <Txt variant="small" style={{ marginTop: 8 }}>{mdWord(dash)}’s personal tasks are private and never shown in this app.</Txt> : null}
           <Button title="Sign out" kind="danger" icon="log-out-outline" onPress={signOut} style={{ marginTop: 14 }} />
         </Card>

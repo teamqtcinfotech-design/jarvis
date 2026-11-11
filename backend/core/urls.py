@@ -12,6 +12,7 @@ urlpatterns = [
     path("me/prefs/", views.MePrefsView.as_view()),
     path("me/habits/", views.MeHabitsView.as_view()),
     path("me/habits/<str:key>/", views.MeHabitsView.as_view()),
+    path("diagnostics/", views.DiagnosticsView.as_view()),
     path("me/push-token/", views.PushTokenView.as_view()),
     path("health/", views.HealthView.as_view()),
     path("today/", views.TodayView.as_view()),
