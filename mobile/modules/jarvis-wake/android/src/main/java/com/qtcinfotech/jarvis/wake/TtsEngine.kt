@@ -27,9 +27,21 @@ object TtsEngine {
     private val thenCallbacks = java.util.concurrent.ConcurrentHashMap<String, () -> Unit>()
     /** Every sentence asked for and not yet finished: while this is not empty, JARVIS is talking (see WakeService barge-in). */
     private val inFlight = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
-    /** When the current stretch of talking began (0 = quiet), so a listener can skip the first moments. */
+    /**
+     * When sound for the current stretch of talking began reaching the speaker (0 = none yet, or quiet). Set by the
+     * voices themselves, not when a sentence is asked for: the Grok voice takes a moment to start, and a listener
+     * measuring the phone's own voice must not measure that silence.
+     */
     @Volatile var talkingSince: Long = 0L
     val speaking: Boolean get() = inFlight.isNotEmpty()
+
+    init {
+        GrokVoice.onSoundStart = { soundStarted() }
+    }
+
+    private fun soundStarted() {
+        if (inFlight.isNotEmpty() && talkingSince == 0L) talkingSince = System.currentTimeMillis()
+    }
 
     /** Speak, then run [onDone] once it has finished (or failed, or was stopped) — used by the background conversation. */
     fun speakThen(req: Request, onDone: () -> Unit) {
@@ -67,7 +79,9 @@ object TtsEngine {
             }
         }
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
+            override fun onStart(utteranceId: String?) {
+                soundStarted()
+            }
             override fun onDone(utteranceId: String?) {
                 utteranceId?.let { finished(it, "done") }
             }
@@ -100,7 +114,6 @@ object TtsEngine {
     fun speak(raw: Request) {
         val req = raw.copy(text = forSpeech(raw.text), fallback = raw.fallback?.let { forSpeech(it) })
         Log.i(TAG, "speak(${req.lang}): ${req.text.take(140)}")  // one line per sentence, so a test can see what was said
-        if (inFlight.isEmpty()) talkingSince = System.currentTimeMillis()
         inFlight.add(req.id)
         val ctx = appContext
         if (ctx != null && GrokVoice.enabled(ctx)) {

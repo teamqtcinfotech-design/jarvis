@@ -36,6 +36,8 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     private var heardAnything = false
     /** Changes every time listening starts or ends, so a late safety timer knows it is out of date. */
     private var listenRound = 0
+    /** He talked over the reply (the service stopped the voice): listen when it ends, whatever the reply was. */
+    @Volatile private var barged = false
     private val prefs = WakeBus.prefs(context)
     private val address: String get() = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
     /** The same word in Devanagari ("सर", "मैम") for the Hindi lines. */
@@ -79,6 +81,28 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
             ensureRecognizer()
             send("", "ask", about)
         }
+    }
+
+    /** He talked over a reminder said with the app closed: no greeting, just listen to what he has to say. */
+    fun startListening() {
+        if (active) return
+        active = true
+        WakeBus.inConversation = true
+        silenceRounds = 0
+        retries = 0
+        patient = true
+        heardAnything = false  // a stray sound that stopped the voice, then quiet: close without a word
+        overlay.show("…", "listening")
+        main.post {
+            ensureRecognizer()
+            listen()
+        }
+    }
+
+    /** Called by the service just before it stops the voice he talked over. */
+    fun bargedIn() {
+        barged = true
+        patient = true
     }
 
     fun end() {
@@ -146,7 +170,9 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
             overlay.update(show, "speaking")
         }
         speakThen(say, resp.optString("fallback", show), lang) {
-            if (active && listen) listen() else end()
+            val overTalked = barged
+            barged = false
+            if (active && (listen || overTalked)) listen() else end()
         }
     }
 
@@ -171,10 +197,15 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply { setRecognitionListener(listener) }
     }
 
-    private fun listen() {
+    private fun listen(waited: Int = 0) {
         if (!active) return
         main.post {
             if (!active) return@post
+            // The wake-word service keeps the microphone while JARVIS talks (for barge-in); let it go first.
+            if (WakeBus.micHeld && waited < 400) {
+                main.postDelayed({ listen(waited + 40) }, 40)
+                return@post
+            }
             ensureRecognizer()
             notifier.showConversation("Listening…")
             overlay.update(null, "listening")

@@ -190,6 +190,8 @@ class WakeService : Service() {
             var bargeBase = 0.0           // loudest slice during the baseline window
             var bargeBaseSlices = 0
             var bargeRun = 0              // slices in a row above the bar
+            var bargeRunPeak = 0.0        // the loudest of them
+            var bargeLogged = false
 
             fun closeRecorder() {
                 try {
@@ -202,6 +204,7 @@ class WakeService : Service() {
                 }
                 record = null
                 recording = false
+                WakeBus.micHeld = false
             }
 
             Log.i(TAG, "Listening for Hey JARVIS (models loaded)")
@@ -248,6 +251,7 @@ class WakeService : Service() {
                             continue
                         }
                         recording = true
+                        WakeBus.micHeld = true
                         failures = 0
                         silentChunks = 0
                         prevScore = 0f
@@ -302,31 +306,50 @@ class WakeService : Service() {
 
                     // Barge-in while JARVIS talks: no wake-word judging of its own voice, only "did he start talking?"
                     if (talking) {
+                        detector.reset()
+                        prevScore = 0f
+                        streak = 0
                         val since = TtsEngine.talkingSince
+                        if (since == 0L) {
+                            // Asked to speak but no sound yet: nothing to measure (its own first word must not count as him).
+                            bargeSince = 0L
+                            continue
+                        }
                         if (since != bargeSince) {
                             bargeSince = since
                             bargeBase = 0.0
                             bargeBaseSlices = 0
                             bargeRun = 0
+                            bargeRunPeak = 0.0
+                            bargeLogged = false
                         }
                         val age = System.currentTimeMillis() - since
                         if (age < BARGE_BASELINE_MS) {
                             if (rms > bargeBase) bargeBase = rms
                             bargeBaseSlices += 1
                         } else if (bargeBaseSlices > 0) {
+                            if (!bargeLogged) {
+                                bargeLogged = true
+                                Log.i(TAG, String.format("barge-in: own voice at the microphone %.0f; listening over it", bargeBase))
+                            }
                             val bar = maxOf(bargeBase * BARGE_OVER_BASE, BARGE_MIN_LEVEL)
-                            bargeRun = if (rms > bar) bargeRun + 1 else 0
+                            if (rms > bar) {
+                                bargeRun += 1
+                                if (rms > bargeRunPeak) bargeRunPeak = rms
+                            } else {
+                                // A short loud stretch that ended was JARVIS's own louder word: the bar rises to it.
+                                if (bargeRun > 0) bargeBase = maxOf(bargeBase, bargeRunPeak / BARGE_OVER_BASE)
+                                bargeRun = 0
+                                bargeRunPeak = 0.0
+                            }
                             if (bargeRun >= BARGE_SLICES) {
-                                Log.i(TAG, String.format("barge-in: level %.0f over baseline %.0f; stopping the voice", rms, bargeBase))
+                                Log.i(TAG, String.format("barge-in: level %.0f over %.0f; stopping the voice", rms, bar))
                                 bargeRun = 0
                                 bargeSince = 0L
-                                TtsEngine.stop()
-                                WakeBus.onBarge()
+                                closeRecorder()  // whoever listens next gets the microphone at once
+                                bargeIn()
                             }
                         }
-                        detector.reset()
-                        prevScore = 0f
-                        streak = 0
                         continue
                     }
 
@@ -393,6 +416,33 @@ class WakeService : Service() {
         }, "jarvis-wake").apply {
             priority = Thread.NORM_PRIORITY + 1
             start()
+        }
+    }
+
+    /**
+     * He started talking over JARVIS. The voice stops, and whoever was holding the conversation listens: the app
+     * when it is open; the voice-only loop when it was speaking (even after a reply that was meant to be the last
+     * word); and after a reminder said with the app closed, a fresh voice-only conversation with no greeting.
+     */
+    private fun bargeIn() {
+        val l = loop
+        when {
+            WakeBus.appInForeground && WakeBus.listener != null -> {
+                WakeBus.onBarge()   // first, so the app drops its queued sentences before it hears "stopped"
+                TtsEngine.stop()
+            }
+            l?.active == true -> {
+                l.bargedIn()
+                TtsEngine.stop()    // runs the loop's "then": it listens now
+            }
+            else -> {
+                TtsEngine.stop()    // a reminder's question (if any) starts the loop on it through onAsk
+                if (ConversationLoop.available(this)) {
+                    Handler(Looper.getMainLooper()).post {
+                        if (loop?.active != true) (loop ?: ConversationLoop(this, notifier).also { loop = it }).startListening()
+                    }
+                }
+            }
         }
     }
 

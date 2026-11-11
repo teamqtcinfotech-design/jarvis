@@ -39,6 +39,8 @@ object GrokVoice {
     @Volatile private var playing = -1          // the stop count the sentence now playing was asked under
     private val cancelled: Boolean get() = stops.get() != playing
     @Volatile private var currentId: String? = null
+    /** Told the moment the first sound of a sentence actually reaches the speaker (TtsEngine's "talking since"). */
+    @Volatile var onSoundStart: (() -> Unit)? = null
 
     fun enabled(context: Context): Boolean {
         val prefs = WakeBus.prefs(context)
@@ -147,7 +149,10 @@ object GrokVoice {
                     carry = buf[offset + length - 1].toInt() and 0xFF
                     length -= 1
                 }
-                if (written == 0L) player.play()
+                if (written == 0L) {
+                    player.play()
+                    onSoundStart?.invoke()
+                }
                 if (length > 0) {
                     player.write(buf, offset, length)
                     written += length
