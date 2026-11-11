@@ -283,12 +283,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     messagesRef.current.filter((m) => m.tone !== 'error').slice(-8).map((m) => ({ role: m.role, text: m.text }));
   const listen = () => {
     if (!user) return;
+    // A short answer is expected only when JARVIS has just asked one thing (a card, a "which one?", an offer, an
+    // alert's question); otherwise he gets a long moment to start speaking.
+    const quick = !!draftRef.current || !!offerRef.current || !!choicesRef.current || !!questionRef.current;
     if (wakeSupported && prefs.wakeWordEnabled) {
       // One microphone user at a time: the background listener lets go first, then the recogniser starts.
       wakePause();
-      setTimeout(startVoice, 250);
+      setTimeout(() => startVoice({ quick }), 300);
     } else {
-      startVoice();
+      startVoice({ quick });
     }
   };
   /** Show a JARVIS line, speak it, and (unless the conversation is over) listen again. */

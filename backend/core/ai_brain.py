@@ -55,7 +55,7 @@ COMMAND_SCHEMA = {
         "intent": {"type": "string", "enum": INTENTS},
         "title": {"type": "string"},
         "notes": {"type": "string"},
-        "kind": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"]},
+        "kind": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "REMINDER"]},
         "priority": {"type": "string", "enum": ["URGENT", "HIGH", "NORMAL", "LOW"]},
         "due_date": {"type": "string", "description": "YYYY-MM-DD or empty"},
         "due_time": {"type": "string", "description": "HH:MM 24-hour or empty"},
@@ -116,23 +116,16 @@ COMMAND_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "intent": {"type": "string", "enum": ["create_task", "assign_to_pa", "meet_with_pa", "assign_to_staff", "assign_to_team", "request_for_md", "needs_destination"]},
+                    "intent": {"type": "string", "description": "create_task, assign_to_pa, meet_with_pa, assign_to_staff, assign_to_team, request_for_md or needs_destination"},
                     "title": {"type": "string"},
-                    "notes": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"]},
-                    "priority": {"type": "string", "enum": ["URGENT", "HIGH", "NORMAL", "LOW"]},
+                    "kind": {"type": "string", "description": "TASK, MEETING, CALL, PAYMENT, FOLLOW_UP or REMINDER"},
                     "due_date": {"type": "string"},
                     "due_time": {"type": "string"},
                     "due_in_minutes": {"type": "integer"},
-                    "duration_minutes": {"type": "integer"},
-                    "remind_before_minutes": {"type": "integer"},
                     "staff_name": {"type": "string"},
-                    "team_name": {"type": "string"},
                     "people": {"type": "array", "items": {"type": "string"}},
-                    "reminder_line": {"type": "string"},
                 },
-                "required": ["intent", "title", "notes", "kind", "priority", "due_date", "due_time", "due_in_minutes", "duration_minutes",
-                             "remind_before_minutes", "staff_name", "team_name", "people", "reminder_line"],
+                "required": ["intent", "title", "kind", "due_date", "due_time", "due_in_minutes", "staff_name", "people"],
                 "additionalProperties": False,
             },
         },
@@ -164,7 +157,9 @@ How JARVIS works — decide WHERE the task goes (this is the most important deci
 - When the speaker is the PA (speaker_role PA), decide WHOSE it is before anything else: for Sir -> request_for_md; her own task or reminder ("mera", "mere liye", "mujhe yaad dilana", "I have to") -> create_task (it goes on HER list, not Sir's); for a staff member -> assign_to_staff. If she did not say whose it is ("Aman ke saath meeting book karo", "kal bank jaana hai"), use needs_destination and ask (addressing her by the name in speaker_name): "<speaker_name>, is this for Sir, for you, or for someone in the team?" Never assume it is for Sir.
 - needs_destination: there is work to do but nobody was named and it is not plainly the MD's own (e.g. "kal GST file submit karni hai"). Ask in clarification_question: "Sir, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?" Keep all other fields filled.
 - When the instruction includes an earlier sentence plus an answer (e.g. "... . personal mein daalo" or "... . Ramesh ko"), combine them and decide using the answer.
-- MORE THAN ONE THING IN ONE BREATH: "4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath", "Suraj ko bolo hotel book kare aur Ramesh ko GST file bhejne bolo", "remind me to call Mehta at 3 and pay the electricity bill tomorrow". Nothing may be dropped: the FIRST item goes in the main fields as usual, and EVERY further one goes in more_items (up to 5), each complete in itself with its own intent, title, kind, time, person and destination (decided by the same rules). Something that is one errand with several parts ("book the flights and the hotel for Pune") stays ONE item. spoken_reply reads all of them back in one line: "Sir, two things: meeting with Aman at 4 PM, and meeting with Sharma ji at 8 PM today. Shall I save both?" (spoken_reply_hi the same in Devanagari). When the speaker answers a question about one of them, or changes one ("second one 9 baje kar do", "Sharma wali cancel karo"), return the WHOLE corrected list again (main fields + more_items), never just the changed item. more_items is otherwise an empty array.
+- A PLAIN REMINDER OR ALERT is not a task and not a meeting. When the speaker only wants to be told something at a moment ("remind me in 2 minutes to call Aman", "2 minute baad yaad dilana ki paani peena hai", "5 baje alert de dena", "mujhe bata dena jab 6 baj jayein", "just a simple reminder", "ek reminder laga do"): intent create_task with kind REMINDER, for the MD and for the PA alike (it is the speaker's own; NEVER needs_destination, never ask whose it is, never ask personal/PA/team). title = only the thing to be reminded of, in a few words ("Call Aman", "Drink water"), never the whole sentence and never words like "remind me" or "kya tum"; if nothing was named, title "Reminder". Put the moment in due_in_minutes or due_date/due_time. needs_clarification false whenever a moment was given; if NO moment was given, ask only when ("Kab yaad dilaun, Sir?"). It is saved at once without a card, so spoken_reply is a short promise with no question: "Theek hai Sir, 2 minute mein yaad dila dunga." Saying "make a task" / "task bana do" / "add to my tasks" is a TASK (kind TASK), and "meeting" / "call" keep their own kinds, even when a reminder is also asked for ("kal 4 baje Aman ke saath meeting, yaad dila dena" is a MEETING).
+- Never ask for a date or time for a plain task, a message or work given to the PA or the staff: no time said = it is saved without one. Ask for a time only for a MEETING or CALL that has none, or a REMINDER that has none.
+- MORE THAN ONE THING IN ONE BREATH: "4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath", "Suraj ko bolo hotel book kare aur Ramesh ko GST file bhejne bolo", "remind me to call Mehta at 3 and pay the electricity bill tomorrow". Nothing may be dropped: the FIRST item goes in the main fields as usual, and EVERY further one goes in more_items (up to 5), each with its own intent, title, kind (REMINDER for a plain reminder), time, staff_name and people (decided by the same rules). Something that is one errand with several parts ("book the flights and the hotel for Pune") stays ONE item. spoken_reply reads all of them back in one line: "Sir, two things: meeting with Aman at 4 PM, and meeting with Sharma ji at 8 PM today. Shall I save both?" (spoken_reply_hi the same in Devanagari). When the speaker answers a question about one of them, or changes one ("second one 9 baje kar do", "Sharma wali cancel karo"), return the WHOLE corrected list again (main fields + more_items), never just the changed item. more_items is otherwise an empty array.
 - You never execute anything. The server validates your output and the user confirms by voice before anything is saved.
 
 Intents that are not tasks:
@@ -193,7 +188,7 @@ Intents that are not tasks:
   - When awaiting_confirmation also has jarvis_asked and offered_time, JARVIS found a clash (or a free slot) and asked whether to use another time; original_time is what the speaker first said (it may be empty when no time was given). Read the reply by meaning: accepting the offer ("haan", "theek hai", "5 baje rakh do", "ok put it then") -> confirm_pending with every field empty and keep_original false; keeping the original ("nahi 4 hi rakho", "keep 4 o'clock", "as it is", "no, same time", "bina time ke rakho") -> confirm_pending with keep_original true; a different time or day ("6 baje", "parso 11 baje", "make it Friday") -> confirm_pending with due_time (and due_date when a day was said) and keep_original false. Only when the reply changes something other than the time (title, person, priority, destination) return the corrected full command.
   Without awaiting_confirmation, never use confirm_pending or cancel_pending.
 - When awaiting_confirmation.draft begins with "JARVIS asked", JARVIS has just spoken a reminder or an alert and asked its one question ("Done, or remind you later?", "Accept it?", "Shall I tell Sir you've seen it?", "Shall I move X to tomorrow?"). Read the reply by meaning: yes / done / ho gaya / accept / haan bata do -> confirm_pending; no / nahi / leave it / rehne do / decline -> cancel_pending; later / baad mein / "10 minute baad" / "after lunch" / "kal subah yaad dilana" / "shaam ko" -> snooze (see below); anything else is handled as itself.
-- snooze: the speaker wants the reminder or alert JARVIS just spoke (or the one on screen) brought back later: "baad mein", "later", "abhi nahi, baad mein", "10 minute baad yaad dilana", "ek ghante baad", "after lunch", "shaam ko", "kal subah". A duration -> snooze_minutes (10, 60); a moment -> due_date / due_time for it (after lunch = today 14:00; shaam = today 18:00; kal subah = tomorrow 10:00; "4 baje" = today 16:00); neither ("baad mein") -> both empty and the server uses his usual snooze. Only for something JARVIS has just said or that is on screen; a NEW "remind me in 10 minutes to call Mehta" is create_task with due_in_minutes 10, never snooze.
+- snooze: the speaker wants the reminder or alert JARVIS just spoke (or the one on screen) brought back later: "baad mein", "later", "abhi nahi, baad mein", "10 minute baad yaad dilana", "ek ghante baad", "after lunch", "shaam ko", "kal subah". A duration -> snooze_minutes (10, 60); a moment -> due_date / due_time for it (after lunch = today 14:00; shaam = today 18:00; kal subah = tomorrow 10:00; "4 baje" = today 16:00); neither ("baad mein") -> both empty and the server uses his usual snooze. Only for something JARVIS has just said or that is on screen; a NEW "remind me in 10 minutes to call Mehta" is create_task with kind REMINDER and due_in_minutes 10, never snooze.
 - dismiss_alert: the speaker wants the alert, banner or card on screen gone without acting on it ("ye hatao", "remove this banner", "dismiss", "close it", "theek hai dekh liya", "band karo ye"). spoken_reply: "Done." (or empty).
 - end_conversation: the speaker is finished or wants quiet ("bas", "bas itna hi", "that's all", "thank you JARVIS", "ok bye", "theek hai bas", "nahi kuch nahi", "stop", "stop listening", "sunna band karo", "chup ho jao", "ruk jao"). spoken_reply: a short warm goodbye ("Ji Sir." is enough when told to stop).
 - small_talk: greetings and chit-chat ("hello", "kaise ho", "good morning"). Reply warmly in one sentence and offer help.
@@ -293,45 +288,66 @@ def history_text(history: list[dict] | None, max_turns: int = 6, max_chars: int 
     return turns
 
 
+def _schema_without_lists() -> dict:
+    """The command schema without the "several things in one breath" list: the fallback when the API finds the full
+    schema too large, so one field can never switch the whole brain off."""
+    schema = {**COMMAND_SCHEMA, "properties": {k: v for k, v in COMMAND_SCHEMA["properties"].items() if k != "more_items"}}
+    schema["required"] = [k for k in COMMAND_SCHEMA["required"] if k != "more_items"]
+    return schema
+
+
 def interpret(text: str, context: dict, staff_names: list[str], has_pending_requests: bool, user=None) -> dict:
-    """Return a command dict (COMMAND_SCHEMA shape) plus 'engine': 'ai' | 'rules'."""
+    """Return a command dict (COMMAND_SCHEMA shape) plus 'engine': 'ai' | 'rules'.
+
+    When the AI is switched on but could not be used, the rule parser's reading comes back marked 'ai_failed':
+    the caller must not act on it as if JARVIS had understood."""
     if ai_available():
-        try:
-            response = _get_client().messages.create(
-                model=settings.JARVIS_AI_COMMAND_MODEL,
-                max_tokens=4000,
-                system=[{"type": "text", "text": COMMAND_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"<context>\n{json.dumps(context, ensure_ascii=False, default=str)}\n</context>\n"
-                            f"<instruction>\n{text}\n</instruction>"
-                        ),
-                    }
-                ],
-                output_config={"effort": "low", "format": {"type": "json_schema", "schema": COMMAND_SCHEMA}},
-            )
-            ai_usage.record(user, AiUsage.Kind.COMMAND, response)
-            if response.stop_reason == "refusal":
-                log.warning("Command model declined the request; using rule parser.")
-            elif response.stop_reason == "max_tokens":
-                log.warning("Command model hit max_tokens; using rule parser.")
-            else:
-                data = json.loads(_first_text(response))
-                data["engine"] = "ai"
-                return data
-        except anthropic.RateLimitError:
-            log.warning("AI rate limited; using rule parser.")
-        except anthropic.APIStatusError as exc:
-            log.warning("AI API error %s; using rule parser.", exc.status_code)
-        except anthropic.APIConnectionError:
-            log.warning("AI unreachable; using rule parser.")
-        except (json.JSONDecodeError, StopIteration):
-            log.warning("AI returned unparseable output; using rule parser.")
+        for schema in (COMMAND_SCHEMA, _schema_without_lists()):
+            try:
+                response = _get_client().messages.create(
+                    model=settings.JARVIS_AI_COMMAND_MODEL,
+                    max_tokens=4000,
+                    system=[{"type": "text", "text": COMMAND_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": (
+                                f"<context>\n{json.dumps(context, ensure_ascii=False, default=str)}\n</context>\n"
+                                f"<instruction>\n{text}\n</instruction>"
+                            ),
+                        }
+                    ],
+                    output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+                )
+                ai_usage.record(user, AiUsage.Kind.COMMAND, response)
+                if response.stop_reason == "refusal":
+                    log.warning("Command model declined the request; using rule parser.")
+                elif response.stop_reason == "max_tokens":
+                    log.warning("Command model hit max_tokens; using rule parser.")
+                else:
+                    data = json.loads(_first_text(response))
+                    data.setdefault("more_items", [])
+                    data["engine"] = "ai"
+                    return data
+            except anthropic.RateLimitError:
+                log.warning("AI rate limited; using rule parser.")
+            except anthropic.BadRequestError as exc:
+                # The request itself was refused (a schema the API will not compile, most likely): say why, and try
+                # once more with the smaller schema.
+                log.error("AI rejected the request (400): %s", str(getattr(exc, "message", exc))[:400])
+                if schema is COMMAND_SCHEMA:
+                    continue
+            except anthropic.APIStatusError as exc:
+                log.warning("AI API error %s; using rule parser. %s", exc.status_code, str(getattr(exc, "message", ""))[:200])
+            except anthropic.APIConnectionError:
+                log.warning("AI unreachable; using rule parser.")
+            except (json.JSONDecodeError, StopIteration):
+                log.warning("AI returned unparseable output; using rule parser.")
+            break
 
     data = hinglish_parser.parse(text, staff_names=staff_names, has_pending_requests=has_pending_requests)
     data["engine"] = "rules"
+    data["ai_failed"] = ai_available()
     return data
 
 

@@ -2711,3 +2711,53 @@ class LanguageTests(BaseCase):
         self.assertTrue(nudge, "no nudge raised")
         self.assertIn("अभी शुरू नहीं हुआ", nudge[0]["spoken_text"])
         self.assertIn("is not started yet", nudge[0]["spoken_text_en"])
+
+
+class PlainReminderTests(BaseCase):
+    """A reminder is not a task card and not a meeting: it is saved at once, rings at its moment, and nobody is
+    asked whose it is. And when the AI cannot be reached, nothing is guessed."""
+
+    def interpret(self, client, text, cmd):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_md_reminder_is_saved_at_once_and_rings_at_its_moment(self):
+        had = set(PrivateTask.objects.values_list("id", flat=True))
+        d = self.interpret(self.md_client, "remind me in 2 minutes to call Aman",
+                           _cmd(intent="create_task", title="Call Aman", kind="REMINDER", due_in_minutes=2, engine="ai"))
+        self.assertEqual(d["action"], "answer")
+        self.assertFalse(d["needs_clarification"])
+        self.assertIn("remind you in 2 minutes", d["spoken_reply"])
+        task = PrivateTask.objects.exclude(id__in=had).get()
+        self.assertEqual(task.remind_before_minutes, 0)
+        self.assertAlmostEqual((task.due_at - timezone.now()).total_seconds(), 120, delta=10)
+
+    def test_pa_reminder_is_her_own_without_asking_whose(self):
+        d = self.interpret(self.pa_client, "10 minute baad yaad dilana courier bhejna hai",
+                           _cmd(intent="needs_destination", title="Send courier", kind="REMINDER", due_in_minutes=10, engine="ai"))
+        self.assertEqual(d["action"], "answer")
+        self.assertTrue(SharedTask.objects.filter(title="Send courier").exists())
+
+    def test_reminder_without_a_moment_asks_only_when(self):
+        had = PrivateTask.objects.count()
+        d = self.interpret(self.md_client, "ek reminder laga do", _cmd(intent="create_task", title="", kind="REMINDER", engine="ai"))
+        self.assertTrue(d["needs_clarification"])
+        self.assertIn("when should I remind you", d["spoken_reply"])
+        self.assertEqual(PrivateTask.objects.count(), had)
+
+    def test_ai_unreachable_guesses_nothing(self):
+        d = self.interpret(self.md_client, "kya tum mujhe apne baare mein bata doge",
+                           _cmd(intent="create_task", title="Kya tum mujhe apne baare mein bata doge", engine="rules", ai_failed=True))
+        self.assertEqual(d["action"], "answer")
+        self.assertIn("didn't catch that", d["spoken_reply"])
+        self.assertNotIn("slow", d["spoken_reply"])
+
+    def test_meeting_with_someone_else_is_never_with_the_pa(self):
+        day = (tu.today_local() + timedelta(days=1)).isoformat()
+        d = self.interpret(self.md_client, "kal 4 baje Aman ke saath meeting",
+                           _cmd(intent="meet_with_pa", title="Meeting with Aman", kind="MEETING", due_date=day, due_time="16:00",
+                                people=["Aman"], engine="ai"))
+        self.assertIn(d["action"], {"private_task", "choose_destination"})
+

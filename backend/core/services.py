@@ -189,6 +189,8 @@ def apply_schedule(task, data: dict, *, creating: bool):
     # own setting for that kind applies at reminder time, so changing the setting by voice covers every task.
     if data.get("remind_before_minutes"):
         task.remind_before_minutes = data["remind_before_minutes"]
+    elif data.get("reminder"):
+        task.remind_before_minutes = 0  # a plain reminder rings at its moment, never "30 minutes before"
 
 
 def is_overdue(task, now: datetime | None = None) -> bool:

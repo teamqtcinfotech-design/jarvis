@@ -187,7 +187,7 @@ def _mentions_pa(text: str) -> bool:
     return bool(pa and any(n and f" {n.lower()} " in low for n in (pa.display_name, pa.first_name)))
 
 
-_FOR_SIR = re.compile(r"\b(sir|md|boss|sahab|saab)\b", re.IGNORECASE)
+_FOR_SIR = re.compile(r"\b(sir|md|boss|sahab|saab|ma'?am|mam|madam|maidam|mem)\b", re.IGNORECASE)
 # Mansi speaking about herself ("mera reminder", "I have to", "mujhe yaad dilana").
 _PA_OWN = re.compile(
     r"\b(mera|meri|mere|mujhe|mujhko|maine|khud|apna|apni|apne|personal|my|mine|myself|for me|remind me|"
@@ -204,14 +204,24 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
     """Final say on where a task goes. The AI proposes; these rules keep the routing safe and predictable."""
     intent = cmd.get("intent", "unknown")
     staff_name = (cmd.get("staff_name") or "").strip()
+    # A plain reminder ("2 minute baad yaad dilana") is the speaker's own: never "whose is it?".
+    if cmd.get("kind") == "REMINDER" and intent in {"create_task", "needs_destination", "request_for_md"}:
+        return "create_task" if user.is_md else "pa_own"
     # "All staff / Accounts team" said as a person's name -> a team assignment.
     if intent == "assign_to_staff" and (staff_name.lower() in ALL_STAFF_WORDS or _TEAM_SUFFIX.search(staff_name)):
         cmd["team_name"] = "all" if staff_name.lower() in ALL_STAFF_WORDS else _TEAM_SUFFIX.sub("", staff_name).strip()
         intent = "assign_to_team"
+    # Is the PA named in THIS item? In a sentence with several items the whole sentence proves nothing about one of them.
+    one_of_many = bool(cmd.get("more_items")) or bool(cmd.get("_sub"))
+    pa_here = _mentions_pa(cmd.get("title") or "") or any(_is_pa_name(str(p)) for p in (cmd.get("people") or [])) \
+        or (not one_of_many and _mentions_pa(text))
     # A meeting WITH the PA is the MD's meeting (PA is told), never a task for the PA to do.
-    if user.is_md and cmd.get("kind") in {Kind.MEETING, Kind.CALL} and _WITH.search(text) and _mentions_pa(text) \
+    if user.is_md and cmd.get("kind") in {Kind.MEETING, Kind.CALL} and _WITH.search(text) and pa_here \
             and intent in {"assign_to_pa", "assign_to_staff", "create_task", "needs_destination"}:
         intent = "meet_with_pa"
+    # And a meeting with someone else is never "with the PA", whatever the model said.
+    if user.is_md and intent == "meet_with_pa" and not pa_here:
+        intent = "create_task"
     # "Mansi ko bolo…" / "PA ko bolo…" from the MD = a direct PA task (inside JARVIS), not TaskPanel.
     if user.is_md and intent == "assign_to_staff" and _is_pa_name(staff_name):
         intent = "assign_to_pa"
@@ -223,6 +233,10 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
         # Whose is it? For Sir, her own, or the team: it is never assumed. The model judges the meaning
         # ("Sir ki cab book karni hai" is HER job); the words must back it up, otherwise JARVIS asks.
         sir_at, own_at = _last_cue(_FOR_SIR, text), _last_cue(_PA_OWN, text)
+        md_user = services.get_md()
+        md_name = (md_user.first_name or "").strip().lower() if md_user else ""
+        if md_name:
+            sir_at = max(sir_at, f" {text.lower()} ".rfind(f" {md_name} "))
         for_sir, own = sir_at >= 0, own_at >= 0
         if intent == "meet_with_pa":
             intent = "request_for_md"
@@ -747,7 +761,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     staff_names = [s["name"] for s in ctx["staff"]]
     pending = ctx.get("pending_requests", [])
     cmd = ai_brain.interpret(model_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
-    if awaiting and cmd.get("engine") == "rules" and not hinglish_parser.yes_no(text):
+    ai_failed = bool(cmd.get("ai_failed"))
+    if awaiting and cmd.get("engine") == "rules" and not ai_failed and not hinglish_parser.yes_no(text):
         # Offline parser has no context: re-read the change together with the original sentence.
         cmd = ai_brain.interpret(full_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
     if awaiting and cmd.get("engine") == "rules":
@@ -755,6 +770,11 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         answer = hinglish_parser.yes_no(text)
         if answer:
             cmd["intent"] = "confirm_pending" if answer == "yes" else "cancel_pending"
+    if ai_failed and cmd.get("intent") not in {"confirm_pending", "cancel_pending"}:
+        # The AI is switched on but could not be reached: a rough reading must never become a task, a title or an
+        # answer. JARVIS says it did not get that, and nothing is saved.
+        cmd = {**cmd, "intent": "unknown", "title": "", "spoken_reply": "", "spoken_reply_hi": "", "needs_clarification": False,
+               "clarification_question": "", "more_items": [], "kind": "TASK"}
     if cmd.get("intent") in {"confirm_pending", "cancel_pending"} and not awaiting:
         cmd["intent"] = "unknown"  # nothing is waiting to be confirmed
     if choices and choices.get("items") and cmd.get("target_refs") and cmd.get("intent") in {"unknown", "query", "small_talk"}:
@@ -778,19 +798,23 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     # item is built by exactly the same rules (where it goes, is the person known, does it clash) and rides along on
     # the same card, so one yes saves them all and nothing is dropped.
     extras = [it for it in (cmd.get("more_items") or [])[:4] if isinstance(it, dict)]
-    if extras and draft["action"] in TASK_ACTIONS | {"choose_destination"}:
+    if extras and (draft["action"] in TASK_ACTIONS | {"choose_destination"} or draft.get("reminder_saved")):
         subs = []
         for it in extras:
-            sub_cmd = {**_EMPTY_ITEM, **{k: v for k, v in it.items() if k in _ITEM_KEYS}, "engine": cmd.get("engine", "rules"),
+            sub_cmd = {**_EMPTY_ITEM, **{k: v for k, v in it.items() if k in _ITEM_KEYS}, "_sub": True, "engine": cmd.get("engine", "rules"),
                        "reply_language": reply_language}
             sub_intent = _route_intent(user, sub_cmd, full_text)
             if sub_intent not in _TASK_INTENTS:
                 continue
             sub = _draft_for(user, sub_cmd, sub_intent, full_text, reply_language, ctx, on_screen, None, history, include_private, pending)
             if sub["action"] in TASK_ACTIONS | {"choose_destination"}:
-                subs.append({k: v for k, v in sub.items() if k not in {"categories", "staff_candidates", "target_candidates", "view"}})
-        if subs:
-            _combine_batch(draft, subs, address, address_hi, reply_language)
+                subs.append(sub)
+        if subs and draft.get("reminder_saved"):
+            # The reminder is already set; the rest becomes the card.
+            draft, subs = subs[0], subs[1:]
+        slim = [{k: v for k, v in sub.items() if k not in {"categories", "staff_candidates", "target_candidates", "view"}} for sub in subs]
+        if slim and draft["action"] in TASK_ACTIONS | {"choose_destination"}:
+            _combine_batch(draft, slim, address, address_hi, reply_language)
     return draft
 
 
@@ -870,6 +894,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         due_date, due_time = exact_at.date().isoformat(), exact_at.strftime("%H:%M")
     if due_time and not due_date:
         due_date = tu.today_local().isoformat()
+    is_reminder = cmd.get("kind") == "REMINDER" and intent in {"create_task", "pa_own"}
     kind = cmd.get("kind") if cmd.get("kind") in _KINDS else Kind.TASK
     priority = cmd.get("priority") if cmd.get("priority") in _PRIORITIES else Priority.NORMAL
 
@@ -1212,8 +1237,12 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                      f"माफ़ कीजिए {address_hi}, समझ नहीं आया। फिर से बोलिए या टाइप कर दीजिए।")
 
     # Does JARVIS know the people named? Never book something with a name nobody recognises.
-    if draft["action"] in TASK_ACTIONS or draft["action"] == "choose_destination":
+    if (draft["action"] in TASK_ACTIONS or draft["action"] == "choose_destination") and not is_reminder:
         _check_people(user, cmd, draft, address, history)
+    if is_reminder:
+        draft["title"] = draft["title"] or "Reminder"
+        if not (draft["due_date"] and draft["due_time"]) and not draft["needs_clarification"]:
+            _ask(draft, f"{address}, when should I remind you?", f"{address_hi}, कब याद दिलाऊँ?")
 
     if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"]:
         when = tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
@@ -1233,8 +1262,28 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         if draft["action"] == "pa_meeting":
             # Always state clearly that the PA will be informed.
             when = f" {draft['due_label']}" if draft["due_label"] else ""
-            _say(draft, f"{address}, meeting with {pa_name}{when}. I'll inform {pa_name} too. Shall I save it?",
-                 f"{address_hi}, {pa_name} के साथ मीटिंग" + (f" {due_hi}" if due_hi else "") + f"। {pa_name} को भी बता दूँगा। सेव कर दूँ?")
+            more_en = more_hi = ""
+            if draft["due_date"] and draft["due_time"]:
+                prefs = services.get_prefs(user)
+                mins = draft["duration_minutes"] or int(prefs.get("meetingMinutes") or services.DEFAULT_MEETING_MINUTES)
+                lead = draft["remind_before_minutes"] or services.default_remind_before(Kind.MEETING, priority, prefs)
+                more_en, more_hi = f", {tu.minutes_phrase(mins)}", f", {tu.minutes_phrase_hi(mins)} की"
+                if lead and (not exact_at or due_in > lead):
+                    more_en += f". I'll remind you {tu.minutes_phrase(lead)} before"
+                    more_hi += f"। {tu.minutes_phrase_hi(lead)} पहले याद दिला दूँगा"
+            _say(draft, f"{address}, meeting with {pa_name}{when}{more_en}. I'll inform {pa_name} too. Shall I save it?",
+                 f"{address_hi}, {pa_name} के साथ मीटिंग" + (f" {due_hi}" if due_hi else "") + f"{more_hi}। {pa_name} को भी बता दूँगा। सेव कर दूँ?")
+        elif draft["kind"] == Kind.MEETING and draft["action"] in {"private_task", "pa_self_task"} and draft["due_date"] \
+                and draft["due_time"] and not is_reminder:
+            # A meeting: he is told how long it is taken to be and how early he will be reminded, so he can change either.
+            prefs = services.get_prefs(user)
+            mins = draft["duration_minutes"] or int(prefs.get("meetingMinutes") or services.DEFAULT_MEETING_MINUTES)
+            lead = draft["remind_before_minutes"] or services.default_remind_before(Kind.MEETING, priority, prefs)
+            told = lead and (not exact_at or due_in > lead)
+            lead_en = f" I'll remind you {tu.minutes_phrase(lead)} before." if told else ""
+            lead_hi = f" {tu.minutes_phrase_hi(lead)} पहले याद दिला दूँगा।" if told else ""
+            _say(draft, f"{address}, {draft['title']}, {draft['due_label']}, {tu.minutes_phrase(mins)}.{lead_en} Shall I save it?",
+                 f"{address_hi}, {draft['title']}, {due_hi}, {tu.minutes_phrase_hi(mins)} की।{lead_hi} सेव कर दूँ?")
         elif draft["action"] != "team_delegation" and (not draft["spoken_reply"] or draft["engine"] == "rules"):
             what = {
                 "private_task": "Personal task",
@@ -1259,25 +1308,31 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         if door and draft.get("reply_en") and draft["spoken_reply"] == draft["reply_en"]:
             _say(draft, _insert_notes(draft["reply_en"], [door[0]]), _insert_notes(draft["reply_hi"], [door[1]], hindi=True) if draft["reply_hi"] else "")
 
-    # The AI could not be reached and the rule parser read the sentence instead: say so once in a while, so a
-    # rough reading is never mistaken for JARVIS understanding.
-    if draft["engine"] == "rules" and ai_brain.ai_available() and draft["action"] in TASK_ACTIONS and not draft["needs_clarification"]:
-        last = str(services.get_prefs(user).get("aiSlowToldAt") or "")
-        told_recently = False
-        if last:
-            try:
-                told_recently = tu.now_local() - tu.to_local(datetime.fromisoformat(last)) < timedelta(minutes=10)
-            except ValueError:
-                told_recently = False
-        draft["warnings"].append("JARVIS's brain is slow right now; this is a rough reading, please check it.")
-        if not told_recently and draft.get("reply_en") and draft["spoken_reply"] == draft["reply_en"]:
-            services.set_pref_quiet(user, "aiSlowToldAt", tu.now_local().isoformat())
-            _say(draft, _insert_notes(draft["reply_en"], ["My brain is slow right now, so I read this myself; please check it."]),
-                 _insert_notes(draft["reply_hi"], ["मेरा दिमाग़ अभी धीमा है, इसलिए मैंने खुद पढ़ा है; ज़रा देख लीजिए।"], hindi=True) if draft["reply_hi"] else "")
-
     # Does it fit the diary? (clash, free slot, a very full day) — may replace the question above.
-    if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"]:
+    if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"] and not is_reminder:
         _advise_schedule(user, draft, address)
+
+    if is_reminder and draft["action"] in {"private_task", "pa_self_task"} and not draft["needs_clarification"]:
+        when = exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
+        data = {"title": draft["title"], "notes": draft["notes"], "kind": Kind.TASK, "priority": priority, "due_at": when,
+                "due_date": tu.to_local(when).date(), "due_time": tu.to_local(when).time(), "announcement": "", "reminder": True}
+        try:
+            if draft["action"] == "private_task":
+                services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
+            else:
+                services.create_pa_self_task(user, {**data, "description": full_text})
+            draft["action"], draft["reminder_saved"] = "answer", True
+            thing = "" if draft["title"] == "Reminder" else f": {draft['title']}"
+            if exact_at:
+                _say(draft, f"Okay {address}, I'll remind you in {tu.minutes_phrase(due_in)}{thing}.",
+                     f"ठीक है {address_hi}, {tu.minutes_phrase_hi(due_in)} में याद दिला दूँगा{thing}।")
+            else:
+                _say(draft, f"Okay {address}, I'll remind you {_due_label(draft['due_date'], draft['due_time'])}{thing}.",
+                     f"ठीक है {address_hi}, {_due_label_hi(draft['due_date'], draft['due_time'])} याद दिला दूँगा{thing}।")
+        except services.ServiceError as exc:
+            draft["action"] = "answer"
+            _say(draft, f"Sorry {address}, I could not set that reminder: {exc.message}",
+                 f"माफ़ कीजिए {address_hi}, रिमाइंडर नहीं लग पाया।")
 
     if draft["needs_clarification"] and draft["question"]:
         draft["spoken_reply"] = draft["question"]

@@ -135,11 +135,16 @@ class WakeService : Service() {
         Log.i(TAG, "Hey JARVIS switched off; still watching for reminders and messages")
     }
 
-    private fun openRecorder(): AudioRecord? {
+    /**
+     * [forTalk]: the microphone as a phone call uses it, so the phone's echo canceller takes JARVIS's own voice out
+     * of what is heard and only the person in the room is left (barge-in). Otherwise the plain recognition microphone.
+     */
+    private fun openRecorder(forTalk: Boolean = false): AudioRecord? {
         val minBuf = AudioRecord.getMinBufferSize(WakeDetector.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         return try {
             val record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION, WakeDetector.SAMPLE_RATE,
+                if (forTalk) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                WakeDetector.SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, WakeDetector.CHUNK * 8),
             )
             if (record.state != AudioRecord.STATE_INITIALIZED) {
@@ -192,6 +197,9 @@ class WakeService : Service() {
             var bargeRun = 0              // slices in a row above the bar
             var bargeRunPeak = 0.0        // the loudest of them
             var bargeLogged = false
+            var recordForTalk = false     // the open microphone is the echo-cancelled one
+            var echo: android.media.audiofx.AcousticEchoCanceler? = null
+            var noise: android.media.audiofx.NoiseSuppressor? = null
 
             fun closeRecorder() {
                 try {
@@ -202,6 +210,16 @@ class WakeService : Service() {
                     record?.release()
                 } catch (_: Throwable) {
                 }
+                try {
+                    echo?.release()
+                } catch (_: Throwable) {
+                }
+                try {
+                    noise?.release()
+                } catch (_: Throwable) {
+                }
+                echo = null
+                noise = null
                 record = null
                 recording = false
                 WakeBus.micHeld = false
@@ -230,12 +248,29 @@ class WakeService : Service() {
                         reopenMic = false
                         closeRecorder()
                     }
+                    // Talking and not talking use different microphones (echo-cancelled / plain): switch when it changes.
+                    if (record != null && recordForTalk != talking) closeRecorder()
                     if (record == null) {
-                        Thread.sleep(120)  // give whoever had the microphone a moment to let go
-                        record = openRecorder()
+                        if (!talking) Thread.sleep(120)  // give whoever had the microphone a moment to let go
+                        record = openRecorder(talking)
                         if (record == null) {
-                            Thread.sleep(800)
+                            Thread.sleep(if (talking) 200 else 800)
                             continue
+                        }
+                        recordForTalk = talking
+                        if (talking) {
+                            val session = record!!.audioSessionId
+                            try {
+                                if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                                    echo = android.media.audiofx.AcousticEchoCanceler.create(session)?.also { it.enabled = true }
+                                }
+                                if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                                    noise = android.media.audiofx.NoiseSuppressor.create(session)?.also { it.enabled = true }
+                                }
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "echo canceller not available: ${e.message}")
+                            }
+                            Log.i(TAG, "barge-in: echo-cancelled microphone open (canceller ${if (echo?.enabled == true) "on" else "off"})")
                         }
                     }
                     val rec = record ?: continue
@@ -328,10 +363,15 @@ class WakeService : Service() {
                             if (rms > bargeBase) bargeBase = rms
                             bargeBaseSlices += 1
                         } else if (bargeBaseSlices > 0) {
+                            val tooLoud = bargeBase > BARGE_MAX_OWN
                             if (!bargeLogged) {
                                 bargeLogged = true
-                                Log.i(TAG, String.format("barge-in: own voice at the microphone %.0f; listening over it", bargeBase))
+                                Log.i(TAG, String.format("barge-in: own voice at the microphone %.0f; %s", bargeBase,
+                                    if (tooLoud) "too loud to tell him apart, not judging this sentence" else "listening over it"))
                             }
+                            // Its own voice still reaches the microphone loudly (the canceller is not working on this
+                            // sentence): a louder sound proves nothing, so nothing is judged rather than cut itself off.
+                            if (tooLoud) continue
                             val bar = maxOf(bargeBase * BARGE_OVER_BASE, BARGE_MIN_LEVEL)
                             if (rms > bar) {
                                 bargeRun += 1
@@ -558,9 +598,10 @@ class WakeService : Service() {
         const val EXTRA_OPEN_KEY = "jarvis_open_key"
         // Barge-in: measure the phone's own voice for this long, then a sound this much louder, for this many
         // 80 ms slices in a row (and at least a speaking level), means he is talking over JARVIS.
-        private const val BARGE_BASELINE_MS = 600L
-        private const val BARGE_OVER_BASE = 2.2
-        private const val BARGE_MIN_LEVEL = 450.0
+        private const val BARGE_BASELINE_MS = 900L
+        private const val BARGE_OVER_BASE = 2.5
+        private const val BARGE_MIN_LEVEL = 700.0
+        private const val BARGE_MAX_OWN = 1400.0    // its own voice louder than this at the microphone: do not judge
         private const val BARGE_SLICES = 4
         private const val THRESHOLD = 0.7f          // one slice this sure is enough
         private const val PAIR_THRESHOLD = 0.45f    // or two slices in a row this sure

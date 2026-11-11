@@ -44,6 +44,12 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const errored = useRef(false);
   const stateRef = useRef<CaptureState>('idle');
   const probing = useRef<Probe | null>(null);
+  // The phone's speech service sometimes drops a round the moment it starts (it had not finished closing the last
+  // one): that is not his silence and not an error to show. The round is started again, quietly, up to twice.
+  const retries = useRef(0);
+  const stoppedOnPurpose = useRef(false);
+  const lastQuick = useRef(false);
+  const startRef = useRef<(opts?: { quick?: boolean; retry?: boolean }) => void>(() => undefined);
   // How loud he is speaking right now (0..1), for the orb. Driven by the recogniser's volume events.
   const [level] = useState(() => new Animated.Value(0));
   const setLevel = useCallback(
@@ -70,6 +76,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     probing.current = null;
     clearTimeout(p.timer);
     try {
+      stoppedOnPurpose.current = true;
       ExpoSpeechRecognitionModule.abort();
     } catch {
       // nothing to abort
@@ -116,6 +123,15 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       return;
     }
     clearWatchdog();
+    const dropped = (event.error === 'aborted' && !stoppedOnPurpose.current) || event.error === 'client' || event.error === 'busy';
+    if (dropped && retries.current < 2 && stateRef.current === 'listening') {
+      retries.current += 1;
+      errored.current = true; // the "end" of the dropped round is not his silence
+      setTimeout(() => {
+        if (stateRef.current === 'listening' && !stoppedOnPurpose.current) startRef.current({ quick: lastQuick.current, retry: true });
+      }, 500);
+      return;
+    }
     if (event.error === 'aborted') {
       setState('idle');
       return;
@@ -125,8 +141,17 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     handlersRef.current.onError?.(ERROR_TEXT[event.error] ?? event.message ?? 'Speech recognition failed.', event.error);
   });
 
-  const start = useCallback(async () => {
+  /**
+   * quick: JARVIS has just asked something with a short answer (a card's "save?", "which one?"): the round may end
+   * soon after a word or two. Otherwise he gets a long moment to start speaking before it counts as silence.
+   */
+  const start = useCallback(async (opts: { quick?: boolean; retry?: boolean } = {}) => {
+    const quick = opts?.quick === true;
+    if (opts?.retry !== true) retries.current = 0;
+    lastQuick.current = quick;
+    stoppedOnPurpose.current = false;
     if (probing.current) finishProbe(false); // the user comes first
+    stoppedOnPurpose.current = false;
     stopSpeaking();
     setPartial('');
     latest.current = '';
@@ -150,6 +175,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       if (stateRef.current !== 'listening') return;
       errored.current = true;
       try {
+        stoppedOnPurpose.current = true;
         ExpoSpeechRecognitionModule.abort();
       } catch {
         // ignore
@@ -171,11 +197,12 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       contextualStrings: handlersRef.current.hints?.length ? handlersRef.current.hints.slice(0, 60) : undefined,
       volumeChangeEventOptions: { enabled: true, intervalMillis: 120 },
       androidIntentOptions: {
-        // A natural pause mid-sentence is not the end of it; but a short answer ("haan") must not be made to
-        // wait out a long minimum either, so the minimum is only what a word or two takes.
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
-        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
-        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 2000,
+        // A natural pause mid-sentence is not the end of it. The minimum is how long he has to START speaking
+        // before the round ends as silence: long when he was just called or is giving an instruction (he may be
+        // thinking), short when JARVIS asked a yes / no, so "haan" is not made to wait.
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1400,
+        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1400,
+        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: quick ? 3000 : 7000,
         ...(canSwitch
           ? {
               EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced' as const,
@@ -186,6 +213,9 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       },
     });
   }, [lang]);
+  useEffect(() => {
+    startRef.current = start;
+  }, [start]);
 
   const stop = useCallback(() => ExpoSpeechRecognitionModule.stop(), []);
   const cancel = useCallback(() => {
@@ -195,6 +225,7 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     }
     clearWatchdog();
     errored.current = true; // suppress the "end" callback after an abort
+    stoppedOnPurpose.current = true;
     ExpoSpeechRecognitionModule.abort();
     setState('idle');
   }, []);
