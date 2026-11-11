@@ -973,7 +973,8 @@ class MeetingOverrideTests(BaseCase):
     def test_switching_meeting_mode_off_during_a_diary_meeting_sticks_until_it_ends(self):
         # The fixture meeting (now + 1 h, 30 min) is in the diary; make one that is running right now too.
         now = tu.now_local()
-        start = (now - timedelta(minutes=10)).replace(second=0, microsecond=0)
+        # Started 50 minutes ago, so it ends well before the fixture meeting even late in the evening.
+        start = (now - timedelta(minutes=50)).replace(second=0, microsecond=0)
         running = services.create_private_task(self.md, {"title": "Running meeting", "kind": Kind.MEETING, "priority": Priority.NORMAL,
                                                          "due_date": start.date(), "due_time": start.time(), "duration_minutes": 60})
         windows = self.md_client.get("/api/v1/reminders/").json()["busy_windows"]
