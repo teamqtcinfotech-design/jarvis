@@ -27,9 +27,15 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
     private val prefs = WakeBus.prefs(context)
     private val DEVANAGARI = Regex("[\\u0900-\\u097F]")
 
-    /** One thing to announce: its server key (for "told"), what to show and what to say. */
+    /**
+     * One thing to announce: its server key (for "told"), what to show and what to say, and the question JARVIS
+     * asks right after it (a contract from the server: kind, en, hi), if any.
+     */
     private class Item(val key: String, val reminderKey: String?, val alertId: String?, val title: String,
-                       val spoken: String, val isPrivate: Boolean, val urgent: Boolean)
+                       val spoken: String, val isPrivate: Boolean, val urgent: Boolean, val question: JSONObject? = null)
+
+    /** Set by the service: after a spoken item with a question, listen for the answer (the voice-only conversation). */
+    @Volatile var onAsk: ((JSONObject) -> Unit)? = null
 
     init {
         TtsEngine.init(context)
@@ -44,6 +50,7 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         val spoken = prefs.getStringSet(WakeBus.KEY_SPOKEN, emptySet())?.toMutableSet() ?: mutableSetOf()
         val due = ArrayList<Item>()
         val quiet = ArrayList<Item>()   // told to the server, never announced (small news, or told already)
+        val missed = ArrayList<Item>()  // its time passed while the phone was off: shown, not spoken, kept for the app
 
         val list = reminders.optJSONArray("reminders")
         if (list != null) {
@@ -56,13 +63,16 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
                 val age = nowSec - fireAtSec
                 // Due within the hour: fetch its voice now, so it speaks instantly (and even offline) at its time.
                 if (age < 0 && age > -3600) soon.add(TtsEngine.forSpeech(r.optString("spoken")))  // as it will be spoken
-                if (age < 0 || age > 180) continue // not due yet, or too old (the app will show it as held)
+                if (age < 0) continue             // not due yet
                 if (!r.isNull("told_at")) {       // the app said it already: remember, do not repeat
                     spoken.add(key)
                     continue
                 }
-                due.add(Item(key, key, null, r.optString("title"), r.optString("spoken"), r.optBoolean("is_private"),
-                             r.optString("priority") == "URGENT"))
+                val item = Item(key, key, null, r.optString("title"), r.optString("spoken"), r.optBoolean("is_private"),
+                                r.optString("priority") == "URGENT", r.optJSONObject("question"))
+                // Older than a few minutes: the phone was off (or asleep) at its time. A notification still goes up,
+                // and it is NOT reported as told, so the app offers it among the held ones when it is next opened.
+                if (age > 180) missed.add(item) else due.add(item)
             }
             if (soon.isNotEmpty()) GrokVoice.prefetch(context, soon)
         }
@@ -71,17 +81,23 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
             for (i in 0 until results.length()) {
                 val a = results.getJSONObject(i)
                 val id = a.optString("id")
-                val key = "alert:$id"
+                val key = a.optString("announce_key").ifEmpty { "alert:$id" }  // a snoozed alert comes back as new
                 if (id.isEmpty() || key in spoken) continue
                 if (!a.optBoolean("fresh", true)) {  // told already, or old news: it stays in the lists only
                     spoken.add(key)
                     continue
                 }
-                val item = Item(key, null, id, a.optString("title"), a.optString("spoken_text"), false, a.optString("priority") == "URGENT")
+                val item = Item(key, null, id, a.optString("title"), a.optString("spoken_text"), false,
+                                a.optString("priority") == "URGENT", a.optJSONObject("question"))
                 if (a.optString("priority") == "LOW") quiet.add(item) else due.add(item)
             }
         }
         if (due.isNotEmpty()) announce(due)
+        for (item in missed) {
+            notifier.show(item.key, if (item.isPrivate) "JARVIS" else "JARVIS · Missed reminder",
+                if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent, silentSound())
+            spoken.add(item.key)
+        }
         for (item in due + quiet) spoken.add(item.key)
         if (due.isNotEmpty() || quiet.isNotEmpty()) tell(due + quiet)
         if (spoken.isNotEmpty()) {
@@ -92,15 +108,26 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
     }
 
     /** A live push (see PushService): show and speak it now, and remember it so the next check does not repeat it. */
-    fun deliverPush(key: String, title: String, spoken: String, urgent: Boolean, priority: String = "NORMAL") {
+    fun deliverPush(key: String, title: String, spoken: String, urgent: Boolean, priority: String = "NORMAL",
+                    question: JSONObject? = null) {
         val spokenKeys = prefs.getStringSet(WakeBus.KEY_SPOKEN, emptySet())?.toMutableSet() ?: mutableSetOf()
         if (key in spokenKeys) return
-        val item = Item(key, null, key.removePrefix("alert:"), title, spoken, false, urgent)
+        val item = Item(key, null, key.removePrefix("alert:").substringBefore(":s"), title, spoken, false, urgent, question)
         if (!WakeBus.inConversation && priority != "LOW") announce(listOf(item))
         spokenKeys.add(key)
         prefs.edit().putStringSet(WakeBus.KEY_SPOKEN, spokenKeys).apply()
         tell(listOf(item))
     }
+
+    private fun silentSound(): Boolean = prefs.getString(WakeBus.KEY_REMINDER_SOUND, "default") == "silent"
+
+    /** What the voice-only conversation needs to take the answer to this item's question. */
+    private fun aboutOf(item: Item): JSONObject = JSONObject()
+        .put("kind", if (item.reminderKey != null) "reminder" else "alert")
+        .put("key", item.reminderKey ?: "")
+        .put("id", item.alertId ?: "")
+        .put("title", item.title)
+        .put("question", item.question?.optString("en") ?: "")
 
     /** Tell the server these were spoken or shown, so the app (or this part later) never repeats them. */
     private fun tell(items: List<Item>) {
@@ -137,9 +164,10 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         val unlocked = pm.isInteractive && !km.isKeyguardLocked
         val speakLocked = prefs.getBoolean(WakeBus.KEY_SPEAK_LOCKED, false)
         val lines = ArrayList<String>()
+        var ask: Item? = null  // the one item whose question JARVIS asks aloud, then listens for the answer
         for (item in items) {
             notifier.show(item.key, if (item.isPrivate) "JARVIS" else "JARVIS · Reminder",
-                if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent)
+                if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent, silentSound())
             val generic = if (DEVANAGARI.containsMatchIn(item.spoken)) "$addressHi, आपका एक प्राइवेट रिमाइंडर है।"
                           else "$address, you have a private reminder."
             val line = when {
@@ -148,9 +176,32 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
                 else -> ""
             }
             if (line.isNotBlank()) lines.add(line)
+            // A question is asked only when it is him for sure (unlocked), one at a time, and never for a
+            // private item spoken as "a private reminder".
+            if (unlocked && ask == null && item.question != null && line == item.spoken) ask = item
         }
         if (lines.isEmpty()) return
-        speak(if (lines.size == 1) lines[0] else combined(lines, address, addressHi))
+        var text = if (lines.size == 1) lines[0] else combined(lines, address, addressHi)
+        val asked = ask
+        if (asked != null && lines.size == 1) {
+            val q = asked.question!!
+            val hindi = DEVANAGARI.containsMatchIn(text)
+            val question = if (hindi) q.optString("hi") else q.optString("en")
+            if (question.isNotBlank()) text = "$text $question"
+        }
+        val listener = onAsk
+        if (asked != null && listener != null && lines.size == 1 && ConversationLoop.available(context)) {
+            speakThen(text) { listener(aboutOf(asked)) }
+        } else {
+            speak(text)
+        }
+    }
+
+    /** Speak, then run [onDone] once the voice has finished (or failed), so listening never starts over the voice. */
+    private fun speakThen(text: String, onDone: () -> Unit) {
+        if (text.isBlank() || WakeBus.appInForeground) return
+        val lang = if (DEVANAGARI.containsMatchIn(text)) "hi-IN" else (prefs.getString(WakeBus.KEY_VOICE_ACCENT, "hi-IN") ?: "hi-IN")
+        TtsEngine.speakThen(TtsEngine.Request("bg-" + System.nanoTime(), text, null, lang, 0.95f)) { onDone() }
     }
 
     /** "Sir, 3 things. Your meeting starts in 15 minutes. Mansi has completed: Book flights. …" (or the Hindi twin). */

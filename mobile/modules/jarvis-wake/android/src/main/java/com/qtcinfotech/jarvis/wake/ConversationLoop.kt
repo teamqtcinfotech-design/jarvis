@@ -62,6 +62,25 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         }
     }
 
+    /**
+     * A reminder or an alert was just spoken with its question ("Done, or remind you later?"): no greeting, just
+     * listen for the answer. The server is told what was asked, so "ho gaya" / "baad mein" / "haan" land on it.
+     */
+    fun startAbout(about: JSONObject) {
+        if (active) return
+        active = true
+        WakeBus.inConversation = true
+        silenceRounds = 0
+        retries = 0
+        patient = true
+        heardAnything = true  // a quiet room after a question is "no answer", not a false wake
+        overlay.show(about.optString("question").ifEmpty { "…" }, "listening")
+        main.post {
+            ensureRecognizer()
+            send("", "ask", about)
+        }
+    }
+
     fun end() {
         if (!active) return
         active = false
@@ -89,7 +108,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
     }
 
     // ------------------------------------------------------------------ server
-    private fun send(text: String, event: String = "") {
+    private fun send(text: String, event: String = "", about: JSONObject? = null) {
         if (!active) return
         notifier.showConversation(if (text.isEmpty()) "Listening…" else "You: $text")
         overlay.update(if (text.isEmpty()) null else "“$text”", "thinking")
@@ -101,6 +120,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
                 .put("event", event)
                 .put("locked", locked)
                 .put("private_ok", !locked || prefs.getBoolean(WakeBus.KEY_SPEAK_LOCKED, false))
+            if (about != null) body.put("about", about)
             val resp = Api.post(context, "/assistant/turn/", body)
             main.post { handle(resp) }
         }
@@ -299,7 +319,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         private const val LISTEN_TIMEOUT_MS = 15_000L   // nothing heard and no word from the speech service
         private const val SPEECH_TIMEOUT_MS = 30_000L   // he started talking: the longest one sentence may take
         /** Replies after which nothing is being asked of him. */
-        private val RESTFUL = setOf("answer", "saved", "setting_applied", "dismiss", "briefing", "read_missed")
+        private val RESTFUL = setOf("answer", "saved", "setting_applied", "dismiss", "briefing", "read_missed", "snoozed")
         /** Words the room says on its own; never an instruction when they are all that was heard after a wake. */
         private val FILLER = setOf("ok", "okay", "k", "haan", "ha", "han", "hmm", "hm", "mm", "yes", "no", "nah", "hello", "hi", "hey",
             "achha", "accha", "acha", "theek", "thik", "hai", "ji", "kya", "what", "oh", "ah", "um", "uh", "yeah", "yep", "huh", "so",

@@ -24,7 +24,7 @@ import { PresenceState, usePresence } from './presence';
 import { useSession } from './session';
 import { useDashboard } from './useDashboard';
 import { say } from './speech';
-import type { Priority, Reminder, ServerAlert } from './types';
+import type { AlertQuestion, Priority, Reminder, ServerAlert } from './types';
 import { onPush, wakeConsumeOpenKey, wakeSupported } from './wake';
 
 Notifications.setNotificationHandler({
@@ -60,6 +60,8 @@ export interface EngineItem {
   fireAt: number;
   followups: number;
   concealed?: boolean;
+  /** The question JARVIS asks after it, from the server (null = none; undefined = the server did not say). */
+  question?: AlertQuestion | null;
   mode?: 'loud' | 'silent';
   /** Why it was kept back instead of spoken: the offer later says "during your meeting" rather than "while you were away". */
   heldFor?: 'missed' | 'away' | 'meeting' | 'facedown' | 'quiet';
@@ -82,30 +84,31 @@ export interface HeldOffer {
   textHi: string; // Devanagari, for the Hindi voice
 }
 
-/** The one question JARVIS asks aloud right after an alert, and listens for the answer to. */
-export interface AlertQuestion {
-  kind: 'accept' | 'done' | 'seen';
-  /** Appended to the spoken line; empty when the line itself already asks (a check-in). */
-  en: string;
-  hi: string;
-}
+export type { AlertQuestion } from './types';
 
 /**
- * Which alerts get a question (kept tight, so JARVIS never nags): a request to Sir ("Accept it?"), a task or
- * meeting Sir gave Mansi ("Shall I tell Sir you've seen it?"), a reminder at its time ("Done, or remind you
- * later?"). Decisions, staff news and "starts in 15 minutes" are spoken only.
+ * The one question JARVIS asks aloud right after an alert or reminder, and listens for the answer to. The server
+ * writes it with the item (a request to Sir: "Accept it?"; a task Sir gave Mansi: "Shall I tell Sir you've seen
+ * it?"; a reminder at its time: "Done, or remind you later?"; a too-full morning: "Shall I move X to tomorrow?").
+ * A private reminder spoken only as "a private reminder" asks nothing. The fallback below is for a server that
+ * did not send one (an older build).
  */
 export function questionFor(item: EngineItem, isMD: boolean, md: { en: string; hi: string } = { en: 'Sir', hi: 'सर' }): AlertQuestion | null {
+  if (item.concealed) return null;
+  if (item.question !== undefined) return item.question;
   if (item.alertKind === 'NEW_REQUEST' && isMD && item.requestId) return { kind: 'accept', en: 'Accept it?', hi: 'मंज़ूर करूँ?' };
   if (item.alertKind === 'TASK_ASSIGNED' && !isMD && item.alertId) {
     return { kind: 'seen', en: `Shall I tell ${md.en} you've seen it?`, hi: `${md.hi} को बता दूँ कि आपने देख लिया?` };
   }
-  if (item.source === 'reminder' && item.ref && item.kind !== 'MEETING' && !item.concealed) {
+  if (item.source === 'reminder' && item.ref && item.kind !== 'MEETING') {
     if (item.label === 'checkin') return { kind: 'done', en: '', hi: '' }; // its own line already asks
     if (item.label === 'due' || item.label === 'day') return { kind: 'done', en: 'Done, or remind you later?', hi: 'हो गया, या बाद में याद दिलाऊँ?' };
   }
   return null;
 }
+
+/** The key an alert is announced under: a snoozed alert that comes back is a new announcement, not a repeat. */
+const alertKey = (a: ServerAlert) => a.announce_key || `alert:${a.id}`;
 
 /** The conversation takes an alert over: speaks it, asks its question and listens. Returns true when it did. */
 export type AlertPresenter = (item: EngineItem, spoken: string) => boolean;
@@ -134,7 +137,8 @@ interface EngineValue {
   setHeldVisible: (v: boolean) => void;
   acknowledge: (item: EngineItem) => Promise<void>;
   acknowledgeAllHeld: () => Promise<void>;
-  snooze: (item: EngineItem, minutes?: number) => void;
+  /** "Later": in `minutes`, at `until` (ISO), or the person's usual snooze. Resolves to when it comes back. */
+  snooze: (item: EngineItem, minutes?: number, until?: string) => Promise<{ until: string; label: string; labelHi: string } | null>;
   complete: (item: EngineItem) => Promise<void>;
   decideRequest: (item: EngineItem, accept: boolean) => Promise<void>;
   reveal: () => void;
@@ -189,12 +193,13 @@ function fromReminder(r: Reminder): EngineItem {
     ref: r.ref,
     fireAt: Date.parse(r.fire_at),
     followups: 0,
+    question: r.question,
   };
 }
 
 function fromAlert(a: ServerAlert): EngineItem {
   return {
-    key: `alert:${a.id}`,
+    key: alertKey(a),
     source: 'server',
     priority: a.priority,
     title: a.title,
@@ -204,8 +209,9 @@ function fromAlert(a: ServerAlert): EngineItem {
     alertId: a.id,
     alertKind: a.kind,
     requestId: a.ref_type === 'request' ? a.ref_id : undefined,
-    fireAt: Date.parse(a.created_at),
+    fireAt: Date.parse(a.snoozed_until && Date.parse(a.snoozed_until) > Date.parse(a.created_at) ? a.snoozed_until : a.created_at),
     followups: 0,
+    question: a.question,
   };
 }
 
@@ -613,7 +619,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       due.push(fromReminder(r));
     }
     for (const a of alertsRef.current) {
-      const key = `alert:${a.id}`;
+      const key = alertKey(a);
       if (handled.current.has(key)) continue;
       if (!a.fresh) {
         handled.current.add(key); // told already, or old news: it stays in the lists, it is not announced
@@ -707,7 +713,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       alertsRef.current = alerts.data.results;
       setBusyWindows(rem.data.busy_windows);
       setLastSync(Date.now());
-      pruneGone(new Set([...rem.data.reminders.map((r) => r.key), ...alerts.data.results.map((a) => `alert:${a.id}`)]));
+      pruneGone(new Set([...rem.data.reminders.map((r) => r.key), ...alerts.data.results.map(alertKey)]));
       await scheduleOs(rem.data.reminders).catch(() => undefined);
       tick();
     } catch {
@@ -764,7 +770,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const itemForKey = useCallback((key: string): EngineItem | null => {
     const r = remindersRef.current.find((x) => x.key === key);
     if (r) return fromReminder(r);
-    const a = alertsRef.current.find((x) => `alert:${x.id}` === key);
+    const a = alertsRef.current.find((x) => alertKey(x) === key || `alert:${x.id}` === key);
     return a ? fromAlert(a) : null;
   }, []);
   useEffect(() => {
@@ -867,13 +873,33 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [acknowledge],
   );
 
+  /**
+   * "Later": the reminder or alert comes back at `until` (or in `minutes`; neither = the person's usual snooze,
+   * learned from what they say). Kept on the server, so the phone's background part honours the same time and a
+   * restart loses nothing; the item leaves the screen now and returns as a fresh announcement. Resolves to the
+   * time it comes back, as the server says it ("at 4:25 PM"), or null when only the phone could keep it.
+   */
   const snooze = useCallback(
-    (item: EngineItem, minutes = 10) => {
+    async (item: EngineItem, minutes?: number, until?: string): Promise<{ until: string; label: string; labelHi: string } | null> => {
       followups.current.delete(item.key);
       queueRef.current = queueRef.current.filter((q) => q.key !== item.key);
+      setQueued(queueRef.current.length);
       setHeld(heldRef.current.filter((h) => h.key !== item.key));
       if (currentRef.current?.key === item.key) advance();
-      snoozed.current.set(item.key, { item: { ...item, followups: 0, fireAt: Date.now() }, until: Date.now() + minutes * 60_000 });
+      handled.current.add(item.key);
+      const body: Record<string, unknown> = until ? { until } : { minutes: minutes ?? prefsRef.current.snoozeMinutes };
+      if (item.source === 'reminder') body.key = item.key;
+      else if (item.alertId) body.alert_id = item.alertId;
+      try {
+        const res = await api<{ until: string; until_label: string; until_label_hi?: string }>('/reminders/snooze/', { method: 'POST', body });
+        dataChanged.emit();
+        return { until: res.data.until, label: res.data.until_label, labelHi: res.data.until_label_hi ?? '' };
+      } catch {
+        // Offline: this phone keeps it itself until the server can be reached again.
+        const at = until ? Date.parse(until) : Date.now() + (minutes ?? prefsRef.current.snoozeMinutes) * 60_000;
+        snoozed.current.set(item.key, { item: { ...item, followups: 0, fireAt: Date.now() }, until: at });
+        return null;
+      }
     },
     [advance, setHeld],
   );
@@ -933,8 +959,31 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (question.kind === 'accept') return decideRequest(item, yes);
       if (question.kind === 'done') {
         if (yes) return complete(item);
-        snooze(item, 15);
-        sayTwin(`Okay ${address}, I'll remind you in 15 minutes.`, `ठीक है ${addressHi}, 15 मिनट बाद याद दिला दूँगा।`, { interrupt: true });
+        // "Later" with no time said: his usual snooze (learned), and the confirmation names the exact time.
+        const back = await snooze(item);
+        const minutes = prefsRef.current.snoozeMinutes;
+        if (back) sayTwin(`Okay ${address}, I'll remind you ${back.label}.`, `ठीक है ${addressHi}, ${back.labelHi || back.label} याद दिला दूँगा।`, { interrupt: true });
+        else sayTwin(`Okay ${address}, I'll remind you in ${minutes} minutes.`, `ठीक है ${addressHi}, ${minutes} मिनट बाद याद दिला दूँगा।`, { interrupt: true });
+        return;
+      }
+      if (question.kind === 'move') {
+        // The morning briefing offered to move one item to tomorrow: a yes moves it, a no leaves the day as it is.
+        clearKey(item);
+        try {
+          if (item.alertId) await api(`/alerts/${item.alertId}/ack/`, { method: 'POST' });
+          const t = question.target;
+          if (yes && t && question.to) {
+            const path = t.scope === 'private' ? `/private-tasks/${t.id}/` : `/shared-tasks/${t.id}/`;
+            await api(path, { method: 'PATCH', body: { expected_version: t.version ?? 1, due_date: question.to } });
+            dataChanged.emit();
+            sayTwin(`Moved ${t.title} to tomorrow, ${address}.`, `${t.title} कल पर ले गया, ${addressHi}।`, { interrupt: true });
+          } else if (!yes) {
+            sayTwin(`Okay ${address}, leaving it.`, `ठीक है ${addressHi}, रहने देता हूँ।`, { interrupt: true });
+          }
+        } catch (e) {
+          const msg = e instanceof ApiError ? e.message : "I couldn't reach the server.";
+          sayTwin(`Sorry ${address}, ${msg}`, `माफ़ कीजिए ${addressHi}, ${msg}`, { interrupt: true });
+        }
         return;
       }
       // 'seen': yes = the MD is told the PA has seen it; no = it simply leaves the screen.

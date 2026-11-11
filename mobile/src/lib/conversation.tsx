@@ -123,7 +123,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { user } = useSession();
   const { prefs, applyServerPrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
-    setHeldVisible, held, setPresenter, answerQuestion } = useAlertEngine();
+    setHeldVisible, held, setPresenter, answerQuestion, snooze } = useAlertEngine();
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
   const isMD = user?.role === 'MD';
@@ -523,6 +523,21 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
 
     const pq = questionRef.current;
+    if (d.action === 'snooze') {
+      // "Later" in any words, with or without a time: the thing JARVIS just asked about, else the alert on screen,
+      // else whatever JARVIS said last (the server knows). The reply already names the exact time.
+      questionRef.current = null;
+      expectingRef.current = false;
+      const target = pq?.item ?? currentAlert;
+      push('jarvis', d.spoken_reply);
+      const done = target
+        ? snooze(target, undefined, d.snooze_until || undefined)
+        : api('/reminders/snooze/', { method: 'POST', body: { last: true, until: d.snooze_until || undefined } }).then(() => null);
+      done
+        .then(() => say(speakText, { interrupt: true, lang, fallback: d.spoken_reply }))
+        .catch(() => sayOwn(`Sorry ${address}, I couldn't set that.`, `माफ़ कीजिए ${addressHi}, वो सेट नहीं हो पाया।`, { interrupt: true }));
+      return;
+    }
     if (pq) {
       // His answer to the alert's question. A yes or no in any words is carried out here; a real instruction
       // instead is handled as itself below, and the alert stays on its banner.
@@ -530,7 +545,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const sameItem = !d.target || d.target.id === pq.item.ref?.id || d.target.id === pq.item.requestId;
       const yes = d.action === 'confirm_pending'
         || (pq.q.kind === 'accept' && d.action === 'accept_request' && sameItem)
-        || (pq.q.kind === 'done' && d.action === 'complete' && sameItem);
+        || (pq.q.kind === 'done' && d.action === 'complete' && sameItem)
+        || (pq.q.kind === 'move' && d.action === 'change_task' && sameItem);
       const no = d.action === 'cancel_pending' || (pq.q.kind === 'accept' && d.action === 'decline_request' && sameItem);
       if (yes || no) {
         expectingRef.current = false;
@@ -708,6 +724,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       duration_minutes: d.duration_minutes,
       remind_before_minutes: d.remind_before_minutes,
       announcement: d.announcement,
+      due_at: d.due_at || null, // "in 5 minutes": the exact moment, seconds included
       source: 'VOICE',
     };
     const key = idemKey.current;
@@ -1034,6 +1051,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               voiceAccent: prefs.voiceAccent,
               listenLang: listenLang === 'hi-IN' ? 'hi-IN' : 'en-IN',
               replyLang: replyLang(),
+              reminderSound: prefs.reminderSound,
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
             });
@@ -1059,7 +1077,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       sub.remove();
     };
     // The names, the voice and the listening language go along too, and again whenever they change.
-  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, user, paName, hints, listenLang]);
+  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

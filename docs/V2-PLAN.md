@@ -21,22 +21,24 @@ Status: `[ ]` open, `[~]` in progress, `[x]` done (commit). Items marked **APK**
 
 ## Wave 2 — reminders, snooze, questions
 
-- [~] 2.1 Snooze intent: any duration or time said ("1 minute baad", "after lunch", "kal subah"), stored on the
+- [x] 2.1 Snooze intent: any duration or time said ("1 minute baad", "after lunch", "kal subah"), stored on the
       server so it survives a restart and both the app and the closed-app watcher honour it; the buttons use the
-      learned default; every confirmation says the exact time. (server done: `snooze` intent, `ReminderSnooze`,
-      `Alert.snoozed_until`, `POST /reminders/snooze/`, learned `snoozeMinutes`; phone part **APK** pending)
+      learned default; every confirmation says the exact time. (`snooze` intent, `ReminderSnooze`,
+      `Alert.snoozed_until`, `POST /reminders/snooze/`, learned `snoozeMinutes`; app + Settings chips) **APK**
 - [x] 2.2 "Remind me in N minutes" keeps seconds and never asks "tomorrow?"; the first reminder is the one JARVIS
       said, not the kind's lead. (`due_in_minutes` → exact `due_at`)
-- [~] 2.3 Every question JARVIS asks carries a contract (what answer it takes, what happens) read by both the app
+- [x] 2.3 Every question JARVIS asks carries a contract (what answer it takes, what happens) read by both the app
       and the closed-app loop: briefing "move X?", check-in "done / move / leave", nudges worded as real commands.
-      (server done: `question` on reminders and alerts, `Alert.question`, turn `event=ask` + `about`; phone **APK** pending)
+      (`question` on reminders and alerts, `Alert.question`, turn `event=ask` + `about`; the watcher asks and the
+      closed-app loop listens for the answer; the app's `questionFor` reads the server's contract) **APK**
 - [x] 2.4 Told-once keyed by the item and its due moment, not its version: an edit that does not move the time
       does not re-announce.
 - [x] 2.5 Date-only task added after the day reminder time still reminds that day (an hour before office close);
       check-ins not on days off; date-only staff tasks give the PA a follow-up.
 - [x] 2.6 Wording slips fixed (PA meeting reminder, task lead phrasing).
-- [ ] 2.7 A missed reminder (phone off at its time) still gets a notification and a held entry.
-- [ ] 2.8 Reminder sound choice for closed-app reminders. **APK**
+- [x] 2.7 A missed reminder (phone off at its time) still gets a notification and a held entry (the watcher shows
+      it without voice and without marking it told, so the app offers it among the held ones). **APK**
+- [x] 2.8 Reminder sound choice for closed-app reminders (`reminderSound`: phone's sound / silent channel). **APK**
 
 ## Wave 3 — alerts and screens
 

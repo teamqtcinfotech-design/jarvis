@@ -107,6 +107,11 @@ export interface ServerAlert {
   delivered_at: string | null;
   /** Not told yet and recent: worth announcing. Otherwise it is only for the list. */
   fresh: boolean;
+  /** "Later": out of sight until then (the server hides it meanwhile). */
+  snoozed_until?: string | null;
+  /** The key it is announced under: a snoozed alert that comes back is a new announcement, not a repeat. */
+  announce_key?: string;
+  question?: AlertQuestion | null;
 }
 
 export interface Reminder {
@@ -126,6 +131,21 @@ export interface Reminder {
   ref: { scope: 'private' | 'shared'; id: string; version: number };
   /** Spoken or shown once already: never announced again. */
   told_at: string | null;
+  /** The one question JARVIS asks right after it, and what a yes does (a contract from the server). */
+  question?: AlertQuestion | null;
+  /** Set when this is a snoozed reminder coming back (the key it had before). */
+  snoozed_from?: string;
+}
+
+/** The one question JARVIS asks aloud after a reminder or an alert, and what a yes does. Written by the server. */
+export interface AlertQuestion {
+  kind: 'accept' | 'done' | 'seen' | 'move';
+  /** Appended to the spoken line; empty when the line itself already asks (a check-in). */
+  en: string;
+  hi: string;
+  /** move: the item a yes moves, and the day it goes to. */
+  target?: { id: string; scope: 'private' | 'shared'; title: string; version?: number };
+  to?: string;
 }
 
 export interface StaffOption {
@@ -163,6 +183,7 @@ export type DraftAction =
   | 'remember'
   | 'confirm_pending'
   | 'cancel_pending'
+  | 'snooze'
   | 'dismiss'
   | 'end'
   | 'answer';
@@ -258,10 +279,15 @@ export interface Draft {
   priority: Priority;
   due_date: string;
   due_time: string;
+  /** "In 5 minutes": the exact moment, seconds included (empty otherwise). */
+  due_at?: string;
+  due_in_minutes?: number;
   due_label: string;
   duration_minutes: number | null;
   remind_before_minutes: number | null;
   announcement: string;
+  /** snooze: when the reminder or alert JARVIS just spoke comes back. */
+  snooze_until?: string;
   staff: StaffOption | null;
   staff_candidates: StaffOption[];
   category_key: string;

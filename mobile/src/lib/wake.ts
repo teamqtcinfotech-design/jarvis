@@ -24,6 +24,8 @@ export interface WakeConfig {
   listenLang?: string;
   /** The language JARVIS is speaking to this person right now ('hi' / 'en'), for the few lines the phone builds itself. */
   replyLang?: string;
+  /** Notification sound for reminders that arrive while the app is closed ('default' = the phone's, 'silent'). */
+  reminderSound?: string;
   speakWhenLocked: boolean;
   /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
   wakeWord: boolean;

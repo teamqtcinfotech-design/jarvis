@@ -96,6 +96,8 @@ object WakeBus {
     const val KEY_LISTEN_LANG = "listen_lang"
     /** The language JARVIS is speaking to this person right now ("hi" / "en"), for the few lines built here. */
     const val KEY_REPLY_LANG = "reply_lang"
+    /** Notification sound for reminders that arrive while the app is closed: "default" (the phone's) or "silent". */
+    const val KEY_REMINDER_SOUND = "reminder_sound"
     const val KEY_SPEAK_LOCKED = "speak_locked"
     const val KEY_SPOKEN = "spoken_keys"
     const val KEY_PUSH_TOKEN = "push_token"

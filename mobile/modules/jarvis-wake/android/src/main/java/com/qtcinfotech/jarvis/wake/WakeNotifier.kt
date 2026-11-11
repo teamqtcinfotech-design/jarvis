@@ -26,6 +26,15 @@ class WakeNotifier(private val context: Context) {
                     lockscreenVisibility = Notification.VISIBILITY_PRIVATE
                 }
             )
+            // Android fixes a channel's sound when it is made, so "silent" is its own channel (chosen in Settings).
+            manager.createNotificationChannel(
+                NotificationChannel(CHANNEL_REMINDERS_SILENT, "Reminders (app closed, silent)", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "The same reminders, with a vibration and no sound."
+                    lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                    setSound(null, null)
+                    enableVibration(true)
+                }
+            )
         }
     }
 
@@ -61,8 +70,10 @@ class WakeNotifier(private val context: Context) {
             .build()
     }
 
-    fun show(key: String, title: String, text: String, urgent: Boolean) {
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, CHANNEL_REMINDERS)
+    /** A reminder or message pop-up. silent = the person chose no sound for closed-app reminders (vibration only). */
+    fun show(key: String, title: String, text: String, urgent: Boolean, silent: Boolean = false) {
+        val channel = if (silent) CHANNEL_REMINDERS_SILENT else CHANNEL_REMINDERS
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, channel)
         else @Suppress("DEPRECATION") Notification.Builder(context)
         val n = builder
             .setSmallIcon(icon())
@@ -72,7 +83,11 @@ class WakeNotifier(private val context: Context) {
             .setContentIntent(openApp(openKey = key))
             .setAutoCancel(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .apply { if (urgent) setDefaults(Notification.DEFAULT_ALL) else setDefaults(Notification.DEFAULT_VIBRATE) }
+            .apply {
+                if (silent) setDefaults(Notification.DEFAULT_VIBRATE)
+                else if (urgent) setDefaults(Notification.DEFAULT_ALL)
+                else setDefaults(Notification.DEFAULT_VIBRATE)
+            }
             .build()
         manager.notify(key.hashCode(), n)
     }
@@ -136,6 +151,7 @@ class WakeNotifier(private val context: Context) {
     companion object {
         const val CHANNEL_SERVICE = "jarvis-wake-service"
         const val CHANNEL_REMINDERS = "jarvis-background"
+        const val CHANNEL_REMINDERS_SILENT = "jarvis-background-silent"
         const val SERVICE_ID = 7001
         private const val SWITCH_ON_ID = 7002
         private const val WAKE_ID = 7003

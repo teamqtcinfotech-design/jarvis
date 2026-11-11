@@ -19,6 +19,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -58,6 +59,7 @@ class WakeService : Service() {
     override fun onCreate() {
         super.onCreate()
         notifier = WakeNotifier(this)
+        current = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -395,11 +397,19 @@ class WakeService : Service() {
         }, 1500)
     }
 
+    /** A reminder or alert with a question was just spoken: open the voice-only conversation to take the answer. */
+    private fun askAbout(about: JSONObject) {
+        if (WakeBus.appInForeground || !ConversationLoop.available(this)) return
+        val l = loop ?: ConversationLoop(this, notifier).also { loop = it }
+        l.startAbout(about)
+    }
+
     private fun startWatcher() {
         val thread = HandlerThread("jarvis-watch").apply { start() }
         watcherThread = thread
         val handler = Handler(thread.looper)
         val w = ReminderWatcher(this, notifier)
+        w.onAsk = { about -> Handler(Looper.getMainLooper()).post { askAbout(about) } }
         watcher = w
         val task = object : Runnable {
             override fun run() {
@@ -423,6 +433,7 @@ class WakeService : Service() {
 
     override fun onDestroy() {
         stopped = true
+        if (current === this) current = null
         WakeBus.running = false
         WakeBus.listening = false
         loop?.destroy()
@@ -444,6 +455,13 @@ class WakeService : Service() {
     companion object {
         private const val TAG = "JarvisWake"
         const val ACTION_STOP = "com.qtcinfotech.jarvis.wake.STOP"
+        /** The running service, so a live push (another service) can hand it a question to listen for. */
+        @Volatile private var current: WakeService? = null
+
+        fun askAbout(context: Context, about: JSONObject) {
+            val service = current ?: return
+            Handler(Looper.getMainLooper()).post { service.askAbout(about) }
+        }
         const val EXTRA_WAKE = "jarvis_wake"
         const val EXTRA_NO_MIC = "jarvis_no_mic"
         /** The reminder / alert key of a tapped notification: the app opens straight on it and asks its question. */

@@ -36,12 +36,18 @@ class PushService : FirebaseMessagingService() {
             return
         }
         val id = data["id"] ?: return
-        ReminderWatcher(this, WakeNotifier(this)).deliverPush(
-            key = "alert:$id",
+        val question = data["question"]?.takeIf { it.isNotBlank() }?.let {
+            try { JSONObject(it) } catch (_: Throwable) { null }
+        }
+        val watcher = ReminderWatcher(this, WakeNotifier(this))
+        watcher.onAsk = { about -> WakeService.askAbout(this, about) }
+        watcher.deliverPush(
+            key = data["announce_key"]?.takeIf { it.isNotBlank() } ?: "alert:$id",
             title = data["title"] ?: "JARVIS",
             spoken = data["spoken"] ?: data["body"] ?: "",
             urgent = data["priority"] == "URGENT",
             priority = data["priority"] ?: "NORMAL",
+            question = question,
         )
     }
 

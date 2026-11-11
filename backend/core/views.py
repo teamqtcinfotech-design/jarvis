@@ -741,7 +741,8 @@ class ReminderSnoozeView(APIView):
                 return error("nothing", "Nothing was said recently that could be snoozed.", status.HTTP_422_UNPROCESSABLE_ENTITY)
         else:
             return error("invalid", "Say which reminder or alert.", status.HTTP_422_UNPROCESSABLE_ENTITY)
-        return Response({"until": until.isoformat(), "until_label": services.moment_label(until), **what})
+        return Response({"until": until.isoformat(), "until_label": services.moment_label(until),
+                         "until_label_hi": services.moment_label_hi(until), **what})
 
 
 class AlertListView(APIView):

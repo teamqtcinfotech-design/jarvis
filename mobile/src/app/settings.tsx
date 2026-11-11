@@ -117,6 +117,7 @@ function SettingsScreen() {
         voiceAccent: prefs.voiceAccent,
         listenLang: prefs.listenLang === 'hi-IN' ? 'hi-IN' : 'en-IN',
         replyLang: prefs.replyLanguage === 'auto' ? user?.language : prefs.replyLanguage,
+        reminderSound: prefs.reminderSound,
         speakWhenLocked: prefs.privateAloudWhenLocked,
         wakeWord: true,
       });
@@ -172,6 +173,17 @@ function SettingsScreen() {
           <View style={s.chips}>
             <Chip label="Indian · Hindi accent" selected={prefs.voiceAccent === 'hi-IN'} onPress={() => update({ voiceAccent: 'hi-IN' })} />
             <Chip label="Indian English" selected={prefs.voiceAccent === 'en-IN'} onPress={() => update({ voiceAccent: 'en-IN' })} />
+          </View>
+          <Row title="“Later” on a reminder" detail={`Without a time said: ${prefs.snoozeMinutes} minutes. JARVIS learns this from what you say (“10 minute baad”).`} right={null} />
+          <View style={s.chips}>
+            {[5, 10, 15, 30, 60].map((m) => (
+              <Chip key={m} label={m === 60 ? '1 hour' : `${m} min`} selected={prefs.snoozeMinutes === m} onPress={() => update({ snoozeMinutes: m })} />
+            ))}
+          </View>
+          <Row title="Reminder sound (app closed)" detail="The notification for reminders that arrive while JARVIS is closed." right={null} />
+          <View style={s.chips}>
+            <Chip label="Phone's sound" selected={prefs.reminderSound === 'default'} onPress={() => update({ reminderSound: 'default' })} />
+            <Chip label="Silent · vibrate" selected={prefs.reminderSound === 'silent'} onPress={() => update({ reminderSound: 'silent' })} />
           </View>
           {isMD ? (
             <>

@@ -3,13 +3,17 @@ import { Animated, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAlertEngine } from '@/lib/alertEngine';
+import { usePrefs } from '@/lib/prefs';
 import { colors, kindIcon, priorityColor, priorityLabel, radius, shadow } from '@/lib/theme';
 
 import { Button, Icon, Txt } from './ui';
 
 export function AlertBanner() {
   const engine = useAlertEngine();
+  const { prefs } = usePrefs();
   const item = engine.current;
+  // "Later" = the person's usual snooze, learned from what they say by voice ("10 minute baad").
+  const later = `Later · ${prefs.snoozeMinutes}m`;
   const insets = useSafeAreaInsets();
   const [slide] = useState(() => new Animated.Value(-260));
 
@@ -53,13 +57,13 @@ export function AlertBanner() {
         <View style={s.actions}>
           {isRequest ? (
             <>
-              <Button title="Later" kind="ghost" compact onPress={() => engine.snooze(item, 15)} />
+              <Button title={later} kind="ghost" compact onPress={() => engine.snooze(item).catch(() => undefined)} />
               <Button title="Decline" kind="danger" compact onPress={() => engine.decideRequest(item, false)} style={{ marginLeft: 6 }} />
               <Button title="Accept" icon="checkmark" compact onPress={() => engine.decideRequest(item, true)} style={{ marginLeft: 6 }} />
             </>
           ) : item.source === 'reminder' ? (
             <>
-              <Button title="Snooze 10m" kind="ghost" compact onPress={() => engine.snooze(item, 10)} />
+              <Button title={later} kind="ghost" compact onPress={() => engine.snooze(item).catch(() => undefined)} />
               <Button title="Done" kind="secondary" compact icon="checkmark-done" onPress={() => engine.complete(item)} style={{ marginLeft: 6 }} />
               <Button title="Got it" compact onPress={() => engine.acknowledge(item)} style={{ marginLeft: 6 }} />
             </>

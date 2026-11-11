@@ -40,6 +40,10 @@ export interface Prefs {
   /** The spoken morning briefing, raised by the server at this time. */
   briefingEnabled: boolean;
   briefingTime: string;
+  /** "Later" on a reminder, when no time is said. JARVIS learns it from what you say by voice ("10 minute baad"). */
+  snoozeMinutes: number;
+  /** Notification sound for reminders that arrive while the app is closed. */
+  reminderSound: 'default' | 'silent';
 }
 
 export interface RoutineBlock {
@@ -71,6 +75,8 @@ const DEFAULTS: Prefs = {
   dayReminderTime: '09:30',
   briefingEnabled: true,
   briefingTime: '09:00',
+  snoozeMinutes: 15,
+  reminderSound: 'default',
 };
 
 const KEY = 'jarvis.prefs';
