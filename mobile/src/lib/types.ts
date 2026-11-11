@@ -288,6 +288,8 @@ export interface Draft {
   announcement: string;
   /** snooze: when the reminder or alert JARVIS just spoke comes back. */
   snooze_until?: string;
+  /** More than one thing in one breath: every further item (its own kind, time, person, destination). One yes saves all. */
+  batch?: Draft[];
   staff: StaffOption | null;
   staff_candidates: StaffOption[];
   category_key: string;

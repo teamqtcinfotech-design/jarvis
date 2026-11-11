@@ -29,7 +29,7 @@ import { useSession } from './session';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang } from './speech';
 import type { AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
-import { onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeSetListening, wakeStart, wakeStatus, wakeSupported } from './wake';
+import { onBarge, onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeSetListening, wakeStart, wakeStatus, wakeSupported } from './wake';
 
 export interface Msg {
   id: string;
@@ -78,9 +78,10 @@ interface ConversationValue {
   talkOpen: boolean;
   /** When the talk sheet was last opened (a tap, "Hey JARVIS", an offer): answers older than that are not "current". */
   talkOpenedAt: number;
-  /** How it was opened: by voice (the orb in the middle) or to type (the pencil). */
-  talkMode: 'voice' | 'type';
-  openTalk: (mode?: 'voice' | 'type') => void;
+  /** How it was opened: by "Hey JARVIS" (the orb in the middle), to type, or from the home orb (the orb docked
+   *  above the type box with the conversation above it, like a chat). */
+  talkMode: 'voice' | 'type' | 'dock';
+  openTalk: (mode?: 'voice' | 'type' | 'dock') => void;
   closeTalk: () => void;
   micPress: () => void;
   send: (text: string) => void;
@@ -141,7 +142,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [talkOpen, setTalkOpen] = useState(false);
   const [talkOpenedAt, setTalkOpenedAt] = useState(0);
-  const [talkMode, setTalkMode] = useState<'voice' | 'type'>('voice');
+  const [talkMode, setTalkMode] = useState<'voice' | 'type' | 'dock'>('voice');
   const [itemToOpen, setItemToOpen] = useState('');
   const answersRef = useRef<Answer[]>([]); // what is on screen, for "is list ka PDF" and "pehla wala"
   const lastQuestion = useRef('');
@@ -171,8 +172,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     presentOffer: (o: HeldOffer, greetFirst: boolean) => void;
     presentAlert: (item: EngineItem, spoken: string) => void;
     wake: () => void;
+    barge: () => void;
   }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, presentAlert: () => undefined,
-    wake: () => undefined });
+    wake: () => undefined, barge: () => undefined });
 
   // Which language the recogniser starts in. 'auto' is Indian English (Hinglish included) and, on Android 14+, the
   // phone switches to Hindi by itself. Older phones cannot switch, so there, once the last several turns were all
@@ -261,7 +263,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       setBusy('');
     }
   };
-  const openTalk = (mode: 'voice' | 'type' = 'voice') => {
+  const openTalk = (mode: 'voice' | 'type' | 'dock' = 'voice') => {
     setTalkOpen(true);
     setTalkMode(mode);
     setTalkOpenedAt(Date.now());
@@ -708,20 +710,19 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
   };
 
-  const save = async () => {
-    const d = draftRef.current;
-    if (!d) return;
-    cancelVoice();
-    const isTask = TASK_DRAFTS.includes(d.action);
-    if (isTask) {
-      if (!d.title.trim()) return setDraftError('Please add what the task should say.');
-      if (d.due_time && !HHMM.test(d.due_time)) return setDraftError('Time must look like 14:30.');
-      if (d.due_time && !d.due_date) return setDraftError('Pick a day for this time.');
-      if (d.action === 'delegation' && !d.staff) return setDraftError('Choose who should do this.');
-      if (d.action === 'team_delegation' && !d.team?.members.length) return setDraftError('No one in that team can take this.');
-    }
-    setBusy('saving');
-    setDraftError('');
+  /** What is wrong with one item of a card, before anything is sent; '' when it can be saved. */
+  const problemWith = (d: Draft): string => {
+    if (!TASK_DRAFTS.includes(d.action)) return '';
+    if (!d.title.trim()) return 'Please add what the task should say.';
+    if (d.due_time && !HHMM.test(d.due_time)) return 'Time must look like 14:30.';
+    if (d.due_time && !d.due_date) return 'Pick a day for this time.';
+    if (d.action === 'delegation' && !d.staff) return 'Choose who should do this.';
+    if (d.action === 'team_delegation' && !d.team?.members.length) return 'No one in that team can take this.';
+    return '';
+  };
+
+  /** Save one item of a card (the main one, or one of several said in one breath). Resolves to its spoken lines. */
+  const saveOne = async (d: Draft, key: string): Promise<{ spoken: string; spokenHi: string } | null> => {
     const body = {
       title: d.title.trim(),
       notes: d.notes,
@@ -735,11 +736,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       due_at: d.due_at || null, // "in 5 minutes": the exact moment, seconds included
       source: 'VOICE',
     };
-    const key = idemKey.current;
     // "I'll remind you tomorrow at 4 PM." / "कल 4 बजे याद दिला दूँगा।" — the card's day and time in both languages.
     const whenEn = d.due_date ? ` I'll remind you ${dayLabel(d.due_date).toLowerCase()}${d.due_time ? ` at ${timeLabel(d.due_time)}` : ''}.` : '';
     const whenHi = d.due_date ? ` ${dayLabelHi(d.due_date)}${d.due_time ? ` ${timeLabelHi(d.due_time)}` : ''} याद दिला दूँगा।` : '';
-    try {
+    {
       // Every saved line in both languages: the one JARVIS is using with this person is spoken (see lang.ts).
       let spoken = '';
       let spokenHi = '';
@@ -810,7 +810,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         spokenHi = `आपके अपने टास्क में सेव हो गया, ${addressHi}।${whenHi}`;
       } else if (d.action === 'accept_request' || d.action === 'decline_request') {
         const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
-        if (!list.length) return setBusy('');
+        if (!list.length) return null;
         const verb = d.action === 'accept_request' ? 'accept' : 'decline';
         for (const t of list) {
           await api(`/requests/${t.id}/${verb}/`, { method: 'POST', body: {}, idempotencyKey: `${key}-${t.id}` });
@@ -825,7 +825,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         }
       } else if (d.action === 'complete') {
         const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
-        if (!list.length) return setBusy('');
+        if (!list.length) return null;
         let sentToSir = 0;
         for (const t of list) {
           const path = t.scope === 'private' ? `/private-tasks/${t.id}/complete/` : `/shared-tasks/${t.id}/complete/`;
@@ -845,7 +845,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         spokenHi = `हो गया, ${addressHi}। याद रखूँगा।`;
       } else if (d.action === 'change_task' || d.action === 'delete_task') {
         const list = d.targets?.length ? d.targets : d.target ? [d.target] : [];
-        if (!list.length) return setBusy('');
+        if (!list.length) return null;
         const patch = d.action === 'change_task' ? d.changes : { status: 'CANCELLED' };
         let sentToSir = 0;
         for (const t of list) {
@@ -866,22 +866,63 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           spokenHi = `${list.length} ${whatHi} दिए, ${addressHi}।`;
         }
       }
-      setBusy('');
-      setDraft(null);
-      previousRef.current = '';
-      dataChanged.emit();
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
-      if (d.done_reply && !editedRef.current && AI_DONE_OK.includes(d.action)) {
-        reply(d.done_reply, d.done_speak || d.done_reply, d.done_lang === 'hi' ? 'hi' : 'en', true, { tone: 'saved' });
-      } else {
-        const t = twin(spoken, spokenHi);
-        reply(spoken, t.lang === 'hi' ? t.text : undefined, t.lang, true, { tone: 'saved' });
+      return { spoken, spokenHi };
+    }
+  };
+
+  /** The yes: save the card, every item of it when several were said in one breath, and say what happened. */
+  const save = async () => {
+    const d = draftRef.current;
+    if (!d) return;
+    cancelVoice();
+    const items = [d, ...(d.batch ?? [])];
+    for (const item of items) {
+      const problem = problemWith(item);
+      if (problem) return setDraftError(items.length > 1 ? `${item.title || 'One item'}: ${problem}` : problem);
+    }
+    setBusy('saving');
+    setDraftError('');
+    const key = idemKey.current;
+    const saved: { spoken: string; spokenHi: string }[] = [];
+    const failed: { title: string; msg: string; retryable: boolean }[] = [];
+    for (let i = 0; i < items.length; i++) {
+      try {
+        // Each item keeps its own key, so a retry after a failure never saves an item twice.
+        const r = await saveOne(items[i], i ? `${key}-b${i}` : key);
+        if (r) saved.push(r);
+      } catch (e) {
+        failed.push({ title: items[i].title || 'one item', msg: e instanceof ApiError ? e.message : 'Could not save.', retryable: e instanceof ApiError && e.retryable });
       }
-    } catch (e) {
-      setBusy('');
-      const msg = e instanceof ApiError ? e.message : 'Could not save.';
-      setDraftError(`${msg} Nothing was saved${e instanceof ApiError && e.retryable ? ' — tap the button to try again' : ''}.`);
-      sayOwn(`Sorry ${address}, it was not saved. ${msg}`, `माफ़ कीजिए ${addressHi}, सेव नहीं हुआ। ${msg}`, { interrupt: true });
+    }
+    setBusy('');
+    if (failed.length) {
+      dataChanged.emit();
+      if (items.length === 1) {
+        const f = failed[0];
+        setDraftError(`${f.msg} Nothing was saved${f.retryable ? ' — tap the button to try again' : ''}.`);
+        sayOwn(`Sorry ${address}, it was not saved. ${f.msg}`, `माफ़ कीजिए ${addressHi}, सेव नहीं हुआ। ${f.msg}`, { interrupt: true });
+      } else {
+        // The card stays, so a tap tries the failed ones again (the saved ones are not saved twice).
+        const names = failed.map((f) => `${f.title} (${f.msg})`).join('; ');
+        setDraftError(`Saved ${saved.length} of ${items.length}. Could not save: ${names}`);
+        sayOwn(`${address}, saved ${saved.length} of ${items.length}. Could not save ${failed.map((f) => f.title).join(' and ')}.`,
+          `${addressHi}, ${items.length} में से ${saved.length} सेव हुए। ${failed.map((f) => f.title).join(' और ')} नहीं हो पाया।`, { interrupt: true });
+      }
+      return;
+    }
+    setDraft(null);
+    previousRef.current = '';
+    dataChanged.emit();
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+    if (items.length > 1) {
+      const t = twin(`Saved all ${items.length}, ${address}.`, `सभी ${items.length} सेव हो गए, ${addressHi}।`);
+      reply(t.fallback, t.lang === 'hi' ? t.text : undefined, t.lang, true, { tone: 'saved' });
+    } else if (d.done_reply && !editedRef.current && AI_DONE_OK.includes(d.action)) {
+      reply(d.done_reply, d.done_speak || d.done_reply, d.done_lang === 'hi' ? 'hi' : 'en', true, { tone: 'saved' });
+    } else {
+      const { spoken, spokenHi } = saved[0] ?? { spoken: `Done, ${address}.`, spokenHi: `हो गया, ${addressHi}।` };
+      const t = twin(spoken, spokenHi);
+      reply(spoken, t.lang === 'hi' ? t.text : undefined, t.lang, true, { tone: 'saved' });
     }
   };
 
@@ -942,9 +983,20 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     say(isMD ? `जी ${addressHi}?` : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
   };
 
+  // He started talking while JARVIS was speaking (the native side heard him over the voice and stopped it): drop
+  // whatever was still queued and listen at once, as a person would.
+  const barge = () => {
+    if (!user) return;
+    stopSpeaking();
+    expectingRef.current = true;
+    silenceRef.current = 0;
+    listen();
+  };
+
   useEffect(() => {
-    fns.current = { heard, voiceError, presentOffer, presentAlert, wake };
+    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge };
   });
+  useEffect(() => onBarge(() => fns.current.barge()), []);
   // The alert engine hands alerts that carry a question to this conversation (voice and ear live here).
   useEffect(() => {
     setPresenter((item, spoken) => {
@@ -1011,16 +1063,18 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   }, []);
   useEffect(() => {
     if (!wakeSupported || !prefs.wakeWordEnabled) return;
-    if (listening || speaking || busy) {
+    // While JARVIS LISTENS (or is thinking) the background microphone steps aside. While JARVIS SPEAKS it stays on,
+    // only to hear whether he starts talking over the voice (barge-in); it does not judge "Hey JARVIS" then.
+    if (listening || busy) {
       // The pause expires by itself after a minute (so a closed app can never leave "Hey JARVIS" deaf);
-      // keep renewing it for as long as JARVIS really is listening or talking.
+      // keep renewing it for as long as JARVIS really is listening.
       wakePause();
       const renew = setInterval(wakePause, 20_000);
       return () => clearInterval(renew);
     }
     wakeResume();
     return undefined;
-  }, [listening, speaking, busy, prefs.wakeWordEnabled]);
+  }, [listening, busy, prefs.wakeWordEnabled]);
 
   // Alerts that arrive mid-conversation show quietly instead of talking over him.
   useEffect(() => {
@@ -1060,6 +1114,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               listenLang: listenLang === 'hi-IN' ? 'hi-IN' : 'en-IN',
               replyLang: replyLang(),
               reminderSound: prefs.reminderSound,
+              bargeIn: prefs.bargeIn,
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
             });
@@ -1085,7 +1140,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       sub.remove();
     };
     // The names, the voice and the listening language go along too, and again whenever they change.
-  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, user, paName, hints, listenLang]);
+  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

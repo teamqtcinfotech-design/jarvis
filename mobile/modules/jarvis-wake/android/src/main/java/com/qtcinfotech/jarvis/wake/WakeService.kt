@@ -183,6 +183,13 @@ class WakeService : Service() {
             var windowGain = 0.0
             var windowChunks = 0
             var lastReport = System.currentTimeMillis()
+            // Barge-in: while JARVIS talks, the microphone stays open just to hear whether HE starts talking. The
+            // first moments of each sentence set the baseline (the phone's own voice reaching its microphone); a
+            // sound well above that, held for a few slices, is him, and JARVIS stops and listens.
+            var bargeSince = 0L           // the stretch of talking being measured (TtsEngine.talkingSince)
+            var bargeBase = 0.0           // loudest slice during the baseline window
+            var bargeBaseSlices = 0
+            var bargeRun = 0              // slices in a row above the bar
 
             fun closeRecorder() {
                 try {
@@ -203,7 +210,10 @@ class WakeService : Service() {
                 while (!stopped && !micStopped) {
                     // A voice conversation that is no longer running must never keep "Hey JARVIS" switched off.
                     if (WakeBus.inConversation && loop?.active != true) WakeBus.inConversation = false
-                    val aside = WakeBus.paused || WakeBus.inConversation || (WakeBus.appInForeground && WakeBus.listener == null)
+                    // While JARVIS itself is talking the microphone is kept (for barge-in) unless the app asked for
+                    // silence; while JARVIS or the app is LISTENING the microphone must be let go.
+                    val talking = TtsEngine.speaking && WakeBus.prefs(this).getBoolean(WakeBus.KEY_BARGE_IN, true)
+                    val aside = WakeBus.paused || (WakeBus.inConversation && !talking) || (WakeBus.appInForeground && WakeBus.listener == null)
                     if (aside) {
                         // Someone else needs the mic (JARVIS itself is listening or talking): let it go completely.
                         if (record != null) {
@@ -289,6 +299,36 @@ class WakeService : Service() {
                         continue
                     }
                     if (peak > 0 && WakeBus.micBlocked) WakeBus.micBlocked = false
+
+                    // Barge-in while JARVIS talks: no wake-word judging of its own voice, only "did he start talking?"
+                    if (talking) {
+                        val since = TtsEngine.talkingSince
+                        if (since != bargeSince) {
+                            bargeSince = since
+                            bargeBase = 0.0
+                            bargeBaseSlices = 0
+                            bargeRun = 0
+                        }
+                        val age = System.currentTimeMillis() - since
+                        if (age < BARGE_BASELINE_MS) {
+                            if (rms > bargeBase) bargeBase = rms
+                            bargeBaseSlices += 1
+                        } else if (bargeBaseSlices > 0) {
+                            val bar = maxOf(bargeBase * BARGE_OVER_BASE, BARGE_MIN_LEVEL)
+                            bargeRun = if (rms > bar) bargeRun + 1 else 0
+                            if (bargeRun >= BARGE_SLICES) {
+                                Log.i(TAG, String.format("barge-in: level %.0f over baseline %.0f; stopping the voice", rms, bargeBase))
+                                bargeRun = 0
+                                bargeSince = 0L
+                                TtsEngine.stop()
+                                WakeBus.onBarge()
+                            }
+                        }
+                        detector.reset()
+                        prevScore = 0f
+                        streak = 0
+                        continue
+                    }
 
                     // Bring quiet or distant speech up to a normal level before judging it (fast up, slow down).
                     envelope = if (rms > envelope) rms else envelope * 0.92 + rms * 0.08
@@ -466,6 +506,12 @@ class WakeService : Service() {
         const val EXTRA_NO_MIC = "jarvis_no_mic"
         /** The reminder / alert key of a tapped notification: the app opens straight on it and asks its question. */
         const val EXTRA_OPEN_KEY = "jarvis_open_key"
+        // Barge-in: measure the phone's own voice for this long, then a sound this much louder, for this many
+        // 80 ms slices in a row (and at least a speaking level), means he is talking over JARVIS.
+        private const val BARGE_BASELINE_MS = 600L
+        private const val BARGE_OVER_BASE = 2.2
+        private const val BARGE_MIN_LEVEL = 450.0
+        private const val BARGE_SLICES = 4
         private const val THRESHOLD = 0.7f          // one slice this sure is enough
         private const val PAIR_THRESHOLD = 0.45f    // or two slices in a row this sure
         private const val STREAK_THRESHOLD = 0.35f  // or STREAK_SLICES in a row this sure

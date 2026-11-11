@@ -25,6 +25,11 @@ object TtsEngine {
     private val pending = ArrayDeque<Request>()
     @Volatile var callback: ((id: String, event: String) -> Unit)? = null
     private val thenCallbacks = java.util.concurrent.ConcurrentHashMap<String, () -> Unit>()
+    /** Every sentence asked for and not yet finished: while this is not empty, JARVIS is talking (see WakeService barge-in). */
+    private val inFlight = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    /** When the current stretch of talking began (0 = quiet), so a listener can skip the first moments. */
+    @Volatile var talkingSince: Long = 0L
+    val speaking: Boolean get() = inFlight.isNotEmpty()
 
     /** Speak, then run [onDone] once it has finished (or failed, or was stopped) — used by the background conversation. */
     fun speakThen(req: Request, onDone: () -> Unit) {
@@ -33,6 +38,8 @@ object TtsEngine {
     }
 
     private fun finished(id: String, event: String) {
+        inFlight.remove(id)
+        if (inFlight.isEmpty()) talkingSince = 0L
         callback?.invoke(id, event)
         thenCallbacks.remove(id)?.invoke()
     }
@@ -93,6 +100,8 @@ object TtsEngine {
     fun speak(raw: Request) {
         val req = raw.copy(text = forSpeech(raw.text), fallback = raw.fallback?.let { forSpeech(it) })
         Log.i(TAG, "speak(${req.lang}): ${req.text.take(140)}")  // one line per sentence, so a test can see what was said
+        if (inFlight.isEmpty()) talkingSince = System.currentTimeMillis()
+        inFlight.add(req.id)
         val ctx = appContext
         if (ctx != null && GrokVoice.enabled(ctx)) {
             GrokVoice.speak(ctx, req.id, req.text) { result ->
@@ -167,6 +176,8 @@ object TtsEngine {
             } catch (_: Throwable) {
             }
         }
+        inFlight.clear()
+        talkingSince = 0L
         for (id in thenCallbacks.keys.toList()) thenCallbacks.remove(id)?.invoke()
     }
 }

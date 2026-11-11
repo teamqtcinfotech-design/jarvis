@@ -26,6 +26,8 @@ export interface WakeConfig {
   replyLang?: string;
   /** Notification sound for reminders that arrive while the app is closed ('default' = the phone's, 'silent'). */
   reminderSound?: string;
+  /** Talking over JARVIS while it speaks stops it and it listens (off if the room echoes). */
+  bargeIn?: boolean;
   speakWhenLocked: boolean;
   /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
   wakeWord: boolean;
@@ -75,7 +77,7 @@ type Native = {
   openMiuiPermissions: () => boolean;
   speak: (id: string, text: string, lang: string, fallback: string | null, rate: number) => void;
   stopSpeaking: () => void;
-  addListener: ((event: 'wake' | 'push', listener: () => void) => { remove: () => void }) &
+  addListener: ((event: 'wake' | 'push' | 'barge', listener: () => void) => { remove: () => void }) &
     ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void });
 };
 
@@ -202,6 +204,17 @@ export async function pushForget() {
     await native.deletePushToken();
   } catch {
     // ignore
+  }
+}
+
+/** He started talking while JARVIS was speaking: the native side has already stopped the voice; now listen. */
+export function onBarge(listener: () => void): () => void {
+  if (!native) return () => undefined;
+  try {
+    const sub = native.addListener('barge', listener);
+    return () => sub.remove();
+  } catch {
+    return () => undefined;
   }
 }
 

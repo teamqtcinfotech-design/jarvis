@@ -22,11 +22,13 @@ import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
 import { Drawer } from './Drawer';
 import { navItems } from './nav';
+import { Orb } from './Orb';
 import { TaskRow } from './TaskRow';
 import { TaskSheet } from './TaskSheet';
 import { Icon, IconButton, Txt } from './ui';
 
 const DOT: Record<string, string> = { present: colors.success, away: colors.faint, facedown: colors.inkSoft, meeting: colors.gold, quiet: colors.inkSoft };
+const ORB_CORNER = 84; // the small orb in the corner (its halo makes it look a little smaller than this)
 
 function nextTimed(items: TaskItem[], now: number): { item: TaskItem; start: number } | null {
   const timed = items
@@ -116,13 +118,11 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const tick = () => Haptics.selectionAsync().catch(() => undefined); // a small tap he can feel
   // While JARVIS is up, the page behind goes soft (a real blur on Android 12 and later).
   const soft = conv.talkOpen && CAN_BLUR ? s.blurred : null;
-  const write = () => {
-    tick();
-    conv.openTalk('type');
-  };
+  // The orb in the corner: a tap opens JARVIS the chat way (the orb docked above the type box, the conversation
+  // above it) and starts listening at once. "Hey JARVIS" still brings the big orb up in the middle.
   const talk = () => {
     tick();
-    conv.openTalk();
+    conv.openTalk('dock');
     if (conv.orb === 'idle') conv.micPress();
   };
   // A report opens right in front of him (the sheet shows it fitted to the screen), not somewhere down the page.
@@ -267,17 +267,12 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         ) : null}
       </ScrollView>
 
-      {/* No orb sitting on the page. One small pencil in the corner: tap to type, hold to talk.
-          Saying "Hey JARVIS" brings the orb up in the middle of the screen. */}
+      {/* The same colour-changing orb, small, in the corner: tap to talk (and type, in the same place).
+          Saying "Hey JARVIS" brings the big orb up in the middle of the screen. */}
       {conv.talkOpen ? null : (
-        <Pressable
-          onPress={write}
-          onLongPress={talk}
-          accessibilityLabel="Type to JARVIS (hold to talk)"
-          style={({ pressed }) => [s.pencil, { bottom: insets.bottom + 18 }, pressed && { transform: [{ scale: 0.93 }] }]}
-        >
-          <Icon name="create-outline" size={23} color={colors.white} />
-        </Pressable>
+        <View style={[s.cornerOrb, { bottom: insets.bottom + 10 }]} pointerEvents="box-none">
+          <Orb state={conv.orb} size={ORB_CORNER} level={conv.level} onPress={talk} shift />
+        </View>
       )}
 
       <Drawer
@@ -307,10 +302,7 @@ const s = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 7 },
   body: { paddingHorizontal: 20, paddingTop: 8 },
   blurred: { filter: [{ blur: 14 }] },
-  pencil: {
-    position: 'absolute', right: 18, width: 54, height: 54, borderRadius: 27, backgroundColor: colors.ink,
-    alignItems: 'center', justifyContent: 'center', ...shadow, shadowOpacity: 0.28, elevation: 6,
-  },
+  cornerOrb: { position: 'absolute', right: 6, width: ORB_CORNER, height: ORB_CORNER },
   heroWrap: { marginTop: 18, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },

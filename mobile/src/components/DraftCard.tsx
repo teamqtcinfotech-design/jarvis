@@ -80,7 +80,8 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
   ];
   const staffOptions = allStaff ?? draft.staff_candidates ?? [];
   const when = draft.due_date ? `${dayLabel(draft.due_date)}${draft.due_time ? ` · ${timeLabel(draft.due_time)}` : ''}` : 'No date';
-  const saveLabel = draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}`
+  const saveLabel = draft.batch?.length ? `Save all ${draft.batch.length + 1}`
+    : draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}`
     : draft.action === 'md_request' ? `Send to ${md}` : SAVE_LABEL[draft.action] ?? 'Confirm';
   const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text : !!(draft.target || draft.targets?.length))
     && (draft.action !== 'delegation' || !!draft.staff);
@@ -159,6 +160,27 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
             </Txt>
           ) : null}
           {draft.kind === 'PAYMENT' ? <Txt variant="caption" style={{ marginTop: 8 }}>Reminder only. JARVIS never makes payments.</Txt> : null}
+          {draft.batch?.length ? (
+            <View style={s.batch}>
+              <Txt variant="label" style={{ color: colors.inkSoft, marginBottom: 6 }}>Also, in the same breath</Txt>
+              {draft.batch.map((b, i) => {
+                const h = draftHeading(b, md, mdHim(dash));
+                const w = b.due_date ? `${dayLabel(b.due_date)}${b.due_time ? ` · ${timeLabel(b.due_time)}` : ''}` : 'No date';
+                return (
+                  <View key={`${b.title}-${i}`} style={s.batchRow}>
+                    <View style={s.batchIcon}>
+                      <Icon name={kindIcon[b.kind] ?? h.icon} size={14} color={colors.accent} />
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Txt variant="heading" numberOfLines={2} style={{ fontSize: 15 }}>{b.title || 'Untitled'}</Txt>
+                      <Txt variant="caption" numberOfLines={1}>{h.title} · {w}{b.action === 'delegation' && b.staff ? ` · ${b.staff.name}` : ''}</Txt>
+                    </View>
+                  </View>
+                );
+              })}
+              <Txt variant="caption" style={{ marginTop: 6 }}>To change one of them, just say it: “second one 9 baje kar do”.</Txt>
+            </View>
+          ) : null}
         </>
       ) : draft.targets?.length > 1 ? (
         <View style={{ marginTop: 12, rowGap: 6 }}>
@@ -350,6 +372,9 @@ const s = StyleSheet.create({
   },
   timeInput: { width: 92, marginRight: 8, marginBottom: 8 },
   warn: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 12, padding: 10, borderRadius: radius.md, backgroundColor: colors.warnSoft },
+  batch: { marginTop: 14, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
+  batchRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
+  batchIcon: { width: 30, height: 30, borderRadius: 10, backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
   offer: { flexDirection: 'row', alignItems: 'center', marginTop: 10, paddingVertical: 10, paddingHorizontal: 12, borderRadius: radius.md, backgroundColor: colors.accentSoft },
   offerText: { flex: 1, marginLeft: 8, color: colors.accentDeep, fontWeight: '500' },
   error: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 12, padding: 10, borderRadius: radius.md, backgroundColor: colors.dangerSoft },

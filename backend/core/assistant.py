@@ -766,12 +766,99 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         full_text = text
     address = services.address_of(user)
     address_hi = services.address_hi_of(user)
-    sir, sir_hi = services.md_address(), services.md_address_hi()
     intent = _route_intent(user, cmd, full_text)
     # Which language JARVIS answers in: a pinned setting, else this sentence, else the model's reading, else lately.
     heard = lang_mod.detect(text) or lang_mod.clean(cmd.get("reply_language"))
     reply_language = lang_mod.lang_for(user, text, cmd.get("reply_language"))
     lang_mod.remember(user, heard)
+
+    draft = _draft_for(user, cmd, intent, full_text, reply_language, ctx, on_screen, card, history, include_private, pending)
+
+    # More than one thing in one breath ("4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath"): every further
+    # item is built by exactly the same rules (where it goes, is the person known, does it clash) and rides along on
+    # the same card, so one yes saves them all and nothing is dropped.
+    extras = [it for it in (cmd.get("more_items") or [])[:4] if isinstance(it, dict)]
+    if extras and draft["action"] in TASK_ACTIONS | {"choose_destination"}:
+        subs = []
+        for it in extras:
+            sub_cmd = {**_EMPTY_ITEM, **{k: v for k, v in it.items() if k in _ITEM_KEYS}, "engine": cmd.get("engine", "rules"),
+                       "reply_language": reply_language}
+            sub_intent = _route_intent(user, sub_cmd, full_text)
+            if sub_intent not in _TASK_INTENTS:
+                continue
+            sub = _draft_for(user, sub_cmd, sub_intent, full_text, reply_language, ctx, on_screen, None, history, include_private, pending)
+            if sub["action"] in TASK_ACTIONS | {"choose_destination"}:
+                subs.append({k: v for k, v in sub.items() if k not in {"categories", "staff_candidates", "target_candidates", "view"}})
+        if subs:
+            _combine_batch(draft, subs, address, address_hi, reply_language)
+    return draft
+
+
+# The fields one further item may carry (everything else is the main command's business).
+_ITEM_KEYS = {"intent", "title", "notes", "kind", "priority", "due_date", "due_time", "due_in_minutes", "duration_minutes",
+              "remind_before_minutes", "staff_name", "team_name", "people", "reminder_line"}
+_EMPTY_ITEM = {"intent": "create_task", "title": "", "notes": "", "kind": "TASK", "priority": "NORMAL", "due_date": "", "due_time": "",
+               "due_in_minutes": 0, "duration_minutes": 0, "remind_before_minutes": 0, "staff_name": "", "team_name": "", "people": [],
+               "reminder_line": "", "needs_clarification": False, "clarification_question": "", "spoken_reply": "", "spoken_reply_hi": "",
+               "done_reply": "", "done_reply_hi": "", "new_contacts": [], "category_key": "", "target_ref": "", "target_refs": [],
+               "changed_fields": [], "keep_original": False}
+
+
+def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
+    """One item of a list read back: "Personal meeting: Meeting with Aman, today at 4 PM" (and its Hindi twin)."""
+    pa_name = d.get("pa_name") or "your PA"
+    staff = (d.get("staff") or {}).get("name")
+    kind_en = {"MEETING": "meeting", "CALL": "call", "PAYMENT": "payment", "FOLLOW_UP": "follow-up"}.get(d.get("kind"), "task")
+    kind_hi = _KIND_HI.get(d.get("kind"), "टास्क")
+    what = {"private_task": f"personal {kind_en}", "md_request": f"request for {services.md_address()}",
+            "delegation": f"{kind_en} for {staff}" if staff else "task for staff", "team_delegation": f"task for {(d.get('team') or {}).get('label') or 'the team'}",
+            "pa_task": f"{kind_en} for {pa_name}", "pa_meeting": f"meeting with {pa_name}", "pa_self_task": f"your own {kind_en}",
+            "choose_destination": kind_en}.get(d.get("action"), kind_en)
+    what_hi = {"private_task": f"पर्सनल {kind_hi}", "md_request": f"{sir_hi} के लिए रिक्वेस्ट",
+               "delegation": f"{staff} के लिए {kind_hi}" if staff else "स्टाफ़ के लिए टास्क", "team_delegation": "टीम के लिए टास्क",
+               "pa_task": f"{pa_name} के लिए {kind_hi}", "pa_meeting": f"{pa_name} के साथ मीटिंग", "pa_self_task": f"आपका अपना {kind_hi}",
+               "choose_destination": kind_hi}.get(d.get("action"), kind_hi)
+    due_en = d.get("due_label") or ""
+    due_hi = (f"{tu.minutes_phrase_hi(d['due_in_minutes'])} में" if d.get("due_in_minutes") else _due_label_hi(d.get("due_date", ""), d.get("due_time", "")))
+    return (f"{what}: {d.get('title') or '(no title)'}" + (f", {due_en}" if due_en else ""),
+            f"{what_hi}: {d.get('title') or '(बिना नाम)'}" + (f", {due_hi}" if due_hi else ""))
+
+
+def _combine_batch(draft: dict, subs: list[dict], address: str, address_hi: str, reply_language: str) -> None:
+    """The main card plus its further items become one card: one read-back, one yes. A question about any one of
+    them is asked first (the rest wait on the same card); the items' warnings travel along, named."""
+    draft["batch"] = subs
+    sir_hi = services.md_address_hi()
+    for s in subs:
+        for w in s.get("warnings") or []:
+            draft["warnings"].append(f"{s.get('title') or 'one item'}: {w}")
+    if draft["needs_clarification"]:
+        return  # the main item's own question comes first; the others ride along until it is answered
+    asking = next((s for s in subs if s.get("needs_clarification") and s.get("question")), None)
+    if asking:
+        _ask(draft, asking["question"], asking.get("question_hi", ""))
+        draft["spoken_reply"] = draft["question"]
+        if reply_language == "hi" and draft["question_hi"]:
+            draft["speak_text"], draft["speak_lang"] = draft["question_hi"], "hi"
+        else:
+            draft["speak_text"], draft["speak_lang"] = draft["question"], "en"
+        return
+    items = [draft] + subs
+    n = len(items)
+    en_parts, hi_parts = zip(*(_item_phrase(d, sir_hi) for d in items))
+    en = f"{address}, {n} things: " + "; ".join(en_parts) + f". Shall I save all {n}?"
+    hi = f"{address_hi}, {n} काम: " + "; ".join(hi_parts) + f"। सभी {n} सेव कर दूँ?"
+    _say(draft, en, hi)
+    draft["speak_text"], draft["speak_lang"] = (hi, "hi") if reply_language == "hi" else (en, "en")
+    draft["done_reply"] = draft["done_speak"] = ""  # the saved line is built from what was really saved
+
+
+def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_language: str, ctx: dict, on_screen: dict | None,
+               card: dict | None, history: list | None, include_private: bool, pending: list) -> dict:
+    """One command (the main one, or one further item of a list) -> the draft the user confirms on screen."""
+    address = services.address_of(user)
+    address_hi = services.address_hi_of(user)
+    sir, sir_hi = services.md_address(), services.md_address_hi()
 
     due_date = _safe_date(cmd.get("due_date", ""))
     due_time = _safe_time(cmd.get("due_time", ""))

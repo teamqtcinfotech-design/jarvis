@@ -21,13 +21,19 @@ class JarvisWakeModule : Module() {
 
     override fun definition() = ModuleDefinition {
         Name("JarvisWake")
-        Events("wake", "tts", "push")
+        Events("wake", "tts", "push", "barge")
 
         OnCreate {
             WakeBus.listener = { sendEvent("wake", emptyMap<String, Any>()) }
             WakeBus.pushListener = {
                 try {
                     sendEvent("push", emptyMap<String, Any>())
+                } catch (_: Throwable) {
+                }
+            }
+            WakeBus.bargeListener = {
+                try {
+                    sendEvent("barge", emptyMap<String, Any>())
                 } catch (_: Throwable) {
                 }
             }
@@ -42,6 +48,7 @@ class JarvisWakeModule : Module() {
         OnDestroy {
             WakeBus.listener = null
             WakeBus.pushListener = null
+            WakeBus.bargeListener = null
             TtsEngine.callback = null
         }
 
@@ -116,6 +123,7 @@ class JarvisWakeModule : Module() {
             (config["listenLang"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_LISTEN_LANG, it) }
             (config["replyLang"] as? String)?.takeIf { it == "hi" || it == "en" }?.let { more.putString(WakeBus.KEY_REPLY_LANG, it) }
             (config["reminderSound"] as? String)?.takeIf { it == "default" || it == "silent" }?.let { more.putString(WakeBus.KEY_REMINDER_SOUND, it) }
+            (config["bargeIn"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_BARGE_IN, it) }
             (config["hints"] as? List<*>)?.let { list ->
                 more.putString(WakeBus.KEY_HINTS, list.mapNotNull { (it as? String)?.trim() }.filter { it.isNotEmpty() }.take(60).joinToString("\n"))
             }

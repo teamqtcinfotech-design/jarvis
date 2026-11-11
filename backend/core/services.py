@@ -1364,6 +1364,8 @@ PREF_SCHEMA = {
     # Names, set by voice from either phone. Not stored as settings: they go to the person (see set_prefs).
     "myName": {"type": "text", "default": "", "say": "your name", "hint": "the name JARVIS calls you by", "virtual": True},
     "paName": {"type": "text", "default": "", "say": "the PA's name", "hint": "the PA's name (MD only)", "virtual": True, "md_only": True},
+    # Talking over JARVIS while it speaks stops it and it listens (like a person). Off if the room echoes.
+    "bargeIn": {"type": "bool", "default": True, "say": "interrupt JARVIS by talking over it"},
     # The notification sound for reminders that arrive while the app is closed.
     "reminderSound": {"type": "enum", "values": ["default", "silent"], "default": "default", "say": "reminder sound",
                       "aliases": {"phone": "default", "normal": "default", "on": "default", "sound": "default",

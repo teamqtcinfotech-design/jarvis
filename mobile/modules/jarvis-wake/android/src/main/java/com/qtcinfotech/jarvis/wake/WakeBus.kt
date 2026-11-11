@@ -42,6 +42,13 @@ object WakeBus {
         pushListener?.invoke()
     }
 
+    /** He started talking while JARVIS was speaking: the voice has been stopped; the app should listen now. */
+    @Volatile var bargeListener: (() -> Unit)? = null
+
+    fun onBarge() {
+        bargeListener?.invoke()
+    }
+
     fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences("jarvis_wake", Context.MODE_PRIVATE)
 
@@ -101,6 +108,8 @@ object WakeBus {
     /** The last reminder list fetched (the next hour), so reminders still fire with no connection. */
     const val KEY_REMINDERS_CACHE = "reminders_cache"
     const val KEY_REMINDERS_CACHED_AT = "reminders_cached_at"
+    /** Talking over JARVIS stops it and it listens (default on; off if the room echoes). */
+    const val KEY_BARGE_IN = "barge_in"
     const val KEY_SPEAK_LOCKED = "speak_locked"
     const val KEY_SPOKEN = "spoken_keys"
     const val KEY_PUSH_TOKEN = "push_token"

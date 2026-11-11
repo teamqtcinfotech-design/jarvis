@@ -390,7 +390,28 @@ def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
 
 
 def _execute(user: User, p: dict, address: str, lang: str = "en") -> dict:
-    """Do what the card says. lang: the language of the "yes" just spoken; the confirmation follows it."""
+    """Do what the card says. lang: the language of the "yes" just spoken; the confirmation follows it.
+    A card with further items (two meetings in one breath) saves each of them in turn and reports on all."""
+    address_hi = services.address_hi_of(user)
+    batch = [b for b in (p.get("batch") or []) if isinstance(b, dict)]
+    if not batch:
+        return _execute_one(user, p, address, lang)
+    saved, failed = [], []
+    for item in [p] + batch:
+        resp = _execute_one(user, item, address, lang)
+        (saved if resp["action"] == "saved" else failed).append((item, resp))
+    n, k = len(saved), len(failed)
+    if not failed:
+        spoken = f"Saved all {n}, {address}."
+        hi = f"सभी {n} सेव हो गए, {address_hi}।"
+    else:
+        names = "; ".join(f"{i.get('title') or 'one item'} ({r['show'].split(': ', 1)[-1].rstrip('.')})" for i, r in failed)
+        spoken = f"Saved {n} of {n + k}, {address}. Could not save: {names}."
+        hi = f"{n + k} में से {n} सेव हुए, {address_hi}। ये नहीं हो पाए: {names}।"
+    return _resp(spoken, *_twin(lang, hi), listen=True, action="saved" if saved else "error")
+
+
+def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
     a = p.get("action")
     targets = p.get("targets") or ([p["target"]] if p.get("target") else [])
     sir, sir_hi, he = services.md_address(), services.md_address_hi(), services.md_pronouns()[0]

@@ -2452,6 +2452,80 @@ class HabitsAndRulesTests(BaseCase):
         self.assertNotIn("Sharma", json.dumps(d["view"]["rows"]))
 
 
+class TwoThingsInOneBreathTests(BaseCase):
+    """"4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath": nothing is dropped, every item is checked by the
+    same rules, one card reads them all back, one yes saves them all."""
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def turn(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def two_meetings(self, **extra):
+        day = (tu.today_local() + timedelta(days=1)).isoformat()  # tomorrow, so the times are ahead whenever this runs
+        return _cmd(intent="create_task", title="Meeting with Aman", kind="MEETING", due_date=day, due_time="16:00", engine="rules",
+                    more_items=[{"intent": "create_task", "title": "Meeting with Sharma ji", "notes": "", "kind": "MEETING", "priority": "NORMAL",
+                                 "due_date": day, "due_time": "20:00", "due_in_minutes": 0, "duration_minutes": 0, "remind_before_minutes": 0,
+                                 "staff_name": "", "team_name": "", "people": [], "reminder_line": ""}], **extra)
+
+    def test_both_meetings_are_read_back_and_saved_on_one_yes(self):
+        d = self.interpret(self.md_client, "4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath", self.two_meetings())
+        self.assertEqual(d["action"], "private_task")
+        self.assertEqual([b["title"] for b in d["batch"]], ["Meeting with Sharma ji"])
+        self.assertEqual(d["batch"][0]["due_time"], "20:00")
+        self.assertIn("2 things", d["spoken_reply"])
+        self.assertIn("Meeting with Aman", d["spoken_reply"])
+        self.assertIn("Meeting with Sharma ji", d["spoken_reply"])
+        self.assertTrue(d["spoken_reply"].endswith("Shall I save all 2?"), d["spoken_reply"])
+        self.assertEqual(d["speak_lang"], "hi")
+        self.assertIn("सभी 2 सेव कर दूँ?", d["speak_text"])
+        self.assertFalse(d["needs_clarification"])
+        # With the app closed: the same two in one breath, "haan", both saved.
+        before = PrivateTask.objects.filter(owner=self.md).count()
+        r = self.turn(self.md_client, "4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath", self.two_meetings())
+        self.assertEqual(r["action"], "private_task")
+        self.assertIn("2 things", r["show"])
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual((r["action"], r["show"]), ("saved", "Saved all 2, Sir."), r)
+        self.assertEqual(r["say"], "सभी 2 सेव हो गए, सर।")
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before + 2)
+        titles = set(PrivateTask.objects.filter(owner=self.md).values_list("title", flat=True))
+        self.assertTrue({"Meeting with Aman", "Meeting with Sharma ji"} <= titles)
+
+    def test_a_question_about_one_item_comes_first_and_the_rest_wait(self):
+        cmd = self.two_meetings()
+        cmd["more_items"][0]["people"] = ["Aman"]  # nobody JARVIS knows
+        d = self.interpret(self.md_client, "4 baje meeting aur 8 baje Aman ke saath", cmd)
+        self.assertTrue(d["needs_clarification"])
+        self.assertIn("I don't know any Aman", d["question"])
+        self.assertEqual(len(d["batch"]), 1)  # kept, waiting behind the question
+        self.assertEqual(d["spoken_reply"], d["question"])
+
+    def test_a_mixed_list_goes_to_its_own_places(self):
+        day = (tu.today_local() + timedelta(days=1)).isoformat()
+        cmd = _cmd(intent="create_task", title="Call Mehta ji", kind="CALL", due_date=day, due_time="15:00", engine="rules",
+                   more_items=[{"intent": "assign_to_pa", "title": "Book the Pune hotel", "notes": "", "kind": "TASK", "priority": "NORMAL",
+                                "due_date": day, "due_time": "", "due_in_minutes": 0, "duration_minutes": 0, "remind_before_minutes": 0,
+                                "staff_name": "", "team_name": "", "people": [], "reminder_line": ""}])
+        d = self.interpret(self.md_client, "3 baje Mehta ji ko call aur Priya ko bolo Pune hotel book kare", cmd)
+        self.assertEqual((d["action"], d["batch"][0]["action"]), ("private_task", "pa_task"))
+        self.assertIn("personal call: Call Mehta ji", d["spoken_reply"])
+        self.assertIn("task for Priya: Book the Pune hotel", d["spoken_reply"])
+        r = self.turn(self.md_client, "3 baje Mehta ji ko call aur Priya ko bolo Pune hotel book kare", cmd)
+        self.assertEqual(r["action"], "private_task", r)
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual((r["action"], r["show"]), ("saved", "Saved all 2, Sir."), r)
+        self.assertIn("Call Mehta ji", list(PrivateTask.objects.filter(owner=self.md).values_list("title", flat=True)))  # (encrypted title: read, not filtered)
+        self.assertTrue(SharedTask.objects.filter(title="Book the Pune hotel", assignee_type="PA").exists())
+
+
 class ReliabilityTests(BaseCase):
     """Reminders pushed at their moment, the phone's diagnostics, honesty about the staff door, and late wording."""
 

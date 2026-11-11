@@ -8,8 +8,8 @@
  * When there is something to show (a card that needs a yes, a list, a chart) the orb glides up to the top and
  * gets small, and the card takes the screen beneath it, so nothing ever sits on top of anything else.
  *
- * The pencil on the home screen opens the same place ready for typing: the orb small at the top, a type box at
- * the bottom with a microphone beside it.
+ * The small orb in the home screen's corner opens the same place the chat way ("docked"): the conversation above,
+ * a type box at the bottom, and the orb sitting just above the type box, listening from the first moment.
  */
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
@@ -17,7 +17,7 @@ import { Animated, Easing, Keyboard, Linking, Modal, Platform, Pressable, Scroll
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
 
-import { useConversation } from '@/lib/conversation';
+import { type Msg, useConversation } from '@/lib/conversation';
 import { mdWord } from '@/lib/names';
 import { useSession } from '@/lib/session';
 import { colors, fonts, radius } from '@/lib/theme';
@@ -30,6 +30,8 @@ import { Icon, Txt } from './ui';
 
 const BIG = 216;            // the orb in the middle
 const SMALL = 0.4;          // and how small it gets at the top
+const DOCK = 0.5;           // and its size when docked above the type box
+const COMPOSER_H = 50;      // the type box row at the bottom
 /** Android 12 and later can blur what is behind; older phones get a more solid frost instead. */
 export const CAN_BLUR = Platform.OS === 'android' && Number(Platform.Version) >= 31;
 
@@ -111,7 +113,8 @@ export function AssistantStage() {
   if (conv.talkOpen && !mounted) setMounted(true); // mount as soon as it opens; unmount after the fade out
   const [fade] = useState(() => new Animated.Value(0));
   const [rise] = useState(() => new Animated.Value(0));      // the orb coming up as the stage opens
-  const [small] = useState(() => new Animated.Value(0));     // 0 = big in the middle, 1 = small at the top
+  const [orbTop] = useState(() => new Animated.Value(0));    // where the orb's box sits: big in the middle, small at the top, or docked above the type box
+  const [orbSize] = useState(() => new Animated.Value(1));   // and how big it is there
   const [typingChoice, setTypingChoice] = useState<{ at: number; on: boolean } | null>(null);
   const [readAll, setReadAll] = useState('');
   const [setAside, setSetAside] = useState('');
@@ -134,6 +137,23 @@ export function AssistantStage() {
   const shown = topAnswer && topAnswer.id !== setAside && topAnswer.at >= Math.max(lastUser?.at ?? 0, conv.talkOpenedAt) ? topAnswer : null;
   const said = shown ? [...conv.messages].reverse().find((m) => m.role === 'jarvis' && m.at >= shown.at) : undefined;
   const compact = Boolean(shown || conv.draft || typing || keyboard > 0);
+  // Opened from the home orb: the chat way, orb docked above the type box, everything else above it.
+  const docked = conv.talkMode === 'dock';
+  // Some phones resize the window for the keyboard and some do not: pad by hand only when it did not shrink.
+  const keyboardPad = keyboard > 0 && rootH > fullH - 80 ? keyboard : 0;
+  const bottomPad = keyboardPad + (keyboardPad ? 8 : insets.bottom + 10); // under the type box in the chat layout
+
+  // Where the orb sits. It is one orb the whole time: it only moves and changes size.
+  const bigTop = Math.round(height * 0.3 - BIG / 2);
+  const smallTop = insets.top + 6 - (BIG * (1 - SMALL)) / 2; // so its visible top edge is just under the status bar
+  const dockBottom = (rootH || height) - bottomPad - COMPOSER_H - 8; // its visible bottom edge, just above the type box
+  const dockTop = dockBottom - (BIG * DOCK) / 2 - BIG / 2;
+  const targetTop = docked ? dockTop : compact ? smallTop : bigTop;
+  const targetScale = docked ? DOCK : compact ? SMALL : 1;
+  useEffect(() => {
+    Animated.spring(orbTop, { toValue: targetTop, friction: 9, tension: 60, useNativeDriver: true }).start();
+    Animated.spring(orbSize, { toValue: targetScale, friction: 9, tension: 60, useNativeDriver: true }).start();
+  }, [targetTop, targetScale, orbTop, orbSize]);
 
   // Open: everything fades in and the orb rises into place. Close: fade out, then leave.
   useEffect(() => {
@@ -149,15 +169,12 @@ export function AssistantStage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conv.talkOpen]);
-  useEffect(() => {
-    Animated.spring(small, { toValue: compact ? 1 : 0, friction: 9, tension: 60, useNativeDriver: true }).start();
-  }, [compact, small]);
 
   // He got a short spoken answer and there is nothing to look at: JARVIS steps off the screen by itself after a
-  // few quiet seconds. A card, a list, a long answer or the type box keep it open.
+  // few quiet seconds. A card, a list, a long answer, the type box or the chat layout keep it open.
   const last = conv.messages[conv.messages.length - 1];
   const nothingToRead = !last || (last.text.length <= 140 && !last.sources?.length && last.tone !== 'error');
-  const resting = conv.talkOpen && conv.orb === 'idle' && !compact && nothingToRead;
+  const resting = conv.talkOpen && conv.orb === 'idle' && !compact && !docked && nothingToRead;
   const closeRef = useRef(conv.closeTalk);
   useEffect(() => {
     closeRef.current = conv.closeTalk;
@@ -188,20 +205,36 @@ export function AssistantStage() {
     : [`${md} aaj free kab hain?`, 'Mere tasks dikhao', `${md} ke liye kal 3 baje bank meeting`, 'Kya kya ho gaya?'];
   const recent = conv.draft ? conv.messages.slice(-2) : conv.messages.slice(-6);
 
-  // Where the orb sits. It is one orb the whole time: it only moves and changes size.
-  const bigTop = Math.round(height * 0.3 - BIG / 2);
-  const smallTop = insets.top + 6 - (BIG * (1 - SMALL)) / 2; // so its visible top edge is just under the status bar
-  const orbY = Animated.add(
-    small.interpolate({ inputRange: [0, 1], outputRange: [bigTop, smallTop] }),
-    rise.interpolate({ inputRange: [0, 1], outputRange: [60, 0] }),
-  );
-  const orbScale = Animated.multiply(
-    small.interpolate({ inputRange: [0, 1], outputRange: [1, SMALL] }),
-    rise.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }),
-  );
+  const orbY = Animated.add(orbTop, rise.interpolate({ inputRange: [0, 1], outputRange: [60, 0] }));
+  const orbScale = Animated.multiply(orbSize, rise.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }));
   const headRoom = insets.top + 6 + BIG * SMALL + 6;      // space the small orb takes at the top
-  // Some phones resize the window for the keyboard and some do not: pad by hand only when it did not shrink.
-  const keyboardPad = keyboard > 0 && rootH > fullH - 80 ? keyboard : 0;
+
+  /** One line of the conversation: his words on the right, JARVIS's with a small mark on the left. */
+  const renderMsg = (m: Msg) =>
+    m.role === 'user' ? (
+      <View key={m.id} style={s.userRow}>
+        <View style={s.userBubble}><Txt variant="body">{m.text}</Txt></View>
+      </View>
+    ) : (
+      <View key={m.id} style={s.jarvisRow}>
+        <View style={[s.avatar, m.tone === 'error' && { backgroundColor: colors.dangerSoft }, m.tone === 'saved' && { backgroundColor: colors.successSoft }]}>
+          <Icon name={m.tone === 'error' ? 'alert' : m.tone === 'saved' ? 'checkmark' : 'sparkles'} size={13} color={m.tone === 'error' ? colors.danger : m.tone === 'saved' ? colors.success : colors.accent} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Txt variant="body" style={[{ fontSize: 16, lineHeight: 24 }, m.tone === 'error' && { color: colors.danger }]}>{m.text}</Txt>
+          {m.sources?.length ? (
+            <View style={[s.sources, { justifyContent: 'flex-start' }]}>
+              {m.sources.map((src) => (
+                <Pressable key={src.url} onPress={() => Linking.openURL(src.url)} style={s.source}>
+                  <Icon name="link-outline" size={12} color={colors.muted} />
+                  <Txt variant="caption" numberOfLines={1} style={{ marginLeft: 4, maxWidth: 200 }}>{src.title}</Txt>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+        </View>
+      </View>
+    );
 
   return (
     <Modal visible transparent animationType="none" onRequestClose={conv.closeTalk} statusBarTranslucent>
@@ -209,10 +242,65 @@ export function AssistantStage() {
         {/* frost + drifting colours over the (blurred) home; a tap on empty space leaves */}
         <View style={[StyleSheet.absoluteFill, { backgroundColor: CAN_BLUR ? 'rgba(248,248,253,0.72)' : 'rgba(248,248,253,0.93)' }]} />
         <Aura width={width} height={height} />
-        <Pressable style={StyleSheet.absoluteFill} onPress={compact ? undefined : conv.closeTalk} accessibilityLabel="Close JARVIS" />
+        <Pressable style={StyleSheet.absoluteFill} onPress={compact || docked ? undefined : conv.closeTalk} accessibilityLabel="Close JARVIS" />
+
+        {/* the chat way: the conversation above, the type box below, the orb docked just above it */}
+        {docked ? (
+          <View style={[s.content, { paddingTop: insets.top + 58, paddingBottom: bottomPad }]} pointerEvents="box-none">
+            <ScrollView
+              ref={scrollRef}
+              style={s.fill}
+              contentContainerStyle={{ paddingBottom: 12 }}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+            >
+              {!conv.messages.length && !conv.busy ? (
+                <View style={{ rowGap: 8, marginTop: 4 }}>
+                  <Txt variant="small" style={{ textAlign: 'center', marginBottom: 2 }}>Speak, or type below.</Txt>
+                  {suggestions.map((q) => (
+                    <Pressable key={q} onPress={() => conv.send(q)} style={({ pressed }) => [s.suggestion, pressed && { opacity: 0.7 }]}>
+                      <Icon name="sparkles-outline" size={14} color={colors.accent} />
+                      <Txt variant="small" style={{ color: colors.text, marginLeft: 8, flex: 1 }}>{q}</Txt>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+              {conv.messages.slice(-8).map(renderMsg)}
+              {shown ? (
+                <View style={{ marginTop: 12 }}>
+                  <DataCard key={shown.id} view={shown.view} onRemove={() => conv.removeAnswer(shown.id)} />
+                </View>
+              ) : null}
+              {conv.draft ? (
+                <DraftCard draft={conv.draft} saving={conv.busy === 'saving'} listening={conv.listening} error={conv.draftError} onChange={conv.editDraft} onSave={conv.save} onCancel={conv.cancelDraft} onReply={conv.send} />
+              ) : null}
+            </ScrollView>
+            {/* the orb (absolute, see below) sits in this gap, with its status line just above it */}
+            <Txt numberOfLines={1} style={[s.status, { marginTop: 6, marginBottom: BIG * DOCK + 14 }, conv.listening && { color: colors.accent }]}>
+              {conv.listening && conv.partial ? conv.partial : conv.status}
+            </Txt>
+            <View style={[s.composer, { paddingTop: 0 }]}>
+              <View style={s.inputWrap}>
+                <TextInput
+                  value={typed}
+                  onChangeText={setTyped}
+                  placeholder="Type to JARVIS…"
+                  placeholderTextColor={colors.faint}
+                  style={s.input}
+                  onSubmitEditing={send}
+                  returnKeyType="send"
+                />
+              </View>
+              <Pressable onPress={typed.trim() ? send : speak} style={({ pressed }) => [s.round, s.roundDark, pressed && { opacity: 0.7 }]} accessibilityLabel={typed.trim() ? 'Send' : 'Speak'}>
+                <Icon name={typed.trim() ? 'arrow-up' : 'mic'} size={20} color={colors.white} />
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         {/* the words under the big orb */}
-        {!compact ? (
+        {!compact && !docked ? (
           <View style={[s.voice, { top: bigTop + BIG - 6 }]} pointerEvents="box-none">
             <Txt style={[s.status, conv.listening && { color: colors.accent }]}>{conv.status}</Txt>
             {conv.listening && conv.partial ? (
@@ -237,7 +325,7 @@ export function AssistantStage() {
         ) : null}
 
         {/* something to show: it gets the screen under the small orb */}
-        {compact ? (
+        {compact && !docked ? (
           <View style={[s.content, { paddingTop: headRoom, paddingBottom: keyboardPad }]} pointerEvents="box-none">
             <Txt numberOfLines={1} style={[s.status, { marginBottom: 6 }, conv.listening && { color: colors.accent }]}>
               {conv.listening && conv.partial ? conv.partial : conv.status}
@@ -280,32 +368,7 @@ export function AssistantStage() {
                     ))}
                   </View>
                 ) : null}
-                {recent.map((m) =>
-                  m.role === 'user' ? (
-                    <View key={m.id} style={s.userRow}>
-                      <View style={s.userBubble}><Txt variant="body">{m.text}</Txt></View>
-                    </View>
-                  ) : (
-                    <View key={m.id} style={s.jarvisRow}>
-                      <View style={[s.avatar, m.tone === 'error' && { backgroundColor: colors.dangerSoft }, m.tone === 'saved' && { backgroundColor: colors.successSoft }]}>
-                        <Icon name={m.tone === 'error' ? 'alert' : m.tone === 'saved' ? 'checkmark' : 'sparkles'} size={13} color={m.tone === 'error' ? colors.danger : m.tone === 'saved' ? colors.success : colors.accent} />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Txt variant="body" style={[{ fontSize: 16, lineHeight: 24 }, m.tone === 'error' && { color: colors.danger }]}>{m.text}</Txt>
-                        {m.sources?.length ? (
-                          <View style={[s.sources, { justifyContent: 'flex-start' }]}>
-                            {m.sources.map((src) => (
-                              <Pressable key={src.url} onPress={() => Linking.openURL(src.url)} style={s.source}>
-                                <Icon name="link-outline" size={12} color={colors.muted} />
-                                <Txt variant="caption" numberOfLines={1} style={{ marginLeft: 4, maxWidth: 200 }}>{src.title}</Txt>
-                              </Pressable>
-                            ))}
-                          </View>
-                        ) : null}
-                      </View>
-                    </View>
-                  ),
-                )}
+                {recent.map(renderMsg)}
                 {conv.draft ? (
                   <DraftCard draft={conv.draft} saving={conv.busy === 'saving'} listening={conv.listening} error={conv.draftError} onChange={conv.editDraft} onSave={conv.save} onCancel={conv.cancelDraft} onReply={conv.send} />
                 ) : null}
@@ -355,7 +418,7 @@ export function AssistantStage() {
         </Pressable>
 
         {/* when it is only the orb: how to stop, and the pencil to type instead */}
-        {!compact ? (
+        {!compact && !docked ? (
           <View style={[s.foot, { bottom: insets.bottom + 18 }]} pointerEvents="box-none">
             <View style={s.hint}>
               <Txt variant="caption" style={{ color: colors.inkSoft }}>

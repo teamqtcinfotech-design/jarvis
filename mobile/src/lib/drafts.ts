@@ -68,10 +68,15 @@ export function draftHeading(d: Draft, md = 'Sir', him = 'him'): { title: string
 
 /** Short description of a waiting card, so the AI can tell yes / no / a change / something else apart. */
 export function describeDraft(d: Draft, md = 'Sir'): string {
-  const what = d.action === 'remember' ? d.memory_text
-    : d.targets?.length ? d.targets.map((t) => t.title).join(' + ')
-    : d.target ? d.target.title : d.title;
-  const when = d.due_date ? `, ${dayLabel(d.due_date)}${d.due_time ? ` ${d.due_time}` : ''}` : '';
-  const who = d.action === 'delegation' && d.staff ? `, for ${d.staff.name}` : '';
-  return `${draftHeading(d, md).title}: ${what}${when}${who}`.slice(0, 400);
+  const one = (x: Draft) => {
+    const what = x.action === 'remember' ? x.memory_text
+      : x.targets?.length ? x.targets.map((t) => t.title).join(' + ')
+      : x.target ? x.target.title : x.title;
+    const when = x.due_date ? `, ${dayLabel(x.due_date)}${x.due_time ? ` ${x.due_time}` : ''}` : '';
+    const who = x.action === 'delegation' && x.staff ? `, for ${x.staff.name}` : '';
+    return `${draftHeading(x, md).title}: ${what}${when}${who}`;
+  };
+  // Several things in one breath: the whole list, so "second one 9 baje" or "sab save karo" are read right.
+  const all = [d, ...(d.batch ?? [])].map(one);
+  return (all.length > 1 ? `${all.length} items: ${all.join(' | ')}` : all[0]).slice(0, 400);
 }

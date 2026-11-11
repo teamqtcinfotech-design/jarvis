@@ -132,6 +132,7 @@ function SettingsScreen() {
         listenLang: prefs.listenLang === 'hi-IN' ? 'hi-IN' : 'en-IN',
         replyLang: prefs.replyLanguage === 'auto' ? user?.language : prefs.replyLanguage,
         reminderSound: prefs.reminderSound,
+        bargeIn: prefs.bargeIn,
         speakWhenLocked: prefs.privateAloudWhenLocked,
         wakeWord: true,
       });
@@ -203,6 +204,11 @@ function SettingsScreen() {
               <Chip key={m} label={m === 60 ? '1 hour' : `${m} min`} selected={prefs.snoozeMinutes === m} onPress={() => update({ snoozeMinutes: m })} />
             ))}
           </View>
+          <Row
+            title="Talk over JARVIS to interrupt"
+            detail="While JARVIS is speaking, start talking and it stops and listens, like a person. Switch off if the room echoes and JARVIS keeps cutting itself short."
+            right={<Switch value={prefs.bargeIn} onValueChange={(v) => update({ bargeIn: v })} trackColor={{ true: colors.gold }} />}
+          />
           <Row title="Reminder sound (app closed)" detail="The notification for reminders that arrive while JARVIS is closed." right={null} />
           <View style={s.chips}>
             <Chip label="Phone's sound" selected={prefs.reminderSound === 'default'} onPress={() => update({ reminderSound: 'default' })} />

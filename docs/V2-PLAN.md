@@ -94,8 +94,20 @@ Status: `[ ]` open, `[~]` in progress, `[x]` done (commit). Items marked **APK**
 - [~] 5.6 Late items say how late ("Pay the vendor (3 days late)", oldest first); the evening summary names the
       oldest. "Did the meeting happen?" is the existing check-in. Recurrence NOT done (a separate design: repeat
       rules, exceptions, "skip this week").
-- [ ] 5.7 Barge-in while JARVIS speaks. NOT done: the recogniser and the voice cannot hold the microphone at
-      once on this phone without echo; a tap or "Hey JARVIS" interrupts as before.
+- [x] 5.7 Barge-in while JARVIS speaks: the wake listener's microphone stays open while the voice plays, measures
+      the room for the first 0.6 s of each line and, when the sound rises well above that for four slices in a row,
+      stops the voice and listens at once (in the app and in the closed-app loop). Switch in Settings
+      ("Interrupt by talking over it"). A tap or "Hey JARVIS" still interrupts as before. **APK**
+
+## Found while testing version 2 (11 Nov)
+
+- [x] 6.1 Two things in one breath ("book a meeting at 4 with Aman and one at 8 with Sharma ji"): the brain
+      returns the rest as `more_items`; each goes through the same rules as the first (private or PA, unknown
+      person, past time); one card lists them all, one yes saves all, and each lands in its own place. A sub-item's
+      question (who is Sharma ji?) is asked first with the batch kept. Same in the closed-app loop. **APK**
+- [x] 6.2 The home screen's corner shows the same colour-changing orb (the pencil is gone); a tap opens the chat
+      layout: the conversation above, the type box at the bottom, the orb docked just above it, listening at once.
+      The orb is one and the same the whole time; it only moves and changes size. **APK**
 
 ## Done before this plan (10–11 Nov)
 

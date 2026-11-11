@@ -44,6 +44,8 @@ export interface Prefs {
   snoozeMinutes: number;
   /** Notification sound for reminders that arrive while the app is closed. */
   reminderSound: 'default' | 'silent';
+  /** Talking over JARVIS while it speaks stops it and it listens, like a person. Off if the room echoes. */
+  bargeIn: boolean;
 }
 
 export interface RoutineBlock {
@@ -77,6 +79,7 @@ const DEFAULTS: Prefs = {
   briefingTime: '09:00',
   snoozeMinutes: 15,
   reminderSound: 'default',
+  bargeIn: true,
 };
 
 const KEY = 'jarvis.prefs';

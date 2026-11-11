@@ -110,6 +110,32 @@ COMMAND_SCHEMA = {
         "done_reply_hi": {"type": "string", "description": "When reply_language is hi: done_reply in Devanagari. Else empty."},
         "reminder_line": {"type": "string"},
         "confidence": {"type": "number"},
+        "more_items": {
+            "type": "array",
+            "description": "when ONE sentence asks for more than one separate thing to save: every item after the first (the first is in the main fields), each complete in itself; empty otherwise",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "intent": {"type": "string", "enum": ["create_task", "assign_to_pa", "meet_with_pa", "assign_to_staff", "assign_to_team", "request_for_md", "needs_destination"]},
+                    "title": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"]},
+                    "priority": {"type": "string", "enum": ["URGENT", "HIGH", "NORMAL", "LOW"]},
+                    "due_date": {"type": "string"},
+                    "due_time": {"type": "string"},
+                    "due_in_minutes": {"type": "integer"},
+                    "duration_minutes": {"type": "integer"},
+                    "remind_before_minutes": {"type": "integer"},
+                    "staff_name": {"type": "string"},
+                    "team_name": {"type": "string"},
+                    "people": {"type": "array", "items": {"type": "string"}},
+                    "reminder_line": {"type": "string"},
+                },
+                "required": ["intent", "title", "notes", "kind", "priority", "due_date", "due_time", "due_in_minutes", "duration_minutes",
+                             "remind_before_minutes", "staff_name", "team_name", "people", "reminder_line"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": [
         "intent", "title", "notes", "kind", "priority", "due_date", "due_time", "duration_minutes",
@@ -119,7 +145,7 @@ COMMAND_SCHEMA = {
         "view_to", "view_by", "view_filter", "view_types", "view_from_whom", "view_priority", "view_words", "view_group", "view_missing",
         "needs_clarification",
         "clarification_question", "spoken_reply", "spoken_reply_hi", "reply_language", "question", "memory_text",
-        "done_reply", "done_reply_hi", "reminder_line", "confidence",
+        "done_reply", "done_reply_hi", "reminder_line", "confidence", "more_items",
     ],
     "additionalProperties": False,
 }
@@ -138,6 +164,7 @@ How JARVIS works — decide WHERE the task goes (this is the most important deci
 - When the speaker is the PA (speaker_role PA), decide WHOSE it is before anything else: for Sir -> request_for_md; her own task or reminder ("mera", "mere liye", "mujhe yaad dilana", "I have to") -> create_task (it goes on HER list, not Sir's); for a staff member -> assign_to_staff. If she did not say whose it is ("Aman ke saath meeting book karo", "kal bank jaana hai"), use needs_destination and ask (addressing her by the name in speaker_name): "<speaker_name>, is this for Sir, for you, or for someone in the team?" Never assume it is for Sir.
 - needs_destination: there is work to do but nobody was named and it is not plainly the MD's own (e.g. "kal GST file submit karni hai"). Ask in clarification_question: "Sir, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?" Keep all other fields filled.
 - When the instruction includes an earlier sentence plus an answer (e.g. "... . personal mein daalo" or "... . Ramesh ko"), combine them and decide using the answer.
+- MORE THAN ONE THING IN ONE BREATH: "4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath", "Suraj ko bolo hotel book kare aur Ramesh ko GST file bhejne bolo", "remind me to call Mehta at 3 and pay the electricity bill tomorrow". Nothing may be dropped: the FIRST item goes in the main fields as usual, and EVERY further one goes in more_items (up to 5), each complete in itself with its own intent, title, kind, time, person and destination (decided by the same rules). Something that is one errand with several parts ("book the flights and the hotel for Pune") stays ONE item. spoken_reply reads all of them back in one line: "Sir, two things: meeting with Aman at 4 PM, and meeting with Sharma ji at 8 PM today. Shall I save both?" (spoken_reply_hi the same in Devanagari). When the speaker answers a question about one of them, or changes one ("second one 9 baje kar do", "Sharma wali cancel karo"), return the WHOLE corrected list again (main fields + more_items), never just the changed item. more_items is otherwise an empty array.
 - You never execute anything. The server validates your output and the user confirms by voice before anything is saved.
 
 Intents that are not tasks:
