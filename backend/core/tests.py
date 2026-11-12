@@ -2967,3 +2967,32 @@ class TasksAreNotMeetingsTests(BaseCase):
         self.assertIn("Send the urgent list", d["spoken_reply"])
         self.assertIn("Weekly sync", d["spoken_reply"])
 
+
+
+class WhoseMeetingTests(BaseCase):
+    """The PA books a meeting: it goes to the MD only when she says it is the MD's."""
+
+    def interpret(self, client, text, cmd):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _cmd(self, intent):
+        day = (tu.today_local() + timedelta(days=1)).isoformat()
+        return _cmd(intent=intent, title="Meeting with Aman", kind="MEETING", due_date=day, due_time="15:00", engine="ai")
+
+    def test_no_owner_said_asks_and_never_goes_to_the_md(self):
+        for intent in ("meet_with_pa", "needs_destination", "request_for_md"):
+            d = self.interpret(self.pa_client, "kal Aman ke saath 3 baje meeting book kar do", self._cmd(intent))
+            self.assertEqual(d["action"], "choose_destination", intent)
+
+    def test_my_meeting_is_her_own(self):
+        for intent in ("meet_with_pa", "needs_destination", "create_task"):
+            d = self.interpret(self.pa_client, "kal 3 baje meri Aman ke saath meeting book kar do", self._cmd(intent))
+            self.assertEqual(d["action"], "pa_self_task", intent)
+
+    def test_the_mds_meeting_is_a_request(self):
+        for text in ("kal 3 baje Ma'am ki Aman ke saath meeting book kar do", "कल 3 बजे मैम की अमन के साथ मीटिंग"):
+            d = self.interpret(self.pa_client, text, self._cmd("needs_destination"))
+            self.assertEqual(d["action"], "md_request", text)

@@ -209,11 +209,11 @@ def _mentions_pa(text: str) -> bool:
     return bool(pa and any(n and f" {n.lower()} " in low for n in (pa.display_name, pa.first_name)))
 
 
-_FOR_SIR = re.compile(r"\b(sir|md|boss|sahab|saab|ma'?am|mam|madam|maidam|mem)\b", re.IGNORECASE)
+_FOR_SIR = re.compile(r"\b(sir|md|boss|sahab|saab|ma'?am|mam|madam|maidam|mem)\b|सर|मैम|मैडम|मेम|साहब|बॉस", re.IGNORECASE)
 # Mansi speaking about herself ("mera reminder", "I have to", "mujhe yaad dilana").
 _PA_OWN = re.compile(
     r"\b(mera|meri|mere|mujhe|mujhko|maine|khud|apna|apni|apne|personal|my|mine|myself|for me|remind me|"
-    r"i have to|i need to|i will|i'll|i must)\b", re.IGNORECASE)
+    r"i have to|i need to|i will|i'll|i must)\b|मेरा|मेरी|मेरे|मुझे|मुझको|मैंने|अपना|अपनी|अपने|खुद", re.IGNORECASE)
 
 
 def _last_cue(pattern: re.Pattern, text: str) -> int:
@@ -261,7 +261,12 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
             sir_at = max(sir_at, f" {text.lower()} ".rfind(f" {md_name} "))
         for_sir, own = sir_at >= 0, own_at >= 0
         if intent == "meet_with_pa":
-            intent = "request_for_md"
+            # The model's "a meeting with the PA" is not her saying it is for the MD ("Aman ke saath meeting book
+            # karo" is not): her words decide, as everywhere else, and without them JARVIS asks whose it is.
+            intent = "request_for_md" if for_sir and sir_at > own_at else "pa_own" if own else "needs_destination"
+        elif intent == "needs_destination" and (own or for_sir):
+            # She did say whose it is ("meri Aman ke saath meeting", "Ma'am ki meeting"): no need to ask.
+            intent = "pa_own" if own_at > sir_at else "request_for_md"
         elif intent == "create_task" and cmd.get("engine") == "rules":
             # The offline parser cannot judge meaning: her words decide, the last one said wins.
             intent = "needs_destination" if not (own or for_sir) else "pa_own" if own_at > sir_at else "request_for_md"
