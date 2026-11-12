@@ -446,7 +446,10 @@ def _bucket(items: list[dict]) -> dict:
             date.fromisoformat(item["due_date"]) if item.get("due_date") else None
         )
         if d is None:
-            buckets["anytime"].append(item)
+            # No date on it, but it was given today: it is today's work until it is done or dated.
+            made = item.get("created_at")
+            given_today = bool(made) and tu.to_local(datetime.fromisoformat(made)).date() == today
+            buckets["today" if given_today else "anytime"].append(item)
         elif d == today:
             buckets["today"].append(item)
         elif d <= week_end:

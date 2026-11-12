@@ -650,12 +650,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         if (cur.action === 'change_task') {
           setDraft({ ...cur, changes: { ...cur.changes, ...(o.due_date ? { due_date: o.due_date } : {}), ...(o.due_time ? { due_time: o.due_time } : {}) } });
         }
-        else setDraft({ ...cur, due_date: o.due_date ?? cur.due_date, due_time: o.due_time ?? cur.due_time });
+        else setDraft({ ...cur, due_date: o.due_date ?? cur.due_date, due_time: o.due_time ?? cur.due_time, schedule: null });
       } else if (cur && o && cur.action !== 'change_task' && (o.duration_minutes || o.batch?.length)) {
         // He settled a clash: keep this one short (a new length), or push the others (they ride along as a batch).
         editedRef.current = true;
         setDraft({ ...cur, duration_minutes: o.duration_minutes ?? cur.duration_minutes,
-          batch: o.batch?.length ? [...(cur.batch ?? []), ...o.batch] : cur.batch });
+          batch: o.batch?.length ? [...(cur.batch ?? []), ...o.batch] : cur.batch, schedule: null });
       }
       save();
       return;
@@ -755,6 +755,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (!d.title.trim()) return 'Please add what the task should say.';
     if (d.due_time && !HHMM.test(d.due_time)) return 'Time must look like 14:30.';
     if (d.due_time && !d.due_date) return 'Pick a day for this time.';
+    if (d.schedule?.hard) return 'Another meeting is at this time. Say which way: keep it short, move the other, or a new time.';
     if (d.action === 'delegation' && !d.staff) return 'Choose who should do this.';
     if (d.action === 'team_delegation' && !d.team?.members.length) return 'No one in that team can take this.';
     return '';

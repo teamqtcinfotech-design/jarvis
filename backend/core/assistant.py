@@ -499,6 +499,8 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     if not minutes and kind == Kind.MEETING:
         # No length said: the person's usual meeting length (what the confirmation tells him), not a fixed hour.
         minutes = int(prefs.get("meetingMinutes") or 0) or None
+        if minutes and whose == "self" and draft["action"] != "change_task" and not draft.get("duration_minutes"):
+            draft["duration_minutes"] = minutes  # saved with the length the diary was checked for
     review = scheduling.review(subject, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes, prefs=prefs,
                                exclude_ids=exclude)
     if whose == "self" and kind in (Kind.MEETING, Kind.CALL) and review.get("clashes"):
@@ -627,6 +629,8 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
                      "label": f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"} for c in clashes[:3]],
         "suggested": ({"due_date": sug["due_date"], "due_time": sug["due_time"], "label": alt_en} if sug else None),
         "options": options,
+        # His own meeting or call over another one: never saved like this, whatever is said (he must pick a way out).
+        "hard": bool(whose == "self" and kind in (Kind.MEETING, Kind.CALL) and any(not c.get("routine") for c in clashes)),
         "load": {"count": load.get("count", 0), "heavy": bool(load.get("heavy"))} if load else None,
         "off_day": bool(review.get("off_day")),
         "base_reply": draft.get("spoken_reply", ""),
@@ -746,7 +750,18 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
     # "Keep this one here AND move the other" is a choice (push), not "save it as it is": the choice is read first.
     picked = str(cmd.get("setting_value") or "").strip().lower()
     has_options = isinstance(sched.get("options"), dict) and bool(sched.get("options"))
+    def ask_again(lead_en: str = "", lead_hi: str = "") -> dict:
+        again = dict(pending)
+        lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
+        q_en, q_hi = (lead_en + str(sched.get("question") or "")).strip(), (lead_hi + str(sched.get("question_hi") or "")).strip()
+        again.update({"needs_clarification": False, "spoken_reply": q_en, "overrides": {}})
+        again["speak_text"], again["speak_lang"] = (q_hi, "hi") if lang == "hi" and q_hi else (q_en, "en")
+        return again
+
     if cmd.get("keep_original") and not (has_options and picked in {"fit", "push"}):
+        if sched.get("hard") and sched.get("question"):
+            # "Keep it there anyway" over another meeting: two meetings are never put at one time.
+            return ask_again("Two meetings cannot be at the same time. ", "दो मीटिंग एक ही समय पर नहीं हो सकतीं। ")
         return draft
     d, t = _safe_date(str(cmd.get("due_date") or "")), _safe_time(str(cmd.get("due_time") or ""))
     offered = sched.get("suggested") or {}
@@ -775,12 +790,7 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
                 return draft
         if choice != "move":
             # A bare "yes" does not say which: ask again, shortly, rather than move anything on a guess.
-            again = dict(pending)
-            lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
-            q_en, q_hi = str(sched.get("question") or ""), str(sched.get("question_hi") or "")
-            again.update({"needs_clarification": False, "spoken_reply": q_en, "overrides": {}})
-            again["speak_text"], again["speak_lang"] = (q_hi, "hi") if lang == "hi" and q_hi else (q_en, "en")
-            return again
+            return ask_again()
     if not d and not t:
         if _safe_date(str(offered.get("due_date") or "")) and _safe_time(str(offered.get("due_time") or "")):
             draft["overrides"] = {"due_date": offered["due_date"], "due_time": offered["due_time"]}
@@ -795,10 +805,11 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
         new["due_time"] = t or cur_time
     draft["overrides"] = new
     asked = int(sched.get("asked") or 0)
-    if new.get("due_time") and asked < MAX_SCHEDULE_QUESTIONS and pending.get("action") in _SLOT_ACTIONS:
+    if new.get("due_time") and pending.get("action") in _SLOT_ACTIONS:
         trial = _rebuilt(pending, new)
         _advise_schedule(user, trial, address, asked=asked + 1)
-        if (trial.get("schedule") or {}).get("clashes") and trial["schedule"].get("question"):
+        t_sched = trial.get("schedule") or {}
+        if t_sched.get("clashes") and t_sched.get("question") and (asked < MAX_SCHEDULE_QUESTIONS or t_sched.get("hard")):
             lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
             trial["reply_language"] = lang
             hi = trial["schedule"]["question_hi"]
@@ -1172,6 +1183,13 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 draft["swap"] = True
                 _say(draft, f"{address}, swap them: '{a['title']}' to {tu.fmt_time(b_when)} and '{b['title']}' to {tu.fmt_time(a_when)}?",
                      f"{address_hi}, दोनों की अदला-बदली: '{a['title']}' {tu.fmt_time_hi(b_when)} और '{b['title']}' {tu.fmt_time_hi(a_when)} कर दूँ?")
+            elif intent == "change_task" and len(matches) > 1 and ({"due_date", "due_time"} & _changes_from(cmd).keys()) \
+                    and sum(1 for m in matches if (m.get("kind") in (Kind.MEETING, Kind.CALL))) > 1:
+                # "Dono 12 baje kar do": two meetings cannot share a time. Ask which one, change nothing.
+                draft["targets"], draft["target"] = [], None
+                draft["target_candidates"] = matches[:5]
+                _ask(draft, f"{address}, two meetings cannot be at the same time. Which one should I move: {names}?",
+                     f"{address_hi}, दो मीटिंग एक ही समय पर नहीं हो सकतीं। कौन सी बदलूँ: {names}?")
             elif intent == "change_task":
                 draft["changes"] = _changes_from(cmd)
                 if not draft["changes"]:

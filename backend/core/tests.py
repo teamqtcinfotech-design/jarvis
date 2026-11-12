@@ -1152,9 +1152,11 @@ class SchedulingTests(BaseCase):
         call = services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
                                                       "due_date": day, "due_time": time(16, 0), "duration_minutes": 60})
         self.turn(self.md_client, "4 baje Sharma meeting", self._meeting_cmd(day))
+        # Two meetings at one time are never saved, even on "keep it there": JARVIS asks again and saves nothing.
         r = self.turn(self.md_client, "nahi 4 hi rakho", _cmd(intent="confirm_pending", keep_original=True))
-        self.assertEqual(r["action"], "saved")
-        self.assertEqual(tu.to_local(self._new_private([call.id]).due_at).hour, 16)
+        self.assertNotEqual(r["action"], "saved")
+        self.assertIn("cannot be at the same time", r["show"])
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).exclude(id__in=[self.private.id, call.id]).count(), 0)
 
     def test_a_new_time_that_also_clashes_is_questioned_once_more(self):
         day = _workday()
@@ -1548,7 +1550,7 @@ class SmartBrainTests(BaseCase):
         self.md_client.post("/api/v1/pa-tasks/", {"title": "Book flights for Pune visit"}, format="json", HTTP_IDEMPOTENCY_KEY="p1")
         self.pa_client.post("/api/v1/pa-tasks/self/", {"title": "Renew my ID card"}, format="json", HTTP_IDEMPOTENCY_KEY="p2")
         ctx = services.ai_context(self.pa)
-        self.assertEqual(ctx["pending_summary"], {"total": 2, "late": 0, "due_today": 0, "later_or_no_date": 2, "from_sir": 1, "own": 1})
+        self.assertEqual(ctx["pending_summary"], {"total": 2, "late": 0, "due_today": 2, "later_or_no_date": 0, "from_sir": 1, "own": 1})
         self.assertNotIn(SECRET, json.dumps(ctx, default=str))
         for kind in ("pending", "official"):
             r = self.pa_client.get(f"/api/v1/views/{kind}/")
@@ -2839,6 +2841,29 @@ class MeetingJugglingTests(BaseCase):
         self.assertEqual(r["action"], "saved", r)
         aman.refresh_from_db()
         self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "11:30")
+
+    def test_one_time_is_never_given_to_two_meetings(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        sharma = self._meeting("Sharma call", day, time(15, 0))
+        d = self.interpret(self.md_client, "dono 12 baje kar do",
+                           _cmd(intent="change_task", target_refs=[str(aman.id), str(sharma.id)], changed_fields=["due_time"],
+                                due_time="12:00"))
+        self.assertTrue(d["needs_clarification"])
+        self.assertEqual(d["targets"], [])
+        self.assertIn("cannot be at the same time", d["spoken_reply"])
+
+    def test_the_saved_length_is_the_length_the_diary_was_checked_for(self):
+        day = _workday(2)
+        services.set_prefs(self.md, {"meetingMinutes": 30})
+        self._meeting("Aman review", day, time(11, 0))
+        self.turn(self.md_client, "11 baje meeting", _cmd(intent="create_task", title="Board meeting", kind="MEETING",
+                                                         due_date=day.isoformat(), due_time="11:00", engine="ai"))
+        r = self.turn(self.md_client, "Aman wali aage kar do", _cmd(intent="confirm_pending", setting_value="push"))
+        self.assertEqual(r["action"], "saved", r)
+        new = PrivateTask.objects.get(estimated_minutes=30, kind=Kind.MEETING, due_at__isnull=False, version=1,
+                                      id__in=[t.id for t in PrivateTask.objects.all() if t.title == "Board meeting"])
+        self.assertEqual(tu.to_local(new.scheduled_end).strftime("%H:%M"), "11:30")
 
     def test_a_bare_yes_asks_which_one_and_moves_nothing(self):
         day = _workday(2)

@@ -257,6 +257,8 @@ export interface DataView {
 
 /** What JARVIS found when it checked the diary for a draft: a clash, a free slot, a very full day. */
 export interface ScheduleAdvice {
+  /** His own meeting over another one: the card cannot be saved until he picks a way out. */
+  hard?: boolean;
   for: 'self' | 'pa' | 'md';
   asked: number;
   question: string;

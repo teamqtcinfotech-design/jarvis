@@ -65,7 +65,7 @@ export interface EngineItem {
   question?: AlertQuestion | null;
   mode?: 'loud' | 'silent';
   /** Why it was kept back instead of spoken: the offer later says "during your meeting" rather than "while you were away". */
-  heldFor?: 'missed' | 'away' | 'meeting' | 'facedown' | 'quiet';
+  heldFor?: 'missed' | 'away' | 'meeting' | 'facedown' | 'quiet' | 'more';
 }
 
 /** "while you were away" / "during your meeting" …: one phrase for the whole batch, honest about the reason. */
@@ -73,6 +73,7 @@ function heldPhrase(items: EngineItem[]): { en: string; hi: string } {
   const reasons = new Set(items.map((i) => i.heldFor ?? 'away'));
   if (reasons.size === 1 && reasons.has('meeting')) return { en: 'during your meeting', hi: 'आपकी मीटिंग के दौरान' };
   if (reasons.size === 1 && reasons.has('quiet')) return { en: 'during quiet hours', hi: 'शांत समय में' };
+  if (reasons.size === 1 && reasons.has('more')) return { en: 'there is more waiting', hi: 'और भी बाकी है' };
   if (reasons.size === 1 && reasons.has('facedown')) return { en: 'while your phone was face down', hi: 'जब फ़ोन उल्टा रखा था' };
   return { en: 'while you were away', hi: 'जब आप दूर थे' };
 }
@@ -498,17 +499,18 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   );
 
   /** Several things at the same moment: shown one by one, said as ONE sentence. */
+  // "hold" is defined further down; this lets the function above it keep the rest for later.
+  const holdRef = useRef<(item: EngineItem, why: NonNullable<EngineItem['heldFor']>) => void>(() => undefined);
   const deliverTogether = useCallback(
     (items: EngineItem[]) => {
       if (items.length === 1) return deliver(items[0], 'loud');
-      items.forEach((item) => show(item, 'loud'));
-      Haptics.notificationAsync(
-        items.some((i) => i.priority === 'URGENT') ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success,
-      ).catch(() => undefined);
-      speakLine(combined(items.map(spokenFor), address, addressHi));
-      tell(items);
+      // Several at once: only the one that matters most now is said (the most urgent, then the newest). The rest
+      // are not read out in a row; they are kept, and he is asked once whether he wants to hear them.
+      const order = [...items].sort((a, b) => RANK[a.priority] - RANK[b.priority] || b.fireAt - a.fireAt);
+      deliver(order[0], 'loud');
+      order.slice(1).forEach((item) => holdRef.current(item, 'more'));
     },
-    [deliver, show, spokenFor, tell, address, addressHi],
+    [deliver],
   );
 
   const hold = useCallback(
@@ -521,6 +523,9 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     },
     [setHeld],
   );
+  useEffect(() => {
+    holdRef.current = hold;
+  }, [hold]);
 
   // He is back (picked the phone up, opened the app) and alerts were held: offer to read them.
   // The engine only builds the offer; the conversation asks it aloud and listens for the answer.
