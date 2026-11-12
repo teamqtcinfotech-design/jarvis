@@ -569,6 +569,10 @@ def dashboard(user: User) -> dict:
     else:
         # The PA's own to-do list = tasks the MD assigned to her.
         items = [shared_item(t) for t in pa_tasks_qs().exclude(status=Status.CANCELLED)]
+        # A meeting or call the PA arranged for the MD (her request, accepted) belongs in the PA's day as well:
+        # she set it up and has to see it coming, not only in the "approved" list.
+        items += [shared_item(t) for t in shared_md_tasks_qs().filter(kind__in=[Kind.MEETING, Kind.CALL])
+                  .exclude(status=Status.CANCELLED)]
         mine = TaskRequest.objects.filter(requested_by=user).select_related("requested_by", "target")[:30]
         requests_out = [request_item(r) for r in mine]
         extra["md_tasks"] = _recent_first_open(shared_md_tasks_qs())  # MD tasks that came from her requests
