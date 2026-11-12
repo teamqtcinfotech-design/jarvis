@@ -243,22 +243,28 @@ def review(user: User, *, kind: str, due_date: str, due_time: str, minutes: int 
 def push_plan(user: User, start: datetime, end: datetime, prefs: dict, exclude_ids=()) -> list[dict] | None:
     """A new meeting takes start..end. Which of this person's own meetings and calls must start later so nothing
     overlaps, and when? Each one in the way moves to the end of what is before it, and may push the next in turn;
-    the chain stops at the first gap that absorbs the delay. None when it cannot be done cleanly: a fixed routine
-    block (lunch, gym) is in the way, something would run past the office day, or an item in the way is not a
-    meeting. Nothing is changed here; this is only the plan."""
+    the chain stops at the first gap that absorbs the delay. A fixed routine block (lunch, gym) is never moved and
+    never entered: a pushed meeting that would run into it starts after it instead. None when it cannot be done:
+    something would run past the office day. Nothing is changed here; this is only the plan."""
     day = tu.to_local(start).date()
-    items = [c for c in busy_on(user, day, prefs, exclude_ids) if c["end"] > start]
+    busy = busy_on(user, day, prefs, exclude_ids)
+    fixed = [c for c in busy if c.get("routine")]
+    movable = [c for c in busy if not c.get("routine") and c.get("id") and c.get("kind") in (Kind.MEETING, Kind.CALL)
+               and c["end"] > start]
     office_end = tu.combine_local(day, time.fromisoformat(str(prefs.get("officeEnd") or "19:00")))
     limit = max(office_end, end)
     cursor = end
     moves = []
-    for c in sorted(items, key=lambda c: c["start"]):
+    for c in sorted(movable, key=lambda c: c["start"]):
         if c["start"] >= cursor:
             break                      # a gap: the rest of the day stays as it is
-        if c.get("routine") or not c.get("id") or c.get("kind") not in (Kind.MEETING, Kind.CALL):
-            return None                # not ours to move
         length = c["end"] - c["start"]
         new_start = cursor
+        for _ in range(len(fixed) + 1):  # step over lunch and the like
+            block = next((f for f in fixed if _overlaps(new_start, new_start + length, f["start"], f["end"])), None)
+            if not block:
+                break
+            new_start = block["end"]
         if new_start + length > limit:
             return None                # it would run past the day
         local = tu.to_local(new_start)

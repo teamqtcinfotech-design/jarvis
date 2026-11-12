@@ -496,8 +496,17 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     if subject is None:
         return
     prefs = services.get_prefs(subject)
+    if not minutes and kind == Kind.MEETING:
+        # No length said: the person's usual meeting length (what the confirmation tells him), not a fixed hour.
+        minutes = int(prefs.get("meetingMinutes") or 0) or None
     review = scheduling.review(subject, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes, prefs=prefs,
                                exclude_ids=exclude)
+    if whose == "self" and kind in (Kind.MEETING, Kind.CALL) and review.get("clashes"):
+        # Only being in two places at once is a clash: another meeting or call, or a fixed routine block. A task
+        # that merely has a time on it does not stand in a meeting's way.
+        review["clashes"] = [c for c in review["clashes"] if c.get("routine") or c.get("kind") in (Kind.MEETING, Kind.CALL)]
+        if not review["clashes"]:
+            review["suggested"] = None
     # A task, a payment or a follow-up can be given for any moment, a meeting included: only being in two places
     # at once (a meeting or a call over something in the diary) is a clash to ask about. Work handed to the PA
     # still gets its one-line note that the PA is busy then.

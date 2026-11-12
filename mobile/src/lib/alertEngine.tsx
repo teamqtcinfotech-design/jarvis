@@ -551,8 +551,24 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     presenterRef.current = presenter;
   }, []);
 
+  // Alerts that arrived while he was talking with JARVIS: shown at once, and SAID as soon as he has finished (the
+  // conversation has been quiet for a moment), with their question, so he never has to ask for them.
+  const afterTalk = useRef<EngineItem[]>([]);
+  const afterTalkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sayAfterTalk = useRef<(items: EngineItem[]) => void>(() => undefined);
   const setTalking = useCallback((talking: boolean) => {
     talkingRef.current = talking;
+    if (afterTalkTimer.current) clearTimeout(afterTalkTimer.current);
+    afterTalkTimer.current = null;
+    if (talking || !afterTalk.current.length) return;
+    afterTalkTimer.current = setTimeout(() => {
+      afterTalkTimer.current = null;
+      if (talkingRef.current) return;
+      // Only what is still waiting on screen: something he already dealt with by voice is not brought up again.
+      const waiting = afterTalk.current.filter((i) => currentRef.current?.key === i.key || queueRef.current.some((q) => q.key === i.key));
+      afterTalk.current = [];
+      if (waiting.length) sayAfterTalk.current(waiting);
+    }, 2500);
   }, []);
 
   /**
@@ -576,6 +592,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         // Mid-conversation with JARVIS: show it quietly, never speak over him (he can act on it by voice).
         if (talkingRef.current) {
           deliver(item, 'silent');
+          afterTalk.current.push(item);
           return null;
         }
         return 'loud';
@@ -610,6 +627,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     },
     [deliver, deliverTogether],
   );
+
+  useEffect(() => {
+    sayAfterTalk.current = (items) => (items.length === 1 ? deliver(items[0], 'loud') : deliverTogether(items));
+  }, [deliver, deliverTogether]);
 
   const tick = useCallback(() => {
     // While JARVIS is not on screen, the phone's always-on part (ReminderWatcher) delivers reminders and news and
