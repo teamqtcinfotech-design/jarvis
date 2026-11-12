@@ -1,5 +1,4 @@
-import * as LocalAuthentication from 'expo-local-authentication';
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 
 import * as apiClient from './api';
@@ -12,11 +11,8 @@ interface SessionValue {
   ready: boolean;
   user: SessionUser | null;
   server: string;
-  locked: boolean;
-  biometricAvailable: boolean;
   signIn: (server: string, username: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
-  unlock: () => Promise<boolean>;
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -25,23 +21,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [server, setServer] = useState('');
-  const [locked, setLocked] = useState(false);
-  const [biometricAvailable, setBiometricAvailable] = useState(false);
-  const backgroundedAt = useRef<number | null>(null);
 
   useEffect(() => {
     (async () => {
-      const [stored, hasHw, enrolled] = await Promise.all([
-        apiClient.loadStoredSession(),
-        LocalAuthentication.hasHardwareAsync(),
-        LocalAuthentication.isEnrolledAsync(),
-      ]);
-      const bio = hasHw && enrolled;
-      setBiometricAvailable(bio);
+      // No fingerprint or face lock anywhere: the app opens straight to JARVIS.
+      const stored = await apiClient.loadStoredSession();
       setServer(stored.server);
       setUser(stored.user);
       setReplyLang(stored.user?.language);
-      setLocked(Boolean(stored.user) && bio);
       setReady(true);
     })();
   }, []);
@@ -78,22 +65,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     };
   }, [signedIn]);
 
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'background') backgroundedAt.current = Date.now();
-      if (state === 'active' && backgroundedAt.current && user && biometricAvailable) {
-        // No fingerprint lock: the app opens straight to JARVIS (asked for on 11 Nov 2026).
-        backgroundedAt.current = null;
-      }
-    });
-    return () => sub.remove();
-  }, [user, biometricAvailable]);
-
   const signIn = useCallback(async (srv: string, username: string, password: string) => {
     const u = await apiClient.login(srv, username, password);
     setServer(apiClient.currentServer());
     setUser(u);
-    setLocked(false);
   }, []);
 
   const signOut = useCallback(async () => {
@@ -108,21 +83,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     await wakeStop(); // the background watcher's login goes with the session
     await apiClient.logout();
     setUser(null);
-    setLocked(false);
-  }, []);
-
-  const unlock = useCallback(async () => {
-    const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: 'Unlock JARVIS',
-      cancelLabel: 'Cancel',
-      disableDeviceFallback: false,
-    });
-    if (result.success) setLocked(false);
-    return result.success;
   }, []);
 
   return (
-    <SessionContext.Provider value={{ ready, user, server, locked, biometricAvailable, signIn, signOut, unlock }}>
+    <SessionContext.Provider value={{ ready, user, server, signIn, signOut }}>
       {children}
     </SessionContext.Provider>
   );

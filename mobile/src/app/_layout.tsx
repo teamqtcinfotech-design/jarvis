@@ -7,7 +7,6 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AlertBanner } from '@/components/AlertBanner';
 import { HeldSheet } from '@/components/HeldSheet';
-import { LockScreen } from '@/components/LockScreen';
 import { AlertEngineProvider } from '@/lib/alertEngine';
 import { ConversationProvider } from '@/lib/conversation';
 import * as diag from '@/lib/diag';
@@ -20,12 +19,11 @@ import { DashboardProvider } from '@/lib/useDashboard';
 diag.install();
 
 function Shell() {
-  const { user, locked } = useSession();
+  const { user } = useSession();
   const stack = (
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.bg }, animation: 'fade' }} />
   );
   if (!user) return stack;
-  if (locked) return <LockScreen />;
   // The dashboard comes first: the alert engine reads the PA's name and the MD's form of address from it.
   return (
     <DashboardProvider>
