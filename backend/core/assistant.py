@@ -274,6 +274,10 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
             intent = "pa_own" if own or for_sir else "needs_destination"
         elif intent == "request_for_md" and not for_sir:
             intent = "pa_own" if own else "needs_destination"
+        if intent == "needs_destination":
+            # Not said to be for the MD or for someone in the team: it is her own, and JARVIS does not ask. The
+            # read-back says so ("your own meeting"), and "nahi, Ma'am ke liye" turns it into a request.
+            intent = "pa_own"
         if intent in {"accept_request", "decline_request", "assign_to_pa"}:
             intent = "unknown"
     elif intent == "request_for_md":
@@ -936,7 +940,7 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
             sub_cmd = {**_EMPTY_ITEM, **{k: v for k, v in it.items() if k in _ITEM_KEYS}, "_sub": True, "engine": cmd.get("engine", "rules"),
                        "reply_language": reply_language}
             sub_intent = _route_intent(user, sub_cmd, full_text)
-            if sub_intent not in _TASK_INTENTS:
+            if sub_intent not in _TASK_INTENTS | {"pa_own"}:  # "pa_own" = the PA's own item (routed, never the model's word)
                 continue
             sub = _draft_for(user, sub_cmd, sub_intent, full_text, reply_language, ctx, on_screen, None, history, include_private, pending)
             if sub["action"] in TASK_ACTIONS | {"choose_destination"}:

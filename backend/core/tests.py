@@ -1432,12 +1432,12 @@ class SmartBrainTests(BaseCase):
     def test_pa_task_is_never_assumed_to_be_for_sir(self):
         day = _workday()
         base = dict(title="Meeting with Neha", kind="MEETING", due_date=day.isoformat(), due_time="15:00", people=["Neha"])
-        # She did not say whose it is, and the model guessed "for Sir": JARVIS asks instead.
+        # She did not say whose it is, and the model guessed "for Sir": it is her own, never sent to Sir, and
+        # nothing is asked (12 Nov 2026: the "whose is it?" question was unwanted).
         d = self.interpret(self.pa_client, "Neha ke saath 3 baje meeting book karo", _cmd(intent="request_for_md", **base))
-        self.assertEqual(d["action"], "choose_destination")
-        self.assertEqual(d["question"], "Priya, is this for Sir, for you, or for someone in the team?")
+        self.assertEqual(d["action"], "pa_self_task")
         d = self.interpret(self.pa_client, "kal bank jaana hai", _cmd(intent="create_task", title="Go to the Bank"))
-        self.assertEqual(d["action"], "choose_destination")
+        self.assertEqual(d["action"], "pa_self_task")
         # She said it: for Sir -> a request he accepts; her own -> her own list.
         d = self.interpret(self.pa_client, "Sir ke liye Neha ke saath 3 baje meeting", _cmd(intent="request_for_md", **base))
         self.assertEqual(d["action"], "md_request")
@@ -1451,9 +1451,9 @@ class SmartBrainTests(BaseCase):
         d = self.interpret(self.pa_client, "Aman ke saath meeting book karo", _cmd(
             intent="needs_destination", title="Meeting with Aman", kind="MEETING", people=["Aman"],
             needs_clarification=True, clarification_question="Priya, is this for Sir, for you, or for someone in the team?"))
-        self.assertEqual(d["action"], "choose_destination")
+        self.assertEqual(d["action"], "pa_self_task")
         self.assertIn("I don't know any Aman", d["question"])
-        self.assertIn("is this for Sir, for you, or for someone in the team", d["question"])
+        self.assertNotIn("is this for Sir", d["question"])
         # Offline parser: her words decide, and the answer said last wins (no question loop).
         d = self.interpret(self.pa_client, "mere liye", _cmd(intent="create_task", kind="MEETING", title="Meeting", engine="rules"),
                            previous="Sir ke office mein meeting")
@@ -2982,10 +2982,22 @@ class WhoseMeetingTests(BaseCase):
         day = (tu.today_local() + timedelta(days=1)).isoformat()
         return _cmd(intent=intent, title="Meeting with Aman", kind="MEETING", due_date=day, due_time="15:00", engine="ai")
 
-    def test_no_owner_said_asks_and_never_goes_to_the_md(self):
+    def test_no_owner_said_is_her_own_and_never_goes_to_the_md(self):
         for intent in ("meet_with_pa", "needs_destination", "request_for_md"):
             d = self.interpret(self.pa_client, "kal Aman ke saath 3 baje meeting book kar do", self._cmd(intent))
-            self.assertEqual(d["action"], "choose_destination", intent)
+            self.assertEqual(d["action"], "pa_self_task", intent)
+
+    def test_two_meetings_in_one_breath_are_one_card_for_the_pa(self):
+        day = (tu.today_local() + timedelta(days=1)).isoformat()
+        cmd = _cmd(intent="needs_destination", title="Meeting with Neha", kind="MEETING", due_date=day, due_time="16:00", engine="ai",
+                   people=["Neha"], more_items=[{"intent": "needs_destination", "title": "Meeting with Kavita", "kind": "MEETING",
+                                                 "due_date": day, "due_time": "18:00", "due_in_minutes": 0, "staff_name": "",
+                                                 "people": ["Kavita"]}])
+        d = self.interpret(self.pa_client, "kal 4 baje Neha ke saath meeting aur 6 baje Kavita ke saath", cmd)
+        self.assertEqual(d["action"], "pa_self_task")
+        self.assertFalse(d["needs_clarification"], d["spoken_reply"])
+        self.assertEqual([b["title"] for b in d["batch"]], ["Meeting with Kavita"])
+        self.assertIn("2 things", d["spoken_reply"])
 
     def test_my_meeting_is_her_own(self):
         for intent in ("meet_with_pa", "needs_destination", "create_task"):
