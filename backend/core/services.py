@@ -1354,7 +1354,7 @@ PREF_SCHEMA = {
     "voiceName": {"type": "enum", "values": list(VOICE_CHOICES), "default": DEFAULT_VOICE, "say": "JARVIS's voice",
                   "labels": {v: v.title() for v in VOICE_CHOICES}},
     # Whether the PA is a man or a woman (set by the MD): how JARVIS refers to the PA (he / she, and the Hindi forms).
-    "paGender": {"type": "enum", "values": ["unset", "male", "female"], "default": "unset", "say": "the PA's gender",
+    "paGender": {"type": "enum", "values": ["unset", "male", "female"], "default": "female", "say": "the PA's gender",
                  "aliases": {"man": "male", "male": "male", "m": "male", "ladka": "male", "purush": "male",
                              "woman": "female", "female": "female", "f": "female", "ladki": "female", "mahila": "female"},
                  "labels": {"unset": "not set", "male": "a man", "female": "a woman"}, "md_only": True},

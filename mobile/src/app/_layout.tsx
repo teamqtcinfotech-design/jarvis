@@ -1,8 +1,8 @@
 import { Poppins_400Regular, Poppins_500Medium, Poppins_600SemiBold, Poppins_700Bold, useFonts } from '@expo-google-fonts/poppins';
-import { Stack } from 'expo-router';
+import { type ErrorBoundaryProps, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React from 'react';
-import { View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AlertBanner } from '@/components/AlertBanner';
@@ -37,6 +37,19 @@ function Shell() {
         </ConversationProvider>
       </AlertEngineProvider>
     </DashboardProvider>
+  );
+}
+
+/** Anything that fails to draw: a calm page with "Try again", never a crash or a blank screen. */
+export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
+  diag.note('error', 'render screen', String(error?.message ?? error).slice(0, 200));
+  return (
+    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, backgroundColor: colors.bg }}>
+      <Text style={{ fontSize: 18, color: colors.text, textAlign: 'center' }}>Something went wrong on this screen.</Text>
+      <Pressable onPress={retry} style={{ marginTop: 20, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 24, backgroundColor: colors.text }}>
+        <Text style={{ color: '#FFFFFF', fontSize: 16 }}>Try again</Text>
+      </Pressable>
+    </View>
   );
 }
 

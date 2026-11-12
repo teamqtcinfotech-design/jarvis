@@ -67,7 +67,7 @@ const DEFAULTS: Prefs = {
   replyLanguage: 'auto',
   voiceName: 'naksh',
   addressAs: 'Sir',
-  paGender: 'unset',
+  paGender: 'female',
   speakPrivateDetails: true,
   privateAloudWhenLocked: false,
   awayAfterMinutes: 10,

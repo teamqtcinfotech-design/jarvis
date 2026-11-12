@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { api } from '@/lib/api';
+import { SafeBoundary } from '@/components/SafeBoundary';
 import { TASK_DRAFTS, draftHeading } from '@/lib/drafts';
 import { addDays, dayLabel, isoDate, timeLabel } from '@/lib/format';
 import { mdHim, mdWord } from '@/lib/names';
@@ -47,7 +48,25 @@ interface Props {
   onReply?: (text: string) => void;
 }
 
-export function DraftCard({ draft, saving, listening, error, onChange, onSave, onCancel, onReply }: Props) {
+/** The card, guarded: if it cannot be drawn, a short line is shown instead and the app keeps running. */
+export function DraftCard(props: Props) {
+  return (
+    <SafeBoundary
+      key={`${props.draft.action}:${props.draft.transcript ?? ''}:${props.draft.title ?? ''}`}
+      name="card"
+      fallback={
+        <View style={s.card}>
+          <Txt variant="body">This card could not be shown. Say it again, or say “cancel”.</Txt>
+          <Button title="Close" kind="secondary" compact onPress={props.onCancel} style={{ marginTop: 10, alignSelf: 'flex-start' }} />
+        </View>
+      }
+    >
+      <DraftCardInner {...props} />
+    </SafeBoundary>
+  );
+}
+
+function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onCancel, onReply }: Props) {
   const { user } = useSession();
   const { data: dash } = useDashboard();
   const md = mdWord(dash);
@@ -191,7 +210,7 @@ export function DraftCard({ draft, saving, listening, error, onChange, onSave, o
             </View>
           ))}
         </View>
-      ) : !draft.target && draft.target_candidates.length ? (
+      ) : !draft.target && draft.target_candidates?.length ? (
         <View style={[s.rowWrap, { marginTop: 12 }]}>
           {draft.target_candidates.map((c) => (
             <Chip key={c.id} label={c.title} onPress={() => onChange({ target: c, needs_clarification: false })} />

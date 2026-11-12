@@ -8,12 +8,19 @@ export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delega
 export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'accept_request', 'decline_request', 'complete', 'remember',
   'change_task', 'delete_task'];
 
-const CHANGE_LABEL: Record<string, string> = { title: 'name', due_date: 'day', due_time: 'time', priority: 'priority', kind: 'type' };
+const CHANGE_LABEL: Record<string, string> = {
+  title: 'name', due_date: 'day', due_time: 'time', priority: 'priority', kind: 'type', duration_minutes: 'length',
+};
 
-export function describeChanges(changes: Record<string, string> | undefined): string {
-  if (!changes) return '';
+/** "time → 15:30, length → 15 min". Values may be text or numbers (a meeting's length), never assumed to be text. */
+export function describeChanges(changes: Record<string, string | number> | undefined): string {
+  if (!changes || typeof changes !== 'object') return '';
   return Object.entries(changes)
-    .map(([k, v]) => `${CHANGE_LABEL[k] ?? k} → ${k === 'due_date' ? dayLabel(v) : v.toLowerCase()}`)
+    .map(([k, v]) => {
+      const text = String(v ?? '');
+      const shown = k === 'due_date' ? dayLabel(text) : k === 'duration_minutes' ? `${text} min` : text.toLowerCase();
+      return `${CHANGE_LABEL[k] ?? k} → ${shown}`;
+    })
     .join(', ');
 }
 
