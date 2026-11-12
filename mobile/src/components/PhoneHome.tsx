@@ -17,6 +17,7 @@ import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
 import type { SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
+import { currentServer } from '@/lib/api';
 
 import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
@@ -67,7 +68,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const insets = useSafeAreaInsets();
   const conv = useConversation();
   const engine = useAlertEngine();
-  const { data, reload } = useDashboard();
+  const { data, reload, error: loadError } = useDashboard();
   const [menu, setMenu] = useState(false);
   const [openTask, setOpenTask] = useState<TaskItem | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -177,7 +178,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <Txt variant="caption" style={{ marginTop: 2 }}>{data?.date_label ?? ''}</Txt>
 
         {/* Next up */}
-        <Pressable onPress={() => (next ? setOpenTask(next.item) : talk())} style={s.heroWrap}>
+        <Pressable onPress={() => (next ? setOpenTask(next.item) : !data && loadError ? reload(true) : talk())} style={s.heroWrap}>
           <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
             <View style={s.heroTop}>
               <View style={s.heroIcon}>
@@ -196,12 +197,24 @@ export function PhoneHome({ user }: { user: SessionUser }) {
               </>
             ) : (
               <>
-                <Txt variant="title" style={{ color: colors.white, marginTop: 10 }}>{data ? 'Nothing timed left today' : 'Loading your day…'}</Txt>
-                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>Say “Hey JARVIS” and ask for the plan, or give a task.</Txt>
+                <Txt variant="title" style={{ color: colors.white, marginTop: 10 }}>
+                  {data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…'}
+                </Txt>
+                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>
+                  {!data && loadError
+                    ? `${loadError} Server: ${currentServer().replace(/^https?:\/\//, '')}. Tap here to try again.`
+                    : 'Say “Hey JARVIS” and ask for the plan, or give a task.'}
+                </Txt>
               </>
             )}
           </LinearGradient>
         </Pressable>
+
+        {data && loadError ? (
+          <Pressable onPress={() => reload(true)} style={s.offline}>
+            <Txt variant="small" style={{ color: colors.warn }}>Not up to date: can’t reach the server. Tap to try again.</Txt>
+          </Pressable>
+        ) : null}
 
         {/* Stat tiles */}
         <View style={s.tiles}>
@@ -296,6 +309,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
 }
 
 const s = StyleSheet.create({
+  offline: { marginTop: 12, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.warnSoft },
   top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 10, paddingTop: 2 },
   badge: { position: 'absolute', top: 8, right: 8, width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
   pill: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },

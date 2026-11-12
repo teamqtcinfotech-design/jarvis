@@ -208,7 +208,7 @@ export default function Setup() {
           loading={running}
           style={{ marginTop: 22, alignSelf: 'stretch' }}
         />
-        <Button title="Not now" kind="ghost" compact onPress={finish} disabled={running} style={{ marginTop: 10 }} />
+        <Button title="Not now" kind="ghost" compact onPress={finish} disabled={running} loading={running} style={{ marginTop: 10 }} />
         <Txt variant="caption" style={{ textAlign: 'center', marginTop: 14 }}>
           Nothing is recorded or sent until you speak to JARVIS. You can change any of this later in Settings.
         </Txt>
