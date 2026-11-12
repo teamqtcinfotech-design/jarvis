@@ -637,7 +637,9 @@ class SpeakView(APIView):
         if ai_usage.over_voice_limit(request.user):
             return error("voice_limit", "Today's voice limit is reached; the phone's own voice is used until tomorrow.", 429)
         lang = "hi" if str(data.get("lang") or "").lower().startswith("hi") else "en"
-        voice = str(data.get("voice") or "") or None
+        # The phone names the voice it caches under; only JARVIS's own (male) voices are used, else the MD's choice.
+        asked = str(data.get("voice") or "").strip().lower()
+        voice = asked if asked in services.VOICE_CHOICES else services.voice_of(request.user)
         try:
             if str(data.get("format") or "").lower() == "pcm":
                 # The phone's player: raw sound streamed as Grok speaks, so the voice starts in about half a second.

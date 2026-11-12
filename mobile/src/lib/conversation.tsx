@@ -1162,6 +1162,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               replyLang: replyLang(),
               reminderSound: prefs.reminderSound,
               bargeIn: prefs.bargeIn,
+              voiceName: prefs.voiceName,
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
             });
@@ -1187,7 +1188,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       sub.remove();
     };
     // The names, the voice and the listening language go along too, and again whenever they change.
-  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, user, paName, hints, listenLang]);
+  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

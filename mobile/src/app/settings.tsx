@@ -2,7 +2,7 @@ import Constants from 'expo-constants';
 import { Redirect, useRouter } from 'expo-router';
 import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 import React, { useEffect, useState } from 'react';
-import { AppState, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { AppState, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui';
@@ -18,7 +18,7 @@ import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
 import type { AiUsageSummary, ContactItem, HabitItem, MemoryItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
-import { type WakeStatus, wakeSetListening, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
+import { type WakeStatus, wakeSetListening, wakeSetVoice, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
 
 function Row({ title, detail, right }: { title: string; detail?: string; right: React.ReactNode }) {
   return (
@@ -28,6 +28,45 @@ function Row({ title, detail, right }: { title: string; detail?: string; right: 
         {detail ? <Txt variant="small">{detail}</Txt> : null}
       </View>
       {right}
+    </View>
+  );
+}
+
+/** JARVIS's male voices (Grok). Naksh is the Indian one. */
+const VOICES: { id: string; label: string }[] = [
+  { id: 'naksh', label: 'Naksh (Indian)' },
+  { id: 'rex', label: 'Rex' },
+  { id: 'leo', label: 'Leo' },
+  { id: 'orion', label: 'Orion' },
+  { id: 'atlas', label: 'Atlas' },
+  { id: 'sirius', label: 'Sirius' },
+];
+
+/** A name, typed and saved with one button (the server re-reads it on both phones). */
+function NameField({ title, detail, value, onSave }: { title: string; detail: string; value: string; onSave: (v: string) => Promise<string> }) {
+  const [text, setText] = useState(value);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [seen, setSeen] = useState(value);
+  if (value !== seen) {
+    // The saved name changed (on the server, or from the other phone): show it unless he is typing a new one.
+    setSeen(value);
+    if (text === seen) setText(value);
+  }
+  const changed = text.trim() !== '' && text.trim() !== value;
+  const save = async () => {
+    setBusy(true);
+    setNote(await onSave(text.trim()));
+    setBusy(false);
+  };
+  return (
+    <View style={{ paddingVertical: 8 }}>
+      <Txt variant="heading" style={{ fontSize: 15 }}>{title}</Txt>
+      <Txt variant="small">{note || detail}</Txt>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+        <TextInput value={text} onChangeText={setText} style={s.input} autoCapitalize="words" maxLength={40} placeholder="Name" placeholderTextColor={colors.faint} />
+        <Button title="Save" compact kind={changed ? 'primary' : 'secondary'} disabled={!changed || busy} loading={busy} onPress={save} style={{ marginLeft: 8 }} />
+      </View>
     </View>
   );
 }
@@ -52,8 +91,26 @@ function SettingsScreen() {
   const { user, server, signOut } = useSession();
   const { prefs, update } = usePrefs();
   const engine = useAlertEngine();
-  const { data: dash } = useDashboard();
+  const { data: dash, reload: reloadDash } = useDashboard();
   const p = engine.presence;
+
+  /** Save a name on the server; the phones pick it up from there. Returns the line to show under the field. */
+  const saveName = (key: 'myName' | 'paName') => async (value: string): Promise<string> => {
+    try {
+      await api('/me/prefs/', { method: 'PATCH', body: { [key]: value } });
+      await reloadDash();
+      return `Saved: JARVIS now says “${value}”.`;
+    } catch {
+      return 'Could not save. Check the connection and try again.';
+    }
+  };
+
+  /** A new voice: used from the next sentence, and a short line in it so he can hear it straight away. */
+  const chooseVoice = (id: string) => {
+    update({ voiceName: id });
+    wakeSetVoice(id);
+    setTimeout(() => say(isMD ? `Ji ${user?.address || 'Sir'}, main JARVIS hoon.` : `Ji ${user?.name || ''}, main JARVIS hoon.`, { interrupt: true, lang: 'hi' }), 150);
+  };
   const isMD = user?.role === 'MD';
   const [health, setHealth] = useState<Health | null>(null);
   const [memories, setMemories] = useState<MemoryItem[] | null>(null);
@@ -133,6 +190,7 @@ function SettingsScreen() {
         replyLang: prefs.replyLanguage === 'auto' ? user?.language : prefs.replyLanguage,
         reminderSound: prefs.reminderSound,
         bargeIn: prefs.bargeIn,
+        voiceName: prefs.voiceName,
         speakWhenLocked: prefs.privateAloudWhenLocked,
         wakeWord: true,
       });
@@ -180,6 +238,26 @@ function SettingsScreen() {
         <Txt variant="title" style={{ flex: 1, textAlign: 'center', marginRight: 40 }}>Settings</Txt>
       </View>
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 60 }}>
+        {isMD ? (
+          <>
+            <Txt variant="label">Names</Txt>
+            <Card style={[s.card, { marginBottom: 22 }]}>
+              <NameField title="Your name" detail="The name JARVIS uses for you, on both phones." value={user?.name ?? ''} onSave={saveName('myName')} />
+              <Row title="JARVIS calls you" detail={`Also how ${dash?.pa_name || 'your PA'}'s JARVIS speaks about you.`} right={null} />
+              <View style={s.chips}>
+                {['Sir', "Ma'am"].map((a) => (
+                  <Chip key={a} label={a} selected={prefs.addressAs === a} onPress={() => update({ addressAs: a })} />
+                ))}
+              </View>
+              <NameField title="Your PA's name" detail="How JARVIS names your PA, on both phones." value={dash?.pa_name ?? ''} onSave={saveName('paName')} />
+              <Row title={`${dash?.pa_name || 'Your PA'} is`} detail="So JARVIS says he or she correctly, in English and in Hindi." right={null} />
+              <View style={s.chips}>
+                <Chip label="A man" selected={prefs.paGender === 'male'} onPress={() => update({ paGender: 'male' })} />
+                <Chip label="A woman" selected={prefs.paGender === 'female'} onPress={() => update({ paGender: 'female' })} />
+              </View>
+            </Card>
+          </>
+        ) : null}
         <Txt variant="label">Voice</Txt>
         <Card style={s.card}>
           <Row title="JARVIS replies in" detail="Match me: the language you just used, Hindi or English, for everything JARVIS says — replies, reminders and messages. Or always one language." right={null} />
@@ -197,6 +275,12 @@ function SettingsScreen() {
           <View style={s.chips}>
             <Chip label="Indian · Hindi accent" selected={prefs.voiceAccent === 'hi-IN'} onPress={() => update({ voiceAccent: 'hi-IN' })} />
             <Chip label="Indian English" selected={prefs.voiceAccent === 'en-IN'} onPress={() => update({ voiceAccent: 'en-IN' })} />
+          </View>
+          <Row title="JARVIS's voice" detail="Tap one to hear it. Used for everything JARVIS says, with the app open or closed." right={null} />
+          <View style={s.chips}>
+            {VOICES.map((v) => (
+              <Chip key={v.id} label={v.label} selected={prefs.voiceName === v.id} onPress={() => chooseVoice(v.id)} />
+            ))}
           </View>
           <Row title="“Later” on a reminder" detail={`Without a time said: ${prefs.snoozeMinutes} minutes. JARVIS learns this from what you say (“10 minute baad”).`} right={null} />
           <View style={s.chips}>
@@ -451,6 +535,7 @@ const s = StyleSheet.create({
   card: { marginTop: 8 },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 2 },
+  input: { flex: 1, borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, fontSize: 15, color: colors.text, backgroundColor: colors.surface },
   memory: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   live: { marginTop: 12, padding: 12, borderRadius: 10, backgroundColor: colors.surfaceAlt },
 });

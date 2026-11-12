@@ -28,6 +28,8 @@ export interface WakeConfig {
   reminderSound?: string;
   /** Talking over JARVIS while it speaks stops it and it listens (off if the room echoes). */
   bargeIn?: boolean;
+  /** Which Grok voice JARVIS speaks with (the MD's choice; male voices). */
+  voiceName?: string;
   speakWhenLocked: boolean;
   /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
   wakeWord: boolean;
@@ -77,6 +79,7 @@ type Native = {
   openMiuiPermissions: () => boolean;
   speak: (id: string, text: string, lang: string, fallback: string | null, rate: number) => void;
   stopSpeaking: () => void;
+  setVoiceName?: (name: string) => void;
   addListener: ((event: 'wake' | 'push' | 'barge', listener: () => void) => { remove: () => void }) &
     ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void });
 };
@@ -239,6 +242,15 @@ export function ttsSpeak(id: string, text: string, lang: string, fallback: strin
     return true;
   } catch {
     return false;
+  }
+}
+
+/** JARVIS's voice changed in Settings: the native player uses it from the next sentence. */
+export function wakeSetVoice(name: string) {
+  try {
+    native?.setVoiceName?.(name);
+  } catch {
+    // an older native part: the voice follows at the next start
   }
 }
 

@@ -49,8 +49,15 @@ object GrokVoice {
 
     private fun dir(context: Context): File = File(context.cacheDir, "jarvis_voice").apply { mkdirs() }
 
+    /** The voice JARVIS speaks with now ("" = the server's choice). Part of every cached sound's name, so a changed
+     *  voice never plays an old recording in the old voice. */
+    @Volatile private var voiceName: String = ""
+
+    private fun voiceOf(context: Context): String =
+        (WakeBus.prefs(context).getString(WakeBus.KEY_VOICE_NAME, "") ?: "").also { voiceName = it }
+
     private fun keyFor(text: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(text.trim().toByteArray(Charsets.UTF_8))
+        val digest = MessageDigest.getInstance("SHA-256").digest((voiceName + "|" + text.trim()).toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }.take(40)
     }
 
@@ -85,12 +92,14 @@ object GrokVoice {
     }
 
     private fun play(context: Context, text: String): String {
+        val voice = voiceOf(context)
         val cached = fileFor(context, text)
         if (cached.exists() && cached.length() > 0) {
             cached.setLastModified(System.currentTimeMillis())
             return FileInputStream(cached).use { stream(it, DEFAULT_RATE, null) }
         }
         val body = JSONObject().put("text", text).put("lang", langOf(text)).put("format", "pcm")
+        if (voice.isNotBlank()) body.put("voice", voice)
         val conn = Api.openStream(context, "/assistant/speak/", body) ?: return if (cancelled) "stopped" else "fallback"
         val tmp = File(dir(context), keyFor(text) + ".part")
         try {
@@ -199,7 +208,9 @@ object GrokVoice {
                 if (clean.isEmpty() || clean.length > 400) continue
                 val target = fileFor(app, clean)
                 if (target.exists() && target.length() > 0) continue
+                val voice = voiceOf(app)
                 val body = JSONObject().put("text", clean).put("lang", langOf(clean)).put("format", "pcm")
+                if (voice.isNotBlank()) body.put("voice", voice)
                 val conn = Api.openStream(app, "/assistant/speak/", body, 5000, 15000) ?: return@execute
                 val tmp = File(dir(app), keyFor(clean) + ".pre")
                 try {

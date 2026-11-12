@@ -15,6 +15,12 @@ export interface Prefs {
   voiceAccent: 'hi-IN' | 'en-IN';
   /** The language JARVIS replies in: 'auto' = the language you just used (the server decides), or always one. */
   replyLanguage: 'auto' | 'hi' | 'en';
+  /** JARVIS's voice (the MD's choice; the server keeps it for both phones). */
+  voiceName: string;
+  /** How JARVIS addresses the MD ("Sir", "Ma'am"): the MD's setting. */
+  addressAs: string;
+  /** Whether the PA is a man or a woman ("unset", "male", "female"): the MD's setting. */
+  paGender: string;
   /** Speak private task details aloud while the app is open on screen. */
   speakPrivateDetails: boolean;
   /** Also speak them when the app is in the background or the phone is locked. Off: "you have a private reminder". */
@@ -59,6 +65,9 @@ const DEFAULTS: Prefs = {
   listenLang: 'auto',
   voiceAccent: 'hi-IN',
   replyLanguage: 'auto',
+  voiceName: 'naksh',
+  addressAs: 'Sir',
+  paGender: 'unset',
   speakPrivateDetails: true,
   privateAloudWhenLocked: false,
   awayAfterMinutes: 10,

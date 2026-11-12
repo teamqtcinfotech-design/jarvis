@@ -1368,6 +1368,9 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             # The model only fills in a request form (which template, whose, which period); the server fills the
             # template from the database, so the same chart serves every person and every day.
             kind = cmd.get("view_kind") if cmd.get("view_kind") in datacards.VIEW_KINDS else datacards.guess_kind(full_text)
+            if kind == "busy" and str(cmd.get("view_who") or "").strip().lower() not in {"", "me", "self", "mine", "md", "sir"}:
+                # "Is Suraj free?": the busy view is the speaker's own diary; another person's day is their list.
+                kind = "today"
             # The items he pointed at ("that meeting", "the second one"): only ids JARVIS itself has shown or listed.
             known = {i["id"] for i in ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]}
             known |= {i["id"] for i in (on_screen or {}).get("items", [])}

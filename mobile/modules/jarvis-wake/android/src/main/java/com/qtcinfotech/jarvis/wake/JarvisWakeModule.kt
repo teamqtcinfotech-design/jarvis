@@ -68,6 +68,11 @@ class JarvisWakeModule : Module() {
             TtsEngine.speak(TtsEngine.Request(id, text, fallback, lang, rate.toFloat()))
         }
         Function("stopSpeaking") { TtsEngine.stop() }
+
+        // JARVIS's voice changed in Settings: used from the next sentence on (no restart needed).
+        Function("setVoiceName") { name: String ->
+            if (name.isNotBlank()) WakeBus.prefs(context).edit().putString(WakeBus.KEY_VOICE_NAME, name).apply()
+        }
         OnActivityEntersForeground {
             WakeBus.appInForeground = true
             appContext.currentActivity?.intent?.let { takeExtras(it) }
@@ -124,6 +129,7 @@ class JarvisWakeModule : Module() {
             (config["replyLang"] as? String)?.takeIf { it == "hi" || it == "en" }?.let { more.putString(WakeBus.KEY_REPLY_LANG, it) }
             (config["reminderSound"] as? String)?.takeIf { it == "default" || it == "silent" }?.let { more.putString(WakeBus.KEY_REMINDER_SOUND, it) }
             (config["bargeIn"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_BARGE_IN, it) }
+            (config["voiceName"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_VOICE_NAME, it) }
             (config["hints"] as? List<*>)?.let { list ->
                 more.putString(WakeBus.KEY_HINTS, list.mapNotNull { (it as? String)?.trim() }.filter { it.isNotEmpty() }.take(60).joinToString("\n"))
             }

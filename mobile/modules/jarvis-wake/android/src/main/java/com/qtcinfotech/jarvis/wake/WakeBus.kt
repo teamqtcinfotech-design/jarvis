@@ -115,6 +115,8 @@ object WakeBus {
     const val KEY_SPEAK_LOCKED = "speak_locked"
     const val KEY_SPOKEN = "spoken_keys"
     const val KEY_PUSH_TOKEN = "push_token"
+    /** Which Grok voice JARVIS speaks with (the MD's choice in Settings; male voices only). */
+    const val KEY_VOICE_NAME = "voice_name"
     /** JARVIS speaks in the Grok voice (default); false = the phone's own voice only. */
     const val KEY_GROK_VOICE = "grok_voice"
 }

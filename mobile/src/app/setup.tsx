@@ -91,6 +91,7 @@ export default function Setup() {
           speakWhenLocked: prefs.privateAloudWhenLocked,
           wakeWord: st.micAllowed,
           bargeIn: prefs.bargeIn,
+          voiceName: prefs.voiceName,
         });
         update({ wakeWordEnabled: listening });
       }
@@ -101,7 +102,7 @@ export default function Setup() {
       setRunning(false);
       router.replace('/');
     }
-  }, [refresh, user, isMD, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.listenLang, prefs.replyLanguage, prefs.bargeIn, update, router]);
+  }, [refresh, user, isMD, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.listenLang, prefs.replyLanguage, prefs.bargeIn, prefs.voiceName, update, router]);
 
   /** Runs the steps in order; returns after opening a system page (the flow continues on return). */
   const runFrom = useCallback(

@@ -89,6 +89,10 @@ def get_pa() -> User | None:
 # --------------------------------------------------------------------------- how people are addressed
 # The MD chooses how JARVIS addresses them, and the PA refers to the MD the same way: "Sir", "Ma'am", "Madam" or
 # the MD's own name. The PA is always addressed by first name. Nothing else in the code should spell "Sir".
+# JARVIS speaks with a male voice. Naksh is the Indian voice; the others are offered so the MD can pick by ear.
+VOICE_CHOICES = ("naksh", "rex", "leo", "orion", "atlas", "sirius")
+DEFAULT_VOICE = "naksh"
+
 ADDRESS_HI = {"sir": "सर", "ma'am": "मैम", "maam": "मैम", "mam": "मैम", "madam": "मैडम", "madame": "मैडम", "boss": "बॉस"}
 FEMALE_ADDRESS = {"ma'am", "maam", "mam", "madam", "madame", "miss", "mrs", "ms"}
 
@@ -114,6 +118,28 @@ def md_address_hi() -> str:
 def md_pronouns() -> tuple[str, str, str]:
     """(he, him, his) or (she, her, her), from the form of address."""
     return ("she", "her", "her") if md_address().lower() in FEMALE_ADDRESS else ("he", "him", "his")
+
+
+def md_gender() -> str:
+    return "female" if md_address().lower() in FEMALE_ADDRESS else "male"
+
+
+def pa_gender() -> str:
+    """"male" / "female" as the MD set it, or "" when not set (then JARVIS goes by the PA's name and stays neutral)."""
+    md = get_md()
+    value = str(get_prefs(md).get("paGender") or "") if md else ""
+    return value if value in ("male", "female") else ""
+
+
+def pa_pronouns() -> tuple[str, str, str]:
+    """(he, him, his), (she, her, her), or (they, them, their) when the MD has not said."""
+    return {"male": ("he", "him", "his"), "female": ("she", "her", "her")}.get(pa_gender(), ("they", "them", "their"))
+
+
+def voice_of(user: User) -> str:
+    """The voice JARVIS speaks to this person with: their own choice in Settings (a male voice either way)."""
+    value = str(get_prefs(user).get("voiceName") or "")
+    return value if value in VOICE_CHOICES else DEFAULT_VOICE
 
 
 def address_of(user: User) -> str:
@@ -736,7 +762,7 @@ def create_pa_self_task(pa: User, data: dict) -> SharedTask:
     """Mansi's own task or reminder ("mere liye", "mujhe yaad dilana"). Sir can see it in her list; it is not
     sent to him for approval and he is not nagged about it."""
     if not pa.is_pa:
-        raise ServiceError("forbidden", "Only the PA keeps her own tasks here.", 403)
+        raise ServiceError("forbidden", "Only the PA keeps their own tasks here.", 403)
     task = SharedTask(
         title=data["title"].strip(), notes=data.get("notes", ""), kind=data.get("kind", Kind.TASK),
         priority=data.get("priority", Priority.NORMAL), assignee_type=SharedTask.Assignee.PA,
@@ -773,7 +799,7 @@ PA_SETTABLE_STATUSES = {Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED, Status.
 def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: int, note: str = "") -> SharedTask:
     """The PA moves her task: Not started / Working / Hold (with reason) / Done. MD is told."""
     if not pa.is_pa:
-        raise ServiceError("forbidden", "Only the PA updates the status of her tasks.", 403)
+        raise ServiceError("forbidden", "Only the PA updates the status of their tasks.", 403)
     if new_status not in PA_SETTABLE_STATUSES:
         raise ServiceError("invalid_status", "Choose Not started, Working, Hold or Done.", 422)
     task = SharedTask.objects.select_for_update().get(id=task_id, assignee_type=SharedTask.Assignee.PA)
@@ -1277,6 +1303,9 @@ def ai_context(user: User, include_private: bool = True) -> dict:
     ctx["pending_summary"] = dict(pending_split(user, dash, include_private)["counts"])
     # How the MD is addressed and named: every "Sir" in the rules means this word.
     ctx["md_address"], ctx["md_address_hi"] = md_address(), md_address_hi()
+    # Their genders, for "he / she" and the Hindi verb forms when JARVIS speaks ABOUT them (pa_gender "" = not set:
+    # go by the name and keep neutral forms).
+    ctx["md_gender"], ctx["pa_gender"] = md_gender(), pa_gender()
     md_user = get_md()
     ctx["md_name"] = md_user.spoken_name if md_user else ""
     if user.is_md:
@@ -1321,6 +1350,14 @@ PREF_SCHEMA = {
     # How JARVIS addresses the MD (and how the PA's JARVIS refers to the MD): Sir, Ma'am, Madam, or "name".
     "addressAs": {"type": "text", "default": "Sir", "say": "how JARVIS addresses you (Sir, Ma'am, Madam or your name)",
                   "hint": "Sir / Ma'am / Madam / name (= your own name)"},
+    # JARVIS's voice (the Grok voice it speaks with). Male voices only; Naksh is the Indian one.
+    "voiceName": {"type": "enum", "values": list(VOICE_CHOICES), "default": DEFAULT_VOICE, "say": "JARVIS's voice",
+                  "labels": {v: v.title() for v in VOICE_CHOICES}},
+    # Whether the PA is a man or a woman (set by the MD): how JARVIS refers to the PA (he / she, and the Hindi forms).
+    "paGender": {"type": "enum", "values": ["unset", "male", "female"], "default": "unset", "say": "the PA's gender",
+                 "aliases": {"man": "male", "male": "male", "m": "male", "ladka": "male", "purush": "male",
+                             "woman": "female", "female": "female", "f": "female", "ladki": "female", "mahila": "female"},
+                 "labels": {"unset": "not set", "male": "a man", "female": "a woman"}, "md_only": True},
     # The language JARVIS replies in: auto = the language of what was just said (Hindi or English), or pinned.
     "replyLanguage": {"type": "enum", "values": ["auto", "hi", "en"], "default": "auto", "say": "reply language",
                       "aliases": {"auto": "auto", "match": "auto", "same": "auto", "mixed": "auto", "hinglish": "auto",

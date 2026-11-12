@@ -179,7 +179,7 @@ XAI_COMMAND_MODEL = os.environ.get("XAI_COMMAND_MODEL", "grok-4.3")      # fast:
 XAI_SMART_MODEL = os.environ.get("XAI_SMART_MODEL", "grok-4.7")          # briefings, hard questions, web search
 XAI_VOICE_MODEL = os.environ.get("XAI_VOICE_MODEL", "grok-voice-3.0")    # speech-to-speech
 XAI_STT_MODEL = os.environ.get("XAI_STT_MODEL", "grok-voice-transcribe-2.0")
-XAI_TTS_VOICE = os.environ.get("XAI_TTS_VOICE", "eve")
+XAI_TTS_VOICE = os.environ.get("XAI_TTS_VOICE", "naksh")  # a male voice (the MD's choice in Settings wins)
 XAI_TIMEOUT_SECONDS = float(os.environ.get("XAI_TIMEOUT_SECONDS", "40"))
 # JARVIS's spoken replies are voiced by Grok. A per-person daily character cap keeps the bill predictable
 # (60,000 characters is roughly 500 short replies, under one dollar); past it the phone uses its own voice.
