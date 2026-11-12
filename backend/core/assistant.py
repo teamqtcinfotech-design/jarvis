@@ -734,7 +734,10 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
     if not pending:
         return draft
     sched = pending.get("schedule") or {}
-    if cmd.get("keep_original"):
+    # "Keep this one here AND move the other" is a choice (push), not "save it as it is": the choice is read first.
+    picked = str(cmd.get("setting_value") or "").strip().lower()
+    has_options = isinstance(sched.get("options"), dict) and bool(sched.get("options"))
+    if cmd.get("keep_original") and not (has_options and picked in {"fit", "push"}):
         return draft
     d, t = _safe_date(str(cmd.get("due_date") or "")), _safe_time(str(cmd.get("due_time") or ""))
     offered = sched.get("suggested") or {}

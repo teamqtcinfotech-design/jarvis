@@ -2830,6 +2830,16 @@ class MeetingJugglingTests(BaseCase):
         new = PrivateTask.objects.get(priority=Priority.URGENT, estimated_minutes=15)
         self.assertEqual(tu.to_local(new.due_at).strftime("%H:%M"), "13:10")
 
+    def test_keep_this_and_move_the_other_pushes_the_other(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        self.turn(self.md_client, "11 baje priority meeting", self._new(day, at="11:00", minutes=30))
+        r = self.turn(self.md_client, "isko yahin rakho aur doosri ko aage kar do",
+                      _cmd(intent="confirm_pending", setting_value="push", keep_original=True))
+        self.assertEqual(r["action"], "saved", r)
+        aman.refresh_from_db()
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "11:30")
+
     def test_a_bare_yes_asks_which_one_and_moves_nothing(self):
         day = _workday(2)
         aman = self._meeting("Aman review", day, time(13, 15))
