@@ -199,6 +199,21 @@ def reminders_for(user: User, hours: int = 48) -> dict:
                     item["spoken"] = f"{name}, {sir}'s task is due today: {task.title}."
                     item["spoken_hi"] = f"{name}, {sir_hi} का टास्क आज ड्यू है: {task.title}।"
                 items.append(item)
+        # A meeting or call she arranged for the MD (her request, accepted): she is told when it is coming and when
+        # it starts, so she can have things ready. It is the MD's to answer, so nothing is asked of her.
+        for task in shared_md_tasks_qs().filter(kind__in=[Kind.MEETING, Kind.CALL], **open_filter):
+            lead, lead_hi = _lead_phrase(lead_for(task, prefs)), _lead_phrase_hi(lead_for(task, prefs))
+            for item in _task_reminders(task, "shared", False, name, prefs, checkin=False, address_hi=name):
+                if item["label"] == "before":
+                    item["spoken"] = f"{name}, {sir}'s meeting {task.title} starts {lead}."
+                    item["spoken_hi"] = f"{name}, {sir_hi} की मीटिंग {task.title} {lead_hi} शुरू होगी।"
+                elif item["label"] == "due":
+                    item["spoken"] = f"{name}, {sir}'s meeting is starting now: {task.title}."
+                    item["spoken_hi"] = f"{name}, {sir_hi} की मीटिंग अभी शुरू हो रही है: {task.title}।"
+                else:
+                    continue
+                item["question"] = None
+                items.append(item)
         for task in delegated_qs().filter(created_by=user, **open_filter):
             # A staff task she gave: a follow-up at its time, or on its day at her reminder hour when it has no time.
             if task.due_at:
