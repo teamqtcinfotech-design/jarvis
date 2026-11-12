@@ -240,6 +240,35 @@ def review(user: User, *, kind: str, due_date: str, due_time: str, minutes: int 
     return out
 
 
+def push_plan(user: User, start: datetime, end: datetime, prefs: dict, exclude_ids=()) -> list[dict] | None:
+    """A new meeting takes start..end. Which of this person's own meetings and calls must start later so nothing
+    overlaps, and when? Each one in the way moves to the end of what is before it, and may push the next in turn;
+    the chain stops at the first gap that absorbs the delay. None when it cannot be done cleanly: a fixed routine
+    block (lunch, gym) is in the way, something would run past the office day, or an item in the way is not a
+    meeting. Nothing is changed here; this is only the plan."""
+    day = tu.to_local(start).date()
+    items = [c for c in busy_on(user, day, prefs, exclude_ids) if c["end"] > start]
+    office_end = tu.combine_local(day, time.fromisoformat(str(prefs.get("officeEnd") or "19:00")))
+    limit = max(office_end, end)
+    cursor = end
+    moves = []
+    for c in sorted(items, key=lambda c: c["start"]):
+        if c["start"] >= cursor:
+            break                      # a gap: the rest of the day stays as it is
+        if c.get("routine") or not c.get("id") or c.get("kind") not in (Kind.MEETING, Kind.CALL):
+            return None                # not ours to move
+        length = c["end"] - c["start"]
+        new_start = cursor
+        if new_start + length > limit:
+            return None                # it would run past the day
+        local = tu.to_local(new_start)
+        moves.append({"id": c["id"], "scope": c["scope"], "version": c["version"], "title": c["title"],
+                      "private": c["private"], "start": new_start, "due_date": local.date().isoformat(),
+                      "due_time": local.strftime("%H:%M")})
+        cursor = new_start + length
+    return moves or None
+
+
 def routine_summary(prefs: dict) -> dict:
     """Plain words for the AI context and the settings screen."""
     off = [WEEKDAY_NAMES[i] for i in sorted(set(prefs.get("weeklyOff") or [])) if 0 <= i <= 6]

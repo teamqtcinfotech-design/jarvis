@@ -19,7 +19,7 @@ from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
 TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation", "pa_self_task"}
 EDIT_ACTIONS = {"change_task", "delete_task"}
-_CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind"}
+_CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind", "duration_minutes"}
 # Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the PA's
 # (Sir giving Mansi work) or the MD's (Mansi asking for Sir's time; she only ever hears "busy", never why).
 _SLOT_ACTIONS = {"private_task": "self", "pa_meeting": "self", "pa_task": "pa", "md_request": "md", "change_task": "self",
@@ -108,6 +108,13 @@ def _changes_from(cmd: dict) -> dict:
             out["priority"] = value
         elif field == "kind" and value in _KINDS:
             out["kind"] = value
+        elif field == "duration_minutes":
+            try:
+                mins = int(value or 0)
+            except (TypeError, ValueError):
+                mins = 0
+            if 5 <= mins <= 1440:
+                out["duration_minutes"] = mins
     # "5 minute baad kar do" / "in the next 5 minutes": the new moment, counted from now.
     try:
         span = max(0, min(int(cmd.get("due_in_minutes") or 0), 7 * 24 * 60))
@@ -132,6 +139,8 @@ def describe_changes(changes: dict) -> str:
         bits.append(f"priority to {changes['priority'].lower()}")
     if "kind" in changes:
         bits.append(f"type to {changes['kind'].lower().replace('_', '-')}")
+    if "duration_minutes" in changes:
+        bits.append(f"length to {tu.minutes_phrase(int(changes['duration_minutes']))}")
     return ", ".join(bits)
 
 
@@ -149,6 +158,8 @@ def describe_changes_hi(changes: dict) -> str:
         bits.append(f"प्रायोरिटी {_PRIORITY_HI.get(changes['priority'], changes['priority'].lower())} कर दूँ")
     if "kind" in changes:
         bits.append(f"टाइप {_KIND_HI.get(changes['kind'], changes['kind'].lower())} कर दूँ")
+    if "duration_minutes" in changes:
+        bits.append(f"{tu.minutes_phrase_hi(int(changes['duration_minutes']))} की कर दूँ")
     return ", ".join(bits)
 
 
@@ -394,7 +405,8 @@ def _clean_pending(pending) -> dict | None:
     p["kind"] = p.get("kind") if p.get("kind") in _KINDS else Kind.TASK
     p["title"] = str(p.get("title") or "")[:200]
     p["duration_minutes"] = int(p["duration_minutes"]) if isinstance(p.get("duration_minutes"), int) and p["duration_minutes"] > 0 else None
-    p["changes"] = {k: str(v) for k, v in (p.get("changes") or {}).items() if k in _CHANGE_FIELDS} if isinstance(p.get("changes"), dict) else {}
+    p["changes"] = {k: (v if k == "duration_minutes" and isinstance(v, int) else str(v)) for k, v in (p.get("changes") or {}).items()
+                    if k in _CHANGE_FIELDS} if isinstance(p.get("changes"), dict) else {}
     p["targets"] = [t for t in (p.get("targets") or []) if isinstance(t, dict) and isinstance(t.get("id"), str)] \
         if isinstance(p.get("targets"), list) else []
     if not p["targets"] and isinstance(p.get("target"), dict) and isinstance(p["target"].get("id"), str):
@@ -402,6 +414,21 @@ def _clean_pending(pending) -> dict | None:
     p["schedule"] = p.get("schedule") if isinstance(p.get("schedule"), dict) else {}
     p["warnings"] = [str(w) for w in p.get("warnings") or []] if isinstance(p.get("warnings"), list) else []
     return p
+
+
+def _swap_of(cmd: dict, matches: list[dict]):
+    """Two timed items the speaker wants to exchange ("Aman wali abhi aur Sharma wali baad mein"): ((a, a's time),
+    (b, b's time)), or None when this is not a swap of exactly two timed items."""
+    if str(cmd.get("setting_value") or "").strip().lower() != "swap" or len(matches) != 2:
+        return None
+    pairs = []
+    for m in matches:
+        task = _target_task(m)
+        when = (task.scheduled_start or task.due_at) if task is not None else None
+        if not when:
+            return None
+        pairs.append((m, when))
+    return pairs[0], pairs[1]
 
 
 def _target_task(t: dict):
@@ -513,6 +540,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         warnings.append(f"{day_cap} is a weekly off")
 
     question_en = question_hi = ""
+    options: dict = {}   # fit / push / move, when a new meeting lands on an existing one
     clashes = review.get("clashes") or []
     if whose == "self" and draft["action"] != "change_task" and d:
         twin = _similar_item(subject, draft.get("title", ""), d, {c.get("id") for c in clashes})
@@ -534,6 +562,34 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             warnings.append(f"Overlaps with {c['title']} ({span})")
         tail_en = f" Shall I put it at {alt_en} instead?" if sug else " Shall I save it anyway?"
         tail_hi = f" {alt_hi} रख दूँ?" if sug else " फिर भी सेव कर दूँ?"
+        # His own new meeting or call over one already there: fit it in the gap, push the others, or move this one.
+        if whose == "self" and draft["action"] != "change_task" and d and due_time and not c.get("routine"):
+            new_start = tu.combine_local(d, time.fromisoformat(due_time))
+            new_end = new_start + timedelta(minutes=review.get("minutes") or 30)
+            gap = int((c["start"] - new_start).total_seconds() // 60)
+            plan = scheduling.push_plan(subject, new_start, new_end, prefs, exclude)
+            said_en, said_hi = [], []
+            if gap >= 5:
+                options["fit"] = {"duration_minutes": gap}
+                said_en.append(f"keep this to {tu.minutes_phrase(gap)}")
+                said_hi.append(f"इसे {tu.minutes_phrase_hi(gap)} की रखूँ")
+            if plan:
+                options["push"] = [{k: m[k] for k in ("id", "scope", "version", "title", "due_date", "due_time")} for m in plan]
+                more_en = f" (and {len(plan) - 1} more after it)" if len(plan) > 1 else ""
+                more_hi = f" (और उसके बाद {len(plan) - 1} और)" if len(plan) > 1 else ""
+                said_en.append(f"move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}")
+                said_hi.append(f"{plan[0]['title']} को {tu.fmt_time_hi(plan[0]['start'])} कर दूँ{more_hi}")
+            if sug:
+                options["move"] = {"due_date": sug["due_date"], "due_time": sug["due_time"]}
+                said_en.append(f"put this at {alt_en}")
+                said_hi.append(f"इसे {alt_hi} रख दूँ")
+            if len(said_en) >= 2:
+                head_en = f"{address}, {item} {when_en}: you already have {c['title']} at {tu.fmt_time(c['start'])}."
+                head_hi = f"{address_hi}, {when_hi} {item}: {tu.fmt_time_hi(c['start'])} {c['title']} पहले से है।"
+                tail_en = " Should I " + ", ".join(said_en[:-1]) + ", or " + said_en[-1] + "?"
+                tail_hi = " " + ", ".join(said_hi[:-1]) + ", या " + said_hi[-1] + "?"
+            else:
+                options.clear()
         question_en = _insert_notes(head_en + tail_en, notes_en)
         question_hi = _insert_notes(head_hi + tail_hi, notes_hi, hindi=True)
     elif review.get("needs_slot") and sug:
@@ -561,6 +617,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         "clashes": [{"title": "" if anonymous else c["title"], "start": c["start"].isoformat(), "end": c["end"].isoformat(),
                      "label": f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"} for c in clashes[:3]],
         "suggested": ({"due_date": sug["due_date"], "due_time": sug["due_time"], "label": alt_en} if sug else None),
+        "options": options,
         "load": {"count": load.get("count", 0), "heavy": bool(load.get("heavy"))} if load else None,
         "off_day": bool(review.get("off_day")),
         "base_reply": draft.get("spoken_reply", ""),
@@ -681,6 +738,37 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
         return draft
     d, t = _safe_date(str(cmd.get("due_date") or "")), _safe_time(str(cmd.get("due_time") or ""))
     offered = sched.get("suggested") or {}
+    options = sched.get("options") if isinstance(sched.get("options"), dict) else {}
+    choice = str(cmd.get("setting_value") or "").strip().lower()
+    if options and not d and not t:
+        if choice == "fit" and isinstance(options.get("fit"), dict):
+            mins = options["fit"].get("duration_minutes")
+            if isinstance(mins, int) and 5 <= mins <= 1440:
+                draft["overrides"] = {"duration_minutes": mins}
+                return draft
+        if choice == "push" and isinstance(options.get("push"), list):
+            batch = []
+            for m in options["push"][:6]:
+                if not (isinstance(m, dict) and isinstance(m.get("id"), str) and _safe_date(str(m.get("due_date") or ""))
+                        and _safe_time(str(m.get("due_time") or ""))):
+                    continue
+                target = {"id": m["id"], "scope": "private" if m.get("scope") == "private" else "shared",
+                          "version": int(m.get("version") or 1), "title": str(m.get("title") or "")[:200]}
+                batch.append({"action": "change_task", "intent": "change_task", "title": target["title"], "targets": [target],
+                              "target": target, "changes": {"due_date": m["due_date"], "due_time": m["due_time"]},
+                              "due_label": _due_label(m["due_date"], m["due_time"]), "kind": Kind.MEETING, "warnings": [],
+                              "needs_clarification": False})
+            if batch:
+                draft["overrides"] = {"batch": batch}
+                return draft
+        if choice != "move":
+            # A bare "yes" does not say which: ask again, shortly, rather than move anything on a guess.
+            again = dict(pending)
+            lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
+            q_en, q_hi = str(sched.get("question") or ""), str(sched.get("question_hi") or "")
+            again.update({"needs_clarification": False, "spoken_reply": q_en, "overrides": {}})
+            again["speak_text"], again["speak_lang"] = (q_hi, "hi") if lang == "hi" and q_hi else (q_en, "en")
+            return again
     if not d and not t:
         if _safe_date(str(offered.get("due_date") or "")) and _safe_time(str(offered.get("due_time") or "")):
             draft["overrides"] = {"due_date": offered["due_date"], "due_time": offered["due_time"]}
@@ -1058,7 +1146,21 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             draft["targets"] = matches
             draft["target"] = matches[0]
             names = "; ".join(m["title"] for m in matches)
-            if intent == "change_task":
+            swap = _swap_of(cmd, matches) if intent == "change_task" else None
+            if swap:
+                (a, a_when), (b, b_when) = swap
+                draft["targets"], draft["target"] = [a], a
+                draft["title"] = a["title"]
+                draft["changes"] = {"due_date": tu.to_local(b_when).date().isoformat(), "due_time": tu.to_local(b_when).strftime("%H:%M")}
+                other = {"action": "change_task", "intent": "change_task", "title": b["title"], "targets": [b], "target": b,
+                         "changes": {"due_date": tu.to_local(a_when).date().isoformat(), "due_time": tu.to_local(a_when).strftime("%H:%M")},
+                         "due_label": _due_label(tu.to_local(a_when).date().isoformat(), tu.to_local(a_when).strftime("%H:%M")),
+                         "kind": b.get("kind") or Kind.MEETING, "warnings": [], "needs_clarification": False}
+                draft["batch"] = [other]
+                draft["swap"] = True
+                _say(draft, f"{address}, swap them: '{a['title']}' to {tu.fmt_time(b_when)} and '{b['title']}' to {tu.fmt_time(a_when)}?",
+                     f"{address_hi}, दोनों की अदला-बदली: '{a['title']}' {tu.fmt_time_hi(b_when)} और '{b['title']}' {tu.fmt_time_hi(a_when)} कर दूँ?")
+            elif intent == "change_task":
                 draft["changes"] = _changes_from(cmd)
                 if not draft["changes"]:
                     _ask(draft, f"{address}, what should I change about '{names}': the time, the day, the priority or the name?",
@@ -1322,7 +1424,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             _say(draft, _insert_notes(draft["reply_en"], [door[0]]), _insert_notes(draft["reply_hi"], [door[1]], hindi=True) if draft["reply_hi"] else "")
 
     # Does it fit the diary? (clash, free slot, a very full day) — may replace the question above.
-    if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"] and not is_reminder:
+    if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"] and not is_reminder and not draft.get("swap"):
         _advise_schedule(user, draft, address)
 
     if is_reminder and draft["action"] in {"private_task", "pa_self_task"} and not draft["needs_clarification"]:

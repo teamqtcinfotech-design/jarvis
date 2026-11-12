@@ -1137,11 +1137,11 @@ class SchedulingTests(BaseCase):
         r = self.turn(self.md_client, "us din 4 baje Sharma ji ke saath meeting", self._meeting_cmd(day))
         self.assertEqual(r["action"], "private_task")
         self.assertIn("Call Mehta ji – GST Notice", r["show"])
-        self.assertIn("5 PM instead?", r["show"])
+        self.assertIn("or put this at 5 PM?", r["show"])
         self.assertEqual(r["say_lang"], "hi")
         self.assertIn("5 बजे रख दूँ?", r["say"])
         self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 2)  # nothing saved yet
-        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        r = self.turn(self.md_client, "isko 5 baje rakh do", _cmd(intent="confirm_pending", setting_value="move"))
         self.assertEqual(r["action"], "saved")
         task = self._new_private([call.id])
         self.assertEqual(tu.to_local(task.due_at).hour, 17)
@@ -1308,8 +1308,8 @@ class SchedulingTests(BaseCase):
         draft = self.interpret(self.md_client, "4 baje Sharma meeting", self._meeting_cmd(day))
         self.assertEqual(draft["schedule"]["suggested"]["due_time"], "17:00")
         self.assertTrue(draft["schedule"]["question"])
-        yes = self.interpret(self.md_client, "haan", _cmd(intent="confirm_pending"), previous="4 baje Sharma meeting",
-                             awaiting="Personal task: Meeting with Sharma ji", pending=draft)
+        yes = self.interpret(self.md_client, "baad mein rakh do", _cmd(intent="confirm_pending", setting_value="move"),
+                             previous="4 baje Sharma meeting", awaiting="Personal task: Meeting with Sharma ji", pending=draft)
         self.assertEqual(yes["action"], "confirm_pending")
         self.assertEqual(yes["overrides"], {"due_date": day.isoformat(), "due_time": "17:00"})
         keep = self.interpret(self.md_client, "4 hi rakho", _cmd(intent="confirm_pending", keep_original=True),
@@ -1321,7 +1321,7 @@ class SchedulingTests(BaseCase):
         waiting = fake.call_args.args[1]["awaiting_confirmation"]
         self.assertEqual(waiting["offered_time"]["due_time"], "17:00")
         self.assertEqual(waiting["original_time"]["due_time"], "16:00")
-        self.assertIn("instead?", waiting["jarvis_asked"])
+        self.assertIn("or put this at", waiting["jarvis_asked"])
 
 
 class SmartBrainTests(BaseCase):
@@ -2764,4 +2764,129 @@ class PlainReminderTests(BaseCase):
                            _cmd(intent="meet_with_pa", title="Meeting with Aman", kind="MEETING", due_date=day, due_time="16:00",
                                 people=["Aman"], engine="ai"))
         self.assertIn(d["action"], {"private_task", "choose_destination"})
+
+
+class MeetingJugglingTests(BaseCase):
+    """A new meeting over an existing one: fit it in the gap, push the others, or move it; nothing moves without
+    his word. Lengths change by voice, two meetings swap, and what piled up during a meeting is reported once."""
+
+    def turn(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _meeting(self, title, day, at, minutes=30, priority=Priority.NORMAL):
+        return services.create_private_task(self.md, {"title": title, "kind": Kind.MEETING, "priority": priority,
+                                                      "due_date": day, "due_time": at, "duration_minutes": minutes})
+
+    def _new(self, day, at="13:10", minutes=15):
+        return _cmd(intent="create_task", title="Priority meeting", kind="MEETING", priority="URGENT",
+                    due_date=day.isoformat(), due_time=at, duration_minutes=minutes, engine="ai")
+
+    def test_three_choices_are_offered_and_nothing_is_saved(self):
+        day = _workday(2)
+        self._meeting("Aman review", day, time(13, 15))
+        before = PrivateTask.objects.count()
+        d = self.interpret(self.md_client, "1:10 pe priority meeting", self._new(day))
+        opts = d["schedule"]["options"]
+        self.assertEqual(opts["fit"], {"duration_minutes": 5})
+        self.assertEqual([(m["title"], m["due_time"]) for m in opts["push"]], [("Aman review", "13:25")])
+        self.assertTrue(opts["move"]["due_time"])
+        self.assertIn("keep this to 5 minutes", d["spoken_reply"])
+        self.assertIn("move Aman review to 1:25 PM", d["spoken_reply"])
+        self.assertEqual(PrivateTask.objects.count(), before)
+
+    def test_fit_keeps_it_to_the_gap(self):
+        day = _workday(2)
+        self._meeting("Aman review", day, time(13, 15))
+        self.turn(self.md_client, "1:10 pe priority meeting", self._new(day))
+        r = self.turn(self.md_client, "5 minute hi rakho", _cmd(intent="confirm_pending", setting_value="fit"))
+        self.assertEqual(r["action"], "saved")
+        new = PrivateTask.objects.get(estimated_minutes=5)
+        self.assertEqual(tu.to_local(new.due_at).strftime("%H:%M"), "13:10")
+        self.assertEqual(tu.to_local(new.scheduled_end).strftime("%H:%M"), "13:15")
+
+    def test_push_moves_the_chain_and_stops_at_the_first_gap(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(13, 15))
+        sharma = self._meeting("Sharma call", day, time(13, 45))     # straight after Aman: pushed in turn
+        late = self._meeting("Evening meeting", day, time(17, 0))    # a gap before it: stays
+        d = self.interpret(self.md_client, "1:10 pe priority meeting", self._new(day))
+        self.assertEqual([(m["title"], m["due_time"]) for m in d["schedule"]["options"]["push"]],
+                         [("Aman review", "13:25"), ("Sharma call", "13:55")])
+        self.turn(self.md_client, "1:10 pe priority meeting", self._new(day))
+        r = self.turn(self.md_client, "Aman wali aage kar do", _cmd(intent="confirm_pending", setting_value="push"))
+        self.assertEqual(r["action"], "saved", r)
+        for task, at in ((aman, "13:25"), (sharma, "13:55"), (late, "17:00")):
+            task.refresh_from_db()
+            self.assertEqual(tu.to_local(task.due_at).strftime("%H:%M"), at)
+        new = PrivateTask.objects.get(priority=Priority.URGENT, estimated_minutes=15)
+        self.assertEqual(tu.to_local(new.due_at).strftime("%H:%M"), "13:10")
+
+    def test_a_bare_yes_asks_which_one_and_moves_nothing(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(13, 15))
+        before = PrivateTask.objects.count()
+        self.turn(self.md_client, "1:10 pe priority meeting", self._new(day))
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertNotEqual(r["action"], "saved")
+        self.assertIn("keep this to 5 minutes", r["show"])
+        self.assertEqual(PrivateTask.objects.count(), before)
+        aman.refresh_from_db()
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "13:15")
+
+    def test_length_changes_by_voice(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(13, 15))
+        self.turn(self.md_client, "Aman review 15 minute ki kar do",
+                  _cmd(intent="change_task", target_refs=[str(aman.id)], changed_fields=["duration_minutes"], duration_minutes=15))
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        aman.refresh_from_db()
+        self.assertEqual(aman.estimated_minutes, 15)
+        self.assertEqual(tu.to_local(aman.scheduled_end).strftime("%H:%M"), "13:30")
+
+    def test_two_meetings_swap_on_one_yes(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        sharma = self._meeting("Sharma call", day, time(15, 0))
+        d = self.interpret(self.md_client, "in dono ka time badal do",
+                           _cmd(intent="change_task", target_refs=[str(aman.id), str(sharma.id)], setting_value="swap"))
+        self.assertEqual(d["action"], "change_task")
+        self.assertIn("swap them", d["spoken_reply"])
+        self.assertEqual(d["changes"]["due_time"], "15:00")
+        self.assertEqual(d["batch"][0]["changes"]["due_time"], "11:00")
+        self.turn(self.md_client, "in dono ka time badal do",
+                  _cmd(intent="change_task", target_refs=[str(aman.id), str(sharma.id)], setting_value="swap"))
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        aman.refresh_from_db()
+        sharma.refresh_from_db()
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "15:00")
+        self.assertEqual(tu.to_local(sharma.due_at).strftime("%H:%M"), "11:00")
+
+    def test_what_piled_up_during_a_meeting_is_reported_once_from_three(self):
+        from core import followups
+        now = timezone.now()
+        start = now - timedelta(minutes=40)
+        local = tu.to_local(start)
+        self._meeting("Board meeting", local.date(), local.time().replace(second=0, microsecond=0), minutes=35)
+        for i, title in enumerate(["Sign cheque", "Approve leave"]):
+            req = services.create_md_request(self.pa, {"title": title, "kind": Kind.TASK, "priority": Priority.NORMAL})
+            TaskRequest.objects.filter(id=req.id).update(created_at=start + timedelta(minutes=5 + i))
+        self.assertEqual(followups.piled_up(now), 0)     # two are not worth the question
+        req = services.create_md_request(self.pa, {"title": "Call the bank", "kind": Kind.CALL, "priority": Priority.URGENT})
+        TaskRequest.objects.filter(id=req.id).update(created_at=start + timedelta(minutes=20))
+        self.assertEqual(followups.piled_up(now), 1)
+        alert = Alert.objects.filter(ref_type="followup", ref_id__startswith="pile:").get()
+        self.assertTrue(alert.spoken_text.index("Call the bank") < alert.spoken_text.index("Sign cheque"))  # urgent first
+        self.assertIn("this order", alert.spoken_text)
+        self.assertEqual(followups.piled_up(now), 0)     # told once
 

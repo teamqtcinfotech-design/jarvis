@@ -94,11 +94,64 @@ def morning_briefings(now=None) -> int:
     return raised
 
 
+PILE_AT_LEAST = 3                      # fewer than this is not worth an "in which order?"
+PILE_WINDOW = timedelta(minutes=15)    # how long after a meeting ends the question may still be asked
+
+
+def piled_up(now=None) -> int:
+    """Work that arrived while someone was in a meeting. When the meeting ends and three or more things came in
+    during it, that person is told once, in a sensible order (urgent first, then the nearest deadline, then first
+    come first served), and asked whether the order is right. One or two items are not worth the question."""
+    from . import scheduling
+    from .models import Kind, SharedTask
+
+    now = now or timezone.now()
+    raised = 0
+    rank = {Priority.URGENT: 0, Priority.HIGH: 1, Priority.NORMAL: 2, Priority.LOW: 3}
+    for person in (get_md(), get_pa()):
+        if not person:
+            continue
+
+        def arrived(start, end) -> list[tuple]:
+            """(priority, due or None, when it came, title) for everything that reached this person in that time."""
+            if person.is_md:
+                # What the PA sends the MD waits as a request until the MD accepts it.
+                rows = TaskRequest.objects.filter(state=TaskRequest.State.PENDING, kind=TaskRequest.Kind.CREATE,
+                                                  created_at__gte=start, created_at__lte=end)
+                return [(str((r.payload or {}).get("priority") or Priority.NORMAL), None, r.created_at,
+                         str((r.payload or {}).get("title") or "Request")) for r in rows]
+            rows = SharedTask.objects.filter(assignee_type=SharedTask.Assignee.PA, status__in=OPEN,
+                                             created_at__gte=start, created_at__lte=end).exclude(origin=SharedTask.Origin.PA_SELF)
+            return [(t.priority, t.due_at, t.created_at, t.title) for t in rows]
+
+        for c in scheduling.commitments(person, tu.to_local(now).date()):
+            if c.get("kind") not in (Kind.MEETING, Kind.CALL) or not (now - PILE_WINDOW <= c["end"] <= now):
+                continue
+            items = arrived(c["start"], c["end"])
+            if len(items) < PILE_AT_LEAST:
+                continue
+            far = now + timedelta(days=3650)
+            items.sort(key=lambda t: (rank.get(t[0], 2), t[1] or far, t[2]))
+            names = "; ".join(t[3] for t in items[:5])
+            n = len(items)
+            address, address_hi = services.address_of(person), services.address_hi_of(person)
+            spoken = (f"{address}, {n} things came in while you were in the meeting: {names}. "
+                      "Shall I keep them in this order, or should one come first?")
+            spoken_hi = f"{address_hi}, मीटिंग के दौरान {n} काम आए: {names}। इसी क्रम में रखूँ, या कोई पहले करना है?"
+            raised += _raise(person, f"pile:{c['id']}:{int(c['end'].timestamp())}", f"{n} things came in during your meeting",
+                             names, spoken, spoken_hi=spoken_hi)
+    return raised
+
+
 def run(now=None) -> int:
     """One pass. Safe to call every few minutes; it only raises what is due and not yet raised."""
     now = now or timezone.now()
     local = tu.to_local(now)
     raised = 0
+    try:
+        raised += piled_up(now)  # right after a meeting, whatever the hour
+    except Exception:  # noqa: BLE001 — the other nudges must still run
+        log.exception("piled-up check failed")
     try:
         raised += morning_briefings(now)  # has its own clock: the briefing may be set before ACTIVE_HOURS
     except Exception:  # noqa: BLE001 — the other nudges must still run

@@ -647,8 +647,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const cur = draftRef.current;
       if (cur && o && (o.due_date || o.due_time)) {
         editedRef.current = true; // the AI's "done" line named the old time
-        if (cur.action === 'change_task') setDraft({ ...cur, changes: { ...cur.changes, ...o } });
+        if (cur.action === 'change_task') {
+          setDraft({ ...cur, changes: { ...cur.changes, ...(o.due_date ? { due_date: o.due_date } : {}), ...(o.due_time ? { due_time: o.due_time } : {}) } });
+        }
         else setDraft({ ...cur, due_date: o.due_date ?? cur.due_date, due_time: o.due_time ?? cur.due_time });
+      } else if (cur && o && cur.action !== 'change_task' && (o.duration_minutes || o.batch?.length)) {
+        // He settled a clash: keep this one short (a new length), or push the others (they ride along as a batch).
+        editedRef.current = true;
+        setDraft({ ...cur, duration_minutes: o.duration_minutes ?? cur.duration_minutes,
+          batch: o.batch?.length ? [...(cur.batch ?? []), ...o.batch] : cur.batch });
       }
       save();
       return;

@@ -310,7 +310,7 @@ export interface Draft {
   /** Diary check for timed drafts (clash / free slot / full day). */
   schedule?: ScheduleAdvice | null;
   /** confirm_pending: the day / time to apply to the waiting card before saving ("haan" to the offered slot, or "6 baje"). */
-  overrides?: { due_date?: string; due_time?: string };
+  overrides?: { due_date?: string; due_time?: string; duration_minutes?: number; batch?: Draft[] };
   /** Data the phone draws for this answer (timeline / chart / table). */
   view?: DataView | null;
   /** Something to do on the screen by voice: export_pdf / export_csv / share / open_item / open_settings / go_home. */
