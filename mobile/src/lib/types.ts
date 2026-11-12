@@ -316,6 +316,8 @@ export interface Draft {
   /** The server already saved it (a clear meeting booked at once, or a plain reminder): the lists refresh now. */
   booked?: boolean;
   reminder_saved?: boolean;
+  /** The server saved what the waiting card held (and more): the card closes. */
+  card_done?: boolean;
   /** Data the phone draws for this answer (timeline / chart / table). */
   view?: DataView | null;
   /** Something to do on the screen by voice: export_pdf / export_csv / share / open_item / open_settings / go_home. */

@@ -525,6 +525,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (d.view && d.action === 'answer') addAnswer(d.view, d.view.title || lastQuestion.current);
     // The server already saved it (a clear meeting booked at once, or a plain reminder): the lists catch up now.
     if (d.booked || d.reminder_saved) dataChanged.emit();
+    // The server settled the waiting card itself ("keep this one, move the others"): the card closes.
+    if (d.card_done) {
+      setDraft(null);
+      previousRef.current = '';
+    }
 
     const pendingOffer = offerRef.current;
     if (pendingOffer) {

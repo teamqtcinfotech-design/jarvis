@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta
 
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
+from django.utils import timezone
 
 from . import ai_brain, datacards, hinglish_parser, scheduling, services
 from . import lang as lang_mod
@@ -428,6 +429,157 @@ def _clean_pending(pending) -> dict | None:
     return p
 
 
+_BOOKABLE = {"private_task", "pa_self_task", "pa_meeting"}
+DUPLICATE_WINDOW = timedelta(minutes=3)
+
+
+def _just_saved(user: User, action: str, title: str, when: datetime | None) -> bool:
+    """The same thing, saved by this person moments ago (a sentence heard twice, or said again because the answer
+    was slow): it is not saved a second time."""
+    since = timezone.now() - DUPLICATE_WINDOW
+    if action == "private_task":
+        rows = PrivateTask.objects.filter(owner=user, created_at__gte=since)
+    elif action == "pa_self_task":
+        rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.PA_SELF, created_at__gte=since)
+    elif action == "pa_meeting":
+        rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.MD_MEET_PA, created_at__gte=since)
+    else:
+        return False
+    want = " ".join((title or "").lower().split())
+    for row in rows:
+        if " ".join((row.title or "").lower().split()) != want:
+            continue
+        if when is None or row.due_at is None or abs((row.due_at - when).total_seconds()) <= 120:
+            return True
+    return False
+
+
+def _book_now(user: User, d: dict, full_text: str) -> dict:
+    """Save one meeting or call of the speaker's own (or a meeting with the PA) exactly as the card holds it.
+    Returns what was saved: {"title", "start", "minutes", "lead"}. Raises ServiceError."""
+    prefs = services.get_prefs(user)
+    kind = d.get("kind") if d.get("kind") in _KINDS else Kind.MEETING
+    priority = d.get("priority") if d.get("priority") in _PRIORITIES else Priority.NORMAL
+    exact = None
+    if d.get("due_at"):
+        try:
+            exact = datetime.fromisoformat(str(d["due_at"]))
+        except ValueError:
+            exact = None
+    start = exact or tu.combine_local(date.fromisoformat(d["due_date"]), time.fromisoformat(d["due_time"]))
+    mins = int(d.get("duration_minutes") or 0) or int(prefs.get("meetingMinutes") or services.DEFAULT_MEETING_MINUTES)
+    lead = int(d.get("remind_before_minutes") or 0) or services.default_remind_before(kind, priority, prefs)
+    data = {"title": d["title"], "notes": d.get("notes") or "", "kind": kind, "priority": priority,
+            "due_date": tu.to_local(start).date(), "due_time": tu.to_local(start).time(), "due_at": exact,
+            "duration_minutes": mins, "remind_before_minutes": int(d.get("remind_before_minutes") or 0) or None,
+            "announcement": d.get("announcement") or ""}
+    action = d.get("action")
+    if action == "private_task":
+        services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
+    elif action == "pa_self_task":
+        services.create_pa_self_task(user, {**data, "description": full_text})
+    elif action == "pa_meeting":
+        services.create_pa_task(user, {**data, "description": full_text}, meeting_with_pa=True)
+    else:
+        raise services.ServiceError("invalid", "this cannot be booked directly.", 422)
+    return {"title": d["title"], "start": start, "minutes": mins, "lead": lead}
+
+
+def _apply_moves(user: User, moves: list) -> list[str]:
+    """Move each meeting the plan names to its new start (the speaker's own). Returns the titles that could not be
+    moved (changed elsewhere meanwhile), so the read-back can say so."""
+    failed = []
+    for m in moves[:12]:
+        if not (isinstance(m, dict) and isinstance(m.get("id"), str)):
+            continue
+        d, t = _safe_date(str(m.get("due_date") or "")), _safe_time(str(m.get("due_time") or ""))
+        if not (d and t):
+            continue
+        changes = {"due_date": date.fromisoformat(d), "due_time": time.fromisoformat(t)}
+        try:
+            if m.get("scope") == "private":
+                task = PrivateTask.objects.get(id=m["id"], owner=user)
+                services.update_private_task(user, m["id"], changes, task.version)
+            else:
+                task = SharedTask.objects.get(id=m["id"])
+                if user.is_md:
+                    services.update_shared_md_task(user, m["id"], changes, task.version)
+                else:
+                    services.update_pa_self_task(user, m["id"], changes, task.version)
+        except (services.ServiceError, ObjectDoesNotExist, ValueError):
+            failed.append(str(m.get("title") or "one meeting"))
+    return failed
+
+
+def _day_readback(user: User, day: date, from_time: datetime) -> tuple[str, str]:
+    """The meetings and calls of that day from this moment on, as they now stand ("1:10 PM Board review, 1:40 PM …")."""
+    rows = [c for c in scheduling.commitments(user, day) if c.get("kind") in (Kind.MEETING, Kind.CALL) and c["end"] > from_time]
+    rows.sort(key=lambda c: c["start"])
+    en = ", ".join(f"{tu.fmt_time(c['start'])} {c['title']}" for c in rows[:6])
+    hi = ", ".join(f"{tu.fmt_time_hi(c['start'])} {c['title']}" for c in rows[:6])
+    return en, hi
+
+
+def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: str) -> None:
+    """Book the new meeting where he said and move the others in order; the draft becomes the read-back."""
+    address_hi = services.address_hi_of(user)
+    try:
+        booked = _book_now(user, card, str(card.get("transcript") or ""))
+    except (services.ServiceError, ValueError, KeyError) as exc:
+        draft["action"] = "answer"
+        _say(draft, f"Sorry {address}, I could not book that: {getattr(exc, 'message', 'it was not clear')}",
+             f"माफ़ कीजिए {address_hi}, बुक नहीं हो पाई।")
+        return
+    failed = _apply_moves(user, moves)
+    day = tu.to_local(booked["start"]).date()
+    en_list, hi_list = _day_readback(user, day, booked["start"])
+    n = len(moves) - len(failed)
+    moved_en = f" {n} meeting{'s' if n != 1 else ''} moved." if n else ""
+    moved_hi = f" {n} मीटिंग आगे की गईं।" if n else ""
+    en = f"Done, {address}: {booked['title']} at {tu.fmt_time(booked['start'])}.{moved_en} New schedule: {en_list}."
+    hi = f"हो गया, {address_hi}: {booked['title']} {tu.fmt_time_hi(booked['start'])} बजे।{moved_hi} नया शेड्यूल: {hi_list}।"
+    evening = [str(m.get("title") or "") for m in moves if _safe_time(str(m.get("due_time") or "")) >= "19:00"]
+    if evening:
+        en += f" Note: {', '.join(evening)} now runs after office hours."
+        hi += f" ध्यान दें: {', '.join(evening)} अब ऑफिस टाइम के बाद है।"
+    if failed:
+        en += f" I could not move {', '.join(failed)}; it was changed elsewhere."
+        hi += f" {', '.join(failed)} नहीं हिल पाई, किसी और ने बदली थी।"
+    draft["action"], draft["booked"], draft["overrides"], draft["schedule"] = "answer", True, {}, None
+    draft["needs_clarification"], draft["question"] = False, ""
+    _say(draft, en, hi)
+    lang = draft.get("reply_language") if draft.get("reply_language") in {"en", "hi"} else "en"
+    draft["speak_text"], draft["speak_lang"] = (hi, "hi") if lang == "hi" else (en, "en")
+
+
+def _send_alert(user: User, cmd: dict, draft: dict, exact_at, address: str, address_hi: str) -> None:
+    """"Suraj ko alert bhejo ki client aa gaye" / "Ma'am ko bata do meeting 5 baje hai": a message to the other
+    person (MD -> PA, PA -> MD), now or at the moment said. It is an alert, never a task: nothing to tick off."""
+    draft["action"] = "answer"
+    text = " ".join(str(cmd.get("notes") or cmd.get("title") or "").split())[:500]
+    if not text:
+        _ask(draft, f"{address}, what should the alert say?", f"{address_hi}, अलर्ट में क्या कहूँ?")
+        return
+    when = exact_at
+    d, t = _safe_date(cmd.get("due_date") or ""), _safe_time(cmd.get("due_time") or "")
+    if not when and d and t:
+        when = tu.combine_local(date.fromisoformat(d), time.fromisoformat(t))
+    if when and when <= tu.now_local() + timedelta(seconds=30):
+        when = None  # a moment already here: now
+    priority = cmd.get("priority") if cmd.get("priority") in _PRIORITIES else Priority.NORMAL
+    try:
+        to_name = services.send_message(user, text, when=when, priority=priority)
+    except services.ServiceError as exc:
+        _say(draft, f"Sorry {address}, {exc.message}", f"माफ़ कीजिए {address_hi}, अलर्ट नहीं भेज पाया।")
+        return
+    draft["booked"] = True
+    if when:
+        _say(draft, f"Okay {address}, I'll alert {to_name} at {tu.fmt_time(when)}.",
+             f"ठीक है {address_hi}, {tu.fmt_time_hi(when)} बजे {to_name} को अलर्ट भेज दूँगा।")
+    else:
+        _say(draft, f"Sent, {address}. {to_name} has the alert.", f"भेज दिया, {address_hi}। {to_name} को अलर्ट मिल गया।")
+
+
 def _swap_of(cmd: dict, matches: list[dict]):
     """Two timed items the speaker wants to exchange ("Aman wali abhi aur Sharma wali baad mein"): ((a, a's time),
     (b, b's time)), or None when this is not a swap of exactly two timed items."""
@@ -515,16 +667,15 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             draft["duration_minutes"] = minutes  # saved with the length the diary was checked for
     review = scheduling.review(subject, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes, prefs=prefs,
                                exclude_ids=exclude)
-    if whose == "self" and kind in (Kind.MEETING, Kind.CALL) and review.get("clashes"):
-        # Only being in two places at once is a clash: another meeting or call, or a fixed routine block. A task
-        # that merely has a time on it does not stand in a meeting's way.
-        review["clashes"] = [c for c in review["clashes"] if c.get("routine") or c.get("kind") in (Kind.MEETING, Kind.CALL)]
-        if not review["clashes"]:
-            review["suggested"] = None
-    # A task, a payment or a follow-up can be given for any moment, a meeting included: only being in two places
-    # at once (a meeting or a call over something in the diary) is a clash to ask about. Work handed to the PA
-    # still gets its one-line note that the PA is busy then.
-    if kind not in (Kind.MEETING, Kind.CALL) and whose != "pa":
+    # Only being in two places at once is a clash: a meeting or a call over another meeting, call or fixed routine
+    # block. A task, a payment or a follow-up never is, for anyone (the MD, the PA, or work handed to the PA): it is
+    # given and saved whatever the diary holds, and nothing that is only a task stands in a meeting's way.
+    if kind in (Kind.MEETING, Kind.CALL):
+        if review.get("clashes"):
+            review["clashes"] = [c for c in review["clashes"] if c.get("routine") or c.get("kind") in (Kind.MEETING, Kind.CALL)]
+            if not review["clashes"]:
+                review["suggested"] = None
+    else:
         review["clashes"], review["suggested"] = [], None
     anonymous = whose == "md"  # the PA only ever hears that the MD is busy, never with what
     pa = services.get_pa()
@@ -554,9 +705,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     if load.get("heavy"):
         n = load["count"]
         who = {"self": "", "pa": f"{pa_name} ", "md": f"{sir} "}[whose]
-        notes_en.append(f"{who}{day_en if who else day_cap} already has {n} items.")
-        notes_hi.append(f"{day_hi} पहले से {n} काम हैं।")
-        warnings.append(f"{day_cap} already has {n} items")
+        warnings.append(f"{who}{day_en if who else day_cap} already has {n} items")  # shown, not said
     if review.get("off_day"):
         notes_en.append(f"{day_cap} is a weekly off.")
         notes_hi.append(f"{day_hi} छुट्टी का दिन है।")
@@ -565,8 +714,8 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     question_en = question_hi = ""
     options: dict = {}   # fit / push / move, when a new meeting lands on an existing one
     clashes = review.get("clashes") or []
-    if whose == "self" and draft["action"] != "change_task" and d:
-        twin = _similar_item(subject, draft.get("title", ""), d, {c.get("id") for c in clashes})
+    if whose == "self" and draft["action"] != "change_task" and d and kind in (Kind.MEETING, Kind.CALL):
+        twin = _similar_item(subject, draft.get("title", ""), d, {c.get("id") for c in clashes}, kinds=(Kind.MEETING, Kind.CALL))
         if twin:
             notes_en.append(f"You already have {twin} {day_en}.")
             notes_hi.append(f"{twin} {day_hi} पहले से है।")
@@ -660,13 +809,13 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         draft["spoken_reply"] = _insert_notes(draft["spoken_reply"], notes_en)
 
 
-def _similar_item(user: User, title: str, day: date, skip_ids=()) -> str:
+def _similar_item(user: User, title: str, day: date, skip_ids=(), kinds=None) -> str:
     """The title of an open item on that day that looks like the same thing ("Meeting with Sharma ji" twice)."""
     want = " ".join(re.findall(r"\w+", (title or "").lower()))
     if len(want) < 6:
         return ""
     for item in scheduling.commitments(user, day) + scheduling.dated_items(user, day):
-        if item.get("id") in skip_ids:
+        if item.get("id") in skip_ids or (kinds and item.get("kind") not in kinds):
             continue
         have = " ".join(re.findall(r"\w+", item["title"].lower()))
         if difflib.SequenceMatcher(None, want, have).ratio() >= 0.8:
@@ -791,21 +940,12 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
             if isinstance(mins, int) and 5 <= mins <= 1440:
                 draft["overrides"] = {"duration_minutes": mins}
                 return draft
-        if choice == "push" and isinstance(options.get("push"), list):
-            batch = []
-            for m in options["push"][:6]:
-                if not (isinstance(m, dict) and isinstance(m.get("id"), str) and _safe_date(str(m.get("due_date") or ""))
-                        and _safe_time(str(m.get("due_time") or ""))):
-                    continue
-                target = {"id": m["id"], "scope": "private" if m.get("scope") == "private" else "shared",
-                          "version": int(m.get("version") or 1), "title": str(m.get("title") or "")[:200]}
-                batch.append({"action": "change_task", "intent": "change_task", "title": target["title"], "targets": [target],
-                              "target": target, "changes": {"due_date": m["due_date"], "due_time": m["due_time"]},
-                              "due_label": _due_label(m["due_date"], m["due_time"]), "kind": Kind.MEETING, "warnings": [],
-                              "needs_clarification": False})
-            if batch:
-                draft["overrides"] = {"batch": batch}
-                return draft
+        if choice == "push" and isinstance(options.get("push"), list) and pending.get("action") in _BOOKABLE:
+            # "Keep this one, move the others": the new meeting is saved where he said, every one in its way moves on
+            # in turn, and he hears the day as it now stands. Done here, so the phone and the closed-app voice agree.
+            _book_and_push(user, draft, pending, options["push"], address)
+            draft["card_done"] = True  # the waiting card is settled: the phone closes it
+            return draft
         if choice != "move":
             # A bare "yes" does not say which: ask again, shortly, rather than move anything on a guess.
             return ask_again()
@@ -1107,7 +1247,9 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
 
     summary_hi = ""  # Hindi twin of a server-written answer (lists and charts), for the Hindi voice
 
-    if intent == "create_task":
+    if intent == "send_alert":
+        _send_alert(user, cmd, draft, exact_at, address, address_hi)
+    elif intent == "create_task":
         draft["action"] = "private_task"
     elif intent == "request_for_md":
         draft["action"] = "md_request"
@@ -1498,9 +1640,24 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             _say(draft, _insert_notes(draft["reply_en"], [door[0]]), _insert_notes(draft["reply_hi"], [door[1]], hindi=True) if draft["reply_hi"] else "")
 
     # Does it fit the diary? (clash, free slot, a very full day) — may replace the question above.
+    # The same meeting, saved by this person a moment ago (heard twice, or said again because the answer was slow):
+    # said so, and not saved or questioned a second time.
+    if (draft["action"] in _BOOKABLE and draft["kind"] in (Kind.MEETING, Kind.CALL) and draft["due_date"] and draft["due_time"]
+            and draft["title"] and not draft["needs_clarification"] and not is_reminder
+            and _just_saved(user, draft["action"], draft["title"],
+                            exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"])))):
+        draft["action"], draft["booked"], draft["schedule"] = "answer", True, None
+        _say(draft, f"{address}, that is already booked: {draft['title']}, {draft['due_label']}.",
+             f"{address_hi}, ये पहले से बुक है: {draft['title']}।")
+
     if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"] and not is_reminder and not draft.get("swap"):
         _advise_schedule(user, draft, address)
 
+    if is_reminder and draft["action"] in {"private_task", "pa_self_task"} and not draft["needs_clarification"] \
+            and _just_saved(user, draft["action"], draft["title"],
+                            exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))):
+        draft["action"], draft["reminder_saved"] = "answer", True
+        _say(draft, f"{address}, that reminder is already set.", f"{address_hi}, ये रिमाइंडर पहले से लगा है।")
     if is_reminder and draft["action"] in {"private_task", "pa_self_task"} and not draft["needs_clarification"]:
         when = exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
         data = {"title": draft["title"], "notes": draft["notes"], "kind": Kind.TASK, "priority": priority, "due_at": when,
@@ -1528,26 +1685,26 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     # it?". Anything unclear is still asked first; a list of several things still takes its one yes; and a rough
     # reading (the AI could not be reached) never saves by itself.
     sched_now = draft.get("schedule") or {}
-    if (draft["action"] in {"private_task", "pa_self_task", "pa_meeting"} and draft["kind"] in (Kind.MEETING, Kind.CALL)
-            and draft["due_date"] and draft["due_time"] and draft["title"] and not is_reminder
-            and not draft["needs_clarification"] and not sched_now.get("question") and not sched_now.get("clashes")
-            and draft["engine"] == "ai" and not cmd.get("_sub") and not cmd.get("more_items")):
+    wants_push = str(cmd.get("setting_value") or "").strip().lower() == "push"
+    if (wants_push and draft["action"] in _BOOKABLE and isinstance(sched_now.get("options"), dict)
+            and sched_now["options"].get("push") and draft["engine"] == "ai" and not cmd.get("_sub")):
+        # "4 baje Sharma ji ke saath, priority hai, baaki sab reschedule kar do": no question, it is done in one go.
+        _book_and_push(user, draft, {**draft, "transcript": full_text}, sched_now["options"]["push"], address)
+        sched_now = {}
+    bookable = (draft["action"] in _BOOKABLE and draft["kind"] in (Kind.MEETING, Kind.CALL)
+                and draft["due_date"] and draft["due_time"] and draft["title"] and not is_reminder
+                and not draft["needs_clarification"] and not sched_now.get("question") and not sched_now.get("clashes")
+                and draft["engine"] == "ai" and not cmd.get("_sub") and not cmd.get("more_items"))
+    if bookable:
         when = exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
         prefs_now = services.get_prefs(user)
         mins = draft["duration_minutes"] or int(prefs_now.get("meetingMinutes") or services.DEFAULT_MEETING_MINUTES)
         lead = draft["remind_before_minutes"] or services.default_remind_before(draft["kind"], priority, prefs_now)
-        data = {"title": draft["title"], "notes": draft["notes"], "kind": draft["kind"], "priority": priority,
-                "due_date": tu.to_local(when).date(), "due_time": tu.to_local(when).time(), "due_at": exact_at,
-                "duration_minutes": mins, "remind_before_minutes": draft["remind_before_minutes"] or None,
-                "announcement": draft["announcement"]}
         try:
             action = draft["action"]
-            if action == "private_task":
-                services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
-            elif action == "pa_self_task":
-                services.create_pa_self_task(user, {**data, "description": full_text})
-            else:
-                services.create_pa_task(user, {**data, "description": full_text}, meeting_with_pa=True)
+            _book_now(user, {**draft, "kind": draft["kind"], "priority": priority, "due_at": exact_at.isoformat() if exact_at else "",
+                             "duration_minutes": mins, "due_date": tu.to_local(when).date().isoformat(),
+                             "due_time": tu.to_local(when).strftime("%H:%M")}, full_text)
             draft["action"], draft["booked"] = "answer", True
             pa_name = draft.get("pa_name") or "your PA"
             when_en = draft["due_label"] or _due_label(draft["due_date"], draft["due_time"])

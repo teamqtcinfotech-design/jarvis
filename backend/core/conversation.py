@@ -200,6 +200,10 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     elif action in CONFIRMABLE:
         state["pending"], state["choices"] = _slim(draft), None
         resp = _resp(show, speak, lang, listen=True, action=action)
+    elif draft.get("booked") or draft.get("reminder_saved"):
+        if draft.get("card_done"):
+            state["pending"], state["choices"] = None, None  # the server settled the waiting card itself
+        resp = _resp(show, speak, lang, listen=True, action="saved")
     else:
         resp = _resp(show, speak, lang, listen=True, action=action)  # an answer, small talk; a waiting card stays
 

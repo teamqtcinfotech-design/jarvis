@@ -1763,6 +1763,38 @@ def set_pref_quiet(user: User, key: str, value) -> None:
     row.save(update_fields=["data"])
 
 
+def send_message(sender: User, text: str, *, when=None, priority: str = Priority.NORMAL) -> str:
+    """An alert from one of the two to the other: the MD to the PA, or the PA to the MD. Delivered now, or held until
+    `when` (it stays out of sight until then and is announced at that moment). Returns the recipient's name as said."""
+    if sender.is_md:
+        recipient = get_pa()
+        if recipient is None:
+            raise ServiceError("no_pa", "there is no PA account yet.", 422)
+        to_name, to_addr, to_addr_hi = recipient.spoken_name, recipient.spoken_name, recipient.spoken_name
+        from_en, from_hi = md_address(), md_address_hi()
+    else:
+        recipient = get_md()
+        if recipient is None:
+            raise ServiceError("no_md", "there is no MD account.", 422)
+        to_name, to_addr, to_addr_hi = md_address(), md_address(), md_address_hi()
+        from_en = from_hi = sender.spoken_name
+    text = " ".join(str(text or "").split())[:500]
+    if not text:
+        raise ServiceError("invalid", "what should the alert say?", 422)
+    since = timezone.now() - timedelta(minutes=3)
+    if Alert.objects.filter(recipient=recipient, ref_type="message", body=text, created_at__gte=since).exists():
+        return to_name  # the same alert, sent moments ago: not sent twice
+    Alert.objects.create(
+        recipient=recipient, kind=Alert.Kind.INFO, priority=priority if priority in Priority.values else Priority.NORMAL,
+        title=f"Message from {from_en}"[:200], body=text,
+        spoken_text=f"{to_addr}, a message from {from_en}: {text}",
+        spoken_text_hi=f"{to_addr_hi}, {from_hi} का संदेश: {text}",
+        ref_type="message", ref_id=str(uuid.uuid4()), snoozed_until=when,
+    )
+    audit(sender, "message.send", "user", recipient.id, "later" if when else "now")
+    return to_name
+
+
 def set_names(user: User, names: dict) -> list[str]:
     """Names by voice, from either phone: the speaker's own (myName) and, from the MD, the PA's (paName). The other
     person is told in one short note, and every phone re-reads the names from the server. Returns what changed."""

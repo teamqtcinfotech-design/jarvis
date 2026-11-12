@@ -11,7 +11,7 @@ from .models import CLOSED_STATUSES, Alert, SharedTask
 @receiver(post_save, sender=Alert)
 def _alert_created(sender, instance: Alert, created: bool, **kwargs):
     """Every new alert is pushed to the recipient's phones the moment it is safely saved."""
-    if created:
+    if created and not (instance.snoozed_until and instance.snoozed_until > timezone.now()):
         alert_id = instance.id
         transaction.on_commit(lambda: push.notify_alert(alert_id))
 

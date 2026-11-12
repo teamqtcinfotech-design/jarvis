@@ -1169,7 +1169,7 @@ class SchedulingTests(BaseCase):
         self.assertEqual(r["action"], "private_task")  # asked again, same card
         self.assertIn("Call Verma ji", r["show"])
         self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 3)
-        r = self.turn(self.md_client, "theek hai", _cmd(intent="confirm_pending"))  # takes the slot offered this time
+        r = self.turn(self.md_client, "jo free hai wahan rakho", _cmd(intent="confirm_pending", setting_value="move"))
         self.assertEqual(r["action"], "saved")
         task = self._new_private([a.id, b.id])
         self.assertEqual(tu.to_local(task.due_at).hour, 10)  # no room left that day: first slot of the next working day
@@ -1203,7 +1203,8 @@ class SchedulingTests(BaseCase):
         self.assertEqual(draft["action"], "private_task")
         self.assertFalse(draft["needs_clarification"])
         self.assertTrue(draft["schedule"]["load"]["heavy"])
-        self.assertIn("already has 7 items. Shall I save it?", draft["spoken_reply"])
+        # A full day is shown on the card, never said as if it stood in the way (12 Nov 2026).
+        self.assertNotIn("already has", draft["spoken_reply"])
         self.assertTrue(any("7 items" in w for w in draft["warnings"]))
 
     def test_routine_is_set_by_voice_and_keeps_time_free(self):
@@ -1293,7 +1294,7 @@ class SchedulingTests(BaseCase):
         self.assertEqual(req.payload["due_time"], "17:00")
         self.assert_no_secret(self.pa_client.get("/api/v1/alerts/"))
 
-    def test_sir_is_told_when_mansi_is_already_busy(self):
+    def test_a_task_for_mansi_is_given_even_when_she_is_busy(self):
         day = _workday()
         services.create_pa_task(self.md, {"title": "Prepare vendor file", "kind": Kind.TASK, "priority": Priority.NORMAL,
                                           "due_date": day, "due_time": time(15, 0), "duration_minutes": 60})
@@ -1301,7 +1302,7 @@ class SchedulingTests(BaseCase):
             intent="assign_to_pa", title="Courier the Contract", kind="TASK", due_date=day.isoformat(), due_time="15:00",
             spoken_reply="Sir, task for Priya: courier the contract at 3 PM. Shall I save it?"))
         self.assertEqual(r["action"], "pa_task")
-        self.assertIn("Priya already has Prepare vendor file then", r["show"])
+        self.assertNotIn("already has", r["show"])  # a task is never held up by her diary
 
     def test_app_flow_returns_the_offered_time_as_overrides(self):
         day = _workday()
@@ -3072,4 +3073,102 @@ class DirectBookingTests(BaseCase):
                            _cmd(intent="create_task", title="File GST", kind="TASK", due_date=day.isoformat(), due_time="16:00", engine="ai"))
         self.assertEqual(d["action"], "private_task")
         self.assertEqual(PrivateTask.objects.count(), before)
+
+
+class AlertsAndRescheduleTests(BaseCase):
+    """"Send an alert" is a message, never a task; "reschedule everything" books the new meeting and moves the rest,
+    and reads the day back; the same booking heard twice is saved once."""
+
+    def turn(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/turn/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _meeting(self, title, day, at, minutes=30):
+        return services.create_private_task(self.md, {"title": title, "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                      "due_date": day, "due_time": at, "duration_minutes": minutes})
+
+    def test_md_alert_reaches_the_pa_now_and_is_not_a_task(self):
+        tasks = SharedTask.objects.count()
+        d = self.interpret(self.md_client, "Priya ko alert bhejo ki client aa gaye",
+                           _cmd(intent="send_alert", title="Client arrived", notes="Client aa gaye hain, reception par hain.", engine="ai"))
+        self.assertEqual(d["action"], "answer")
+        self.assertIn("Sent", d["spoken_reply"])
+        alert = Alert.objects.get(recipient=self.pa, ref_type="message")
+        self.assertIn("Client aa gaye hain", alert.spoken_text)
+        self.assertIsNone(alert.snoozed_until)
+        self.assertEqual(SharedTask.objects.count(), tasks)
+
+    def test_alert_at_a_moment_waits_until_then(self):
+        d = self.interpret(self.md_client, "10 minute baad Priya ko alert bhejna ki file le aaye",
+                           _cmd(intent="send_alert", title="Bring the file", notes="File le aaiye.", due_in_minutes=10, engine="ai"))
+        self.assertIn("I'll alert", d["spoken_reply"])
+        alert = Alert.objects.get(recipient=self.pa, ref_type="message")
+        self.assertGreater(alert.snoozed_until, timezone.now() + timedelta(minutes=9))
+        # out of sight until then
+        r = self.pa_client.get("/api/v1/alerts/")
+        self.assertNotIn(str(alert.id), json.dumps(r.json()))
+
+    def test_pa_alert_reaches_the_md(self):
+        self.interpret(self.pa_client, "Sir ko bata do bank wale aa gaye",
+                       _cmd(intent="send_alert", title="Bank people here", notes="Bank wale aa gaye hain.", engine="ai"))
+        self.assertTrue(Alert.objects.filter(recipient=self.md, ref_type="message", body="Bank wale aa gaye hain.").exists())
+
+    def test_reschedule_everything_in_the_first_sentence(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(16, 0))
+        sharma = self._meeting("Sharma call", day, time(16, 30))
+        r = self.turn(self.md_client, "4 baje board meeting, priority hai, baaki sab reschedule kar do",
+                      _cmd(intent="create_task", title="Board meeting", kind="MEETING", due_date=day.isoformat(), due_time="16:00",
+                           duration_minutes=30, setting_value="push", engine="ai"))
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("New schedule", r["show"])
+        aman.refresh_from_db()
+        sharma.refresh_from_db()
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "16:30")
+        self.assertEqual(tu.to_local(sharma.due_at).strftime("%H:%M"), "17:00")
+        board = [t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Board meeting"]
+        self.assertEqual(len(board), 1)
+        self.assertEqual(tu.to_local(board[0].due_at).strftime("%H:%M"), "16:00")
+
+    def test_reschedule_as_the_answer_saves_and_reads_back(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        self.turn(self.md_client, "11 baje board meeting", _cmd(intent="create_task", title="Board meeting", kind="MEETING",
+                                                              due_date=day.isoformat(), due_time="11:00", duration_minutes=30, engine="ai"))
+        r = self.turn(self.md_client, "isko yahin rakho, baaki sab reschedule kar do", _cmd(intent="confirm_pending", setting_value="push"))
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("New schedule", r["show"])
+        self.assertIn("Aman review", r["show"])
+        aman.refresh_from_db()
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "11:30")
+        # nothing waits any more: a second yes saves nothing
+        before = PrivateTask.objects.count()
+        self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(PrivateTask.objects.count(), before)
+
+    def test_a_clear_meeting_heard_twice_is_booked_once(self):
+        day = _workday(2)
+        cmd = _cmd(intent="create_task", title="Meeting with Neha", kind="MEETING", due_date=day.isoformat(), due_time="15:00", engine="ai")
+        first = self.interpret(self.md_client, "parson 3 baje Neha ke saath meeting", cmd)
+        second = self.interpret(self.md_client, "parson 3 baje Neha ke saath meeting", cmd)
+        self.assertTrue(first["booked"])
+        self.assertIn("already booked", second["spoken_reply"])
+        self.assertEqual(len([t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Meeting with Neha"]), 1)
+
+    def test_a_task_never_meets_a_clash(self):
+        day = _workday(2)
+        self._meeting("Aman review", day, time(11, 0))
+        d = self.interpret(self.md_client, "parson 11 baje GST file karni hai",
+                           _cmd(intent="create_task", title="File GST", kind="TASK", due_date=day.isoformat(), due_time="11:00", engine="ai"))
+        self.assertEqual(d["action"], "private_task")
+        self.assertFalse(d["needs_clarification"])
+        self.assertFalse((d.get("schedule") or {}).get("clashes"))
 

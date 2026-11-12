@@ -251,8 +251,9 @@ def push_plan(user: User, start: datetime, end: datetime, prefs: dict, exclude_i
     fixed = [c for c in busy if c.get("routine")]
     movable = [c for c in busy if not c.get("routine") and c.get("id") and c.get("kind") in (Kind.MEETING, Kind.CALL)
                and c["end"] > start]
-    office_end = tu.combine_local(day, time.fromisoformat(str(prefs.get("officeEnd") or "19:00")))
-    limit = max(office_end, end)
+    # Office hours are not a wall here: when he says the new meeting comes first, the others move on even into the
+    # evening (the read-back says so). Only the end of the day stops the chain.
+    limit = max(tu.combine_local(day, time(23, 0)), end)
     cursor = end
     moves = []
     for c in sorted(movable, key=lambda c: c["start"]):
