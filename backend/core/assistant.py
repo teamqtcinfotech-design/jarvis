@@ -572,7 +572,13 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             notes_hi.append(f"{twin} {day_hi} पहले से है।")
             warnings.append(f"Similar item already on that day: {twin}")
     if clashes:
-        c = clashes[0]
+        # A meeting in the way matters more than a routine block at the same moment (lunch can bend; he cannot be in
+        # two meetings): the question is about the meeting, and the routine block is mentioned beside it.
+        c = next((x for x in clashes if not x.get("routine")), clashes[0])
+        block = next((x for x in clashes if x.get("routine")), None)
+        if block and block is not c:
+            notes_en.append(f"That is during {block['title']} too.")
+            notes_hi.append(f"उस समय {block['title']} भी है।")
         span = f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"
         if anonymous:
             head_en = f"{address}, {item} {when_en}: {sir} is busy then ({span})."
@@ -803,6 +809,10 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
         if choice != "move":
             # A bare "yes" does not say which: ask again, shortly, rather than move anything on a guess.
             return ask_again()
+    if not options and choice in {"fit", "push"} and not d and not t and sched.get("question"):
+        # He asked for a way out that is not possible here (nothing can be pushed, there is no gap): say so and ask
+        # again. The offered time is never taken unless he takes it.
+        return ask_again("That is not possible here. ", "यहाँ ऐसा नहीं हो सकता। ")
     if not d and not t:
         if _safe_date(str(offered.get("due_date") or "")) and _safe_time(str(offered.get("due_time") or "")):
             draft["overrides"] = {"due_date": offered["due_date"], "due_time": offered["due_time"]}
@@ -1086,6 +1096,14 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         "done_speak": "",
         "done_lang": "en",
     }
+
+    # A meeting or call with its day and time needs nothing more from him: not "with whom?", not "how long?" (his
+    # usual length is used and said). The model's own question is dropped; the server still asks what matters
+    # (a name nobody knows, a time already gone, a clash).
+    if intent in {"create_task", "pa_own", "meet_with_pa"} and kind in (Kind.MEETING, Kind.CALL) and due_date and due_time \
+            and draft["needs_clarification"]:
+        draft["needs_clarification"], draft["question"], draft["spoken_reply"] = False, "", ""
+        draft["title"] = draft["title"] or ("Call" if kind == Kind.CALL else "Meeting")
 
     summary_hi = ""  # Hindi twin of a server-written answer (lists and charts), for the Hindi voice
 
