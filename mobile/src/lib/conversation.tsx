@@ -1030,6 +1030,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     stopSpeaking();
     const rest = restOfCutShort();
     cutRef.current = rest ? { ...rest, at: Date.now() } : null;
+    // He talked over a reminder or a notification read out on the home screen: the conversation opens so he sees
+    // JARVIS listening, and what he says is taken as the answer to it (its question, if it had one, still stands).
+    if (!talkOpen) openTalk();
     expectingRef.current = true;
     silenceRef.current = 0;
     listen();

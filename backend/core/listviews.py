@@ -269,7 +269,11 @@ def _in_period(item: dict, start: date | None, end: date | None, by: str, today:
         return inside(_due_day(item))
     # What was planned for the period: due in it, or finished in it. Late items from earlier days are NOT pulled
     # into "today" (he asked about today); they are counted and offered separately, and "late wale" lists them.
-    return inside(_due_day(item)) or (_is_done(item) and inside(_iso_day(item.get("completed_at"))))
+    if inside(_due_day(item)) or (_is_done(item) and inside(_iso_day(item.get("completed_at")))):
+        return True
+    # Work with no date on it is the work of the day it was given, for as long as it is open: "aaj mere kya kaam
+    # hain" must name the urgent thing Sir gave an hour ago even though nobody put a date on it.
+    return _due_day(item) is None and not _is_done(item) and inside(_iso_day(item.get("created_at")))
 
 
 def _from_whom(item: dict, whom: str, user) -> bool:
