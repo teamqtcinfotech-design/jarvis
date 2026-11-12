@@ -615,8 +615,8 @@ class SmartAssistantTests(BaseCase):
         self.assertNotIn(draft["action"], {"confirm_pending", "cancel_pending"})
 
     def test_done_reply_follows_the_speakers_language(self):
-        draft, _ = self.interpret(self.md_client, "kal 4 baje Sharma ji ke saath meeting", _cmd(
-            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", reply_language="hi",
+        draft, _ = self.interpret(self.md_client, "kal 4 baje Sharma ji ko file bhejni hai", _cmd(
+            intent="create_task", title="Send the file to Sharma ji", kind="TASK", reply_language="hi",
             due_date=(tu.today_local() + timedelta(days=1)).isoformat(), due_time="16:00",
             spoken_reply="Sir, kal 4 baje Sharma ji ke saath meeting. Save kar doon?",
             spoken_reply_hi="सर, कल चार बजे शर्मा जी के साथ मीटिंग। सेव कर दूँ?",
@@ -672,9 +672,9 @@ class SmartAssistantTests(BaseCase):
 
     def test_background_conversation_creates_a_task_after_yes(self):
         tomorrow = (tu.today_local() + timedelta(days=1)).isoformat()
-        r = self.turn(self.md_client, "kal 4 baje Sharma ji ke saath meeting", _cmd(
-            intent="create_task", title="Meeting with Sharma ji", kind="MEETING", due_date=tomorrow, due_time="16:00",
-            spoken_reply="Sir, meeting with Sharma ji tomorrow at 4 PM. Shall I save it?",
+        r = self.turn(self.md_client, "kal 4 baje Sharma ji ko file bhejni hai", _cmd(
+            intent="create_task", title="Send the file to Sharma ji", kind="TASK", due_date=tomorrow, due_time="16:00",
+            spoken_reply="Sir, send the file to Sharma ji tomorrow at 4 PM. Shall I save it?",
             done_reply="Ho gaya Sir, kal 4 baje yaad dila dunga."))
         self.assertEqual(r["action"], "private_task")
         self.assertTrue(r["listen"])
@@ -1365,7 +1365,8 @@ class SmartBrainTests(BaseCase):
         second = self.interpret(self.md_client, "bahar ka hai, hamara vendor", self._aman(
             day, new_contacts=[{"name": "aman", "note": "vendor"}]), previous=first["transcript"], history=history)
         self.assertFalse(second["needs_clarification"])
-        self.assertEqual(second["action"], "private_task")
+        self.assertEqual(second["action"], "answer")
+        self.assertTrue(second["booked"])
         self.assertEqual(second["contacts_saved"], ["Aman"])
         self.assertEqual([(c["name"], c["note"]) for c in services.list_contacts(self.md)], [("Aman", "vendor")])
         # Next time nobody is asked, and the model is told who Aman is.
@@ -1435,7 +1436,9 @@ class SmartBrainTests(BaseCase):
         # She did not say whose it is, and the model guessed "for Sir": it is her own, never sent to Sir, and
         # nothing is asked (12 Nov 2026: the "whose is it?" question was unwanted).
         d = self.interpret(self.pa_client, "Neha ke saath 3 baje meeting book karo", _cmd(intent="request_for_md", **base))
-        self.assertEqual(d["action"], "pa_self_task")
+        self.assertTrue(d["booked"])          # her own meeting, clear and free: booked at once
+        self.assertTrue(SharedTask.objects.filter(title="Meeting with Neha", origin=SharedTask.Origin.PA_SELF).exists())
+        self.assertFalse(TaskRequest.objects.filter(requested_by=self.pa).exists())
         d = self.interpret(self.pa_client, "kal bank jaana hai", _cmd(intent="create_task", title="Go to the Bank"))
         self.assertEqual(d["action"], "pa_self_task")
         # She said it: for Sir -> a request he accepts; her own -> her own list.
@@ -1462,8 +1465,11 @@ class SmartBrainTests(BaseCase):
                            previous="mera ek meeting hai")
         self.assertEqual(d["action"], "md_request")
         # Sir's side is unchanged: his own meeting is his personal item, nothing for him is ever a "request".
+        before = PrivateTask.objects.filter(owner=self.md).count()
         d = self.interpret(self.md_client, "Neha ke saath 3 baje meeting", _cmd(intent="create_task", **base))
-        self.assertEqual(d["action"], "private_task")
+        self.assertTrue(d["booked"])  # clear and free: his personal meeting, booked at once
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before + 1)
+        self.assertFalse(TaskRequest.objects.exists())
 
     def test_pa_own_task_lives_on_her_list_and_sir_is_not_nagged(self):
         when = tu.now_local() + timedelta(minutes=20)
@@ -2978,14 +2984,16 @@ class WhoseMeetingTests(BaseCase):
         self.assertEqual(r.status_code, 200, r.content)
         return r.json()
 
-    def _cmd(self, intent):
+    def _cmd(self, intent, hour=15):
         day = (tu.today_local() + timedelta(days=1)).isoformat()
-        return _cmd(intent=intent, title="Meeting with Aman", kind="MEETING", due_date=day, due_time="15:00", engine="ai")
+        return _cmd(intent=intent, title="Meeting with Neha", kind="MEETING", due_date=day, due_time=f"{hour}:00", engine="ai")
 
     def test_no_owner_said_is_her_own_and_never_goes_to_the_md(self):
-        for intent in ("meet_with_pa", "needs_destination", "request_for_md"):
-            d = self.interpret(self.pa_client, "kal Aman ke saath 3 baje meeting book kar do", self._cmd(intent))
-            self.assertEqual(d["action"], "pa_self_task", intent)
+        for hour, intent in enumerate(("meet_with_pa", "needs_destination", "request_for_md"), start=10):
+            d = self.interpret(self.pa_client, "kal Neha ke saath meeting book kar do", self._cmd(intent, hour))
+            self.assertTrue(d.get("booked"), (intent, d["spoken_reply"]))
+        self.assertEqual(SharedTask.objects.filter(title="Meeting with Neha", origin=SharedTask.Origin.PA_SELF).count(), 3)
+        self.assertFalse(TaskRequest.objects.filter(requested_by=self.pa).exists())
 
     def test_two_meetings_in_one_breath_are_one_card_for_the_pa(self):
         day = (tu.today_local() + timedelta(days=1)).isoformat()
@@ -3000,11 +3008,68 @@ class WhoseMeetingTests(BaseCase):
         self.assertIn("2 things", d["spoken_reply"])
 
     def test_my_meeting_is_her_own(self):
-        for intent in ("meet_with_pa", "needs_destination", "create_task"):
-            d = self.interpret(self.pa_client, "kal 3 baje meri Aman ke saath meeting book kar do", self._cmd(intent))
-            self.assertEqual(d["action"], "pa_self_task", intent)
+        for hour, intent in enumerate(("meet_with_pa", "needs_destination", "create_task"), start=10):
+            d = self.interpret(self.pa_client, "kal meri Neha ke saath meeting book kar do", self._cmd(intent, hour))
+            self.assertTrue(d.get("booked"), (intent, d["spoken_reply"]))
+        self.assertEqual(SharedTask.objects.filter(title="Meeting with Neha", origin=SharedTask.Origin.PA_SELF).count(), 3)
 
     def test_the_mds_meeting_is_a_request(self):
-        for text in ("kal 3 baje Ma'am ki Aman ke saath meeting book kar do", "कल 3 बजे मैम की अमन के साथ मीटिंग"):
+        for text in ("kal 3 baje Ma'am ki Neha ke saath meeting book kar do", "कल 3 बजे मैम की नेहा के साथ मीटिंग"):
             d = self.interpret(self.pa_client, text, self._cmd("needs_destination"))
             self.assertEqual(d["action"], "md_request", text)
+
+
+class DirectBookingTests(BaseCase):
+    """A clear meeting of his own is booked and told, not asked; anything unclear is still asked first."""
+
+    def interpret(self, client, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _meeting(self, hour=16, **extra):
+        day = _workday(2)
+        return _cmd(**{"intent": "create_task", "title": "Meeting with Neha", "kind": "MEETING", "due_date": day.isoformat(),
+                       "due_time": f"{hour}:00", "engine": "ai", **extra})
+
+    def test_clear_and_free_is_booked_and_told(self):
+        before = PrivateTask.objects.count()
+        d = self.interpret(self.md_client, "parson 4 baje Neha ke saath meeting kar do", self._meeting())
+        self.assertEqual(d["action"], "answer")
+        self.assertTrue(d["booked"])
+        self.assertIn("Booked", d["spoken_reply"])
+        self.assertNotIn("Shall I save", d["spoken_reply"])
+        self.assertEqual(PrivateTask.objects.count(), before + 1)
+
+    def test_a_clash_is_asked_first_and_nothing_is_booked(self):
+        day = _workday(2)
+        services.create_private_task(self.md, {"title": "Board review", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                               "due_date": day, "due_time": time(16, 0), "duration_minutes": 30})
+        before = PrivateTask.objects.count()
+        d = self.interpret(self.md_client, "parson 4 baje Neha ke saath meeting kar do", self._meeting())
+        self.assertEqual(d["action"], "private_task")
+        self.assertIn("Board review", d["spoken_reply"])
+        self.assertEqual(PrivateTask.objects.count(), before)
+
+    def test_a_stranger_is_asked_about_first(self):
+        before = PrivateTask.objects.count()
+        d = self.interpret(self.md_client, "parson 4 baje Zubin ke saath meeting kar do",
+                           self._meeting(title="Meeting with Zubin", people=["Zubin"]))
+        self.assertTrue(d["needs_clarification"])
+        self.assertEqual(PrivateTask.objects.count(), before)
+
+    def test_a_rough_reading_never_books_by_itself(self):
+        before = PrivateTask.objects.count()
+        d = self.interpret(self.md_client, "parson 4 baje Neha ke saath meeting", self._meeting(engine="rules"))
+        self.assertNotEqual(d.get("booked"), True)
+        self.assertEqual(PrivateTask.objects.count(), before)
+
+    def test_a_task_still_takes_its_yes(self):
+        day = _workday(2)
+        before = PrivateTask.objects.count()
+        d = self.interpret(self.md_client, "parson 4 baje GST file karni hai mera personal",
+                           _cmd(intent="create_task", title="File GST", kind="TASK", due_date=day.isoformat(), due_time="16:00", engine="ai"))
+        self.assertEqual(d["action"], "private_task")
+        self.assertEqual(PrivateTask.objects.count(), before)
+

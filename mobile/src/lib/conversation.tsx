@@ -523,6 +523,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     // An answer with data: the screen gets a timeline / chart / table while the short reply is spoken. The card is
     // titled by what it shows ("Waiting for Ma'am"), not by the raw words that asked for it.
     if (d.view && d.action === 'answer') addAnswer(d.view, d.view.title || lastQuestion.current);
+    // The server already saved it (a clear meeting booked at once, or a plain reminder): the lists catch up now.
+    if (d.booked || d.reminder_saved) dataChanged.emit();
 
     const pendingOffer = offerRef.current;
     if (pendingOffer) {

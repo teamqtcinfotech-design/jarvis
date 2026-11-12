@@ -313,6 +313,9 @@ export interface Draft {
   schedule?: ScheduleAdvice | null;
   /** confirm_pending: the day / time to apply to the waiting card before saving ("haan" to the offered slot, or "6 baje"). */
   overrides?: { due_date?: string; due_time?: string; duration_minutes?: number; batch?: Draft[] };
+  /** The server already saved it (a clear meeting booked at once, or a plain reminder): the lists refresh now. */
+  booked?: boolean;
+  reminder_saved?: boolean;
   /** Data the phone draws for this answer (timeline / chart / table). */
   view?: DataView | null;
   /** Something to do on the screen by voice: export_pdf / export_csv / share / open_item / open_settings / go_home. */

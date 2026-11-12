@@ -1520,6 +1520,55 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             _say(draft, f"Sorry {address}, I could not set that reminder: {exc.message}",
                  f"माफ़ कीजिए {address_hi}, रिमाइंडर नहीं लग पाया।")
 
+    # A meeting or call of his own that he gave completely (a day and a time) and that nothing stands against (the
+    # person is known, the time is ahead, the diary is free): booked here and now and told, not asked "shall I save
+    # it?". Anything unclear is still asked first; a list of several things still takes its one yes; and a rough
+    # reading (the AI could not be reached) never saves by itself.
+    sched_now = draft.get("schedule") or {}
+    if (draft["action"] in {"private_task", "pa_self_task", "pa_meeting"} and draft["kind"] in (Kind.MEETING, Kind.CALL)
+            and draft["due_date"] and draft["due_time"] and draft["title"] and not is_reminder
+            and not draft["needs_clarification"] and not sched_now.get("question") and not sched_now.get("clashes")
+            and draft["engine"] == "ai" and not cmd.get("_sub") and not cmd.get("more_items")):
+        when = exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
+        prefs_now = services.get_prefs(user)
+        mins = draft["duration_minutes"] or int(prefs_now.get("meetingMinutes") or services.DEFAULT_MEETING_MINUTES)
+        lead = draft["remind_before_minutes"] or services.default_remind_before(draft["kind"], priority, prefs_now)
+        data = {"title": draft["title"], "notes": draft["notes"], "kind": draft["kind"], "priority": priority,
+                "due_date": tu.to_local(when).date(), "due_time": tu.to_local(when).time(), "due_at": exact_at,
+                "duration_minutes": mins, "remind_before_minutes": draft["remind_before_minutes"] or None,
+                "announcement": draft["announcement"]}
+        try:
+            action = draft["action"]
+            if action == "private_task":
+                services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
+            elif action == "pa_self_task":
+                services.create_pa_self_task(user, {**data, "description": full_text})
+            else:
+                services.create_pa_task(user, {**data, "description": full_text}, meeting_with_pa=True)
+            draft["action"], draft["booked"] = "answer", True
+            pa_name = draft.get("pa_name") or "your PA"
+            when_en = draft["due_label"] or _due_label(draft["due_date"], draft["due_time"])
+            when_hi = (f"{tu.minutes_phrase_hi(due_in)} में ({tu.fmt_time_hi(exact_at)})" if exact_at
+                       else _due_label_hi(draft["due_date"], draft["due_time"]))
+            told = lead and (not exact_at or due_in > lead)
+            en = f"Booked, {address}: {draft['title']}, {when_en}, {tu.minutes_phrase(mins)}."
+            hi = f"बुक हो गई, {address_hi}: {draft['title']}, {when_hi}, {tu.minutes_phrase_hi(mins)} की।"
+            if told:
+                en += f" I'll remind you {tu.minutes_phrase(lead)} before."
+                hi += f" {tu.minutes_phrase_hi(lead)} पहले याद दिला दूँगा।"
+            if action == "pa_meeting":
+                en += f" {pa_name} has been told."
+                hi += f" {pa_name} को बता दिया है।"
+            for note in sched_now.get("notes") or []:
+                en += f" {note}"
+            for note in sched_now.get("notes_hi") or []:
+                hi += f" {note}"
+            draft["schedule"] = None
+            _say(draft, en, hi)
+        except services.ServiceError as exc:
+            draft["action"], draft["schedule"] = "answer", None
+            _say(draft, f"Sorry {address}, I could not book that: {exc.message}", f"माफ़ कीजिए {address_hi}, बुक नहीं हो पाई।")
+
     if draft["needs_clarification"] and draft["question"]:
         draft["spoken_reply"] = draft["question"]
 
