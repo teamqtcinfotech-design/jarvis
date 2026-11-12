@@ -2925,3 +2925,45 @@ class MeetingJugglingTests(BaseCase):
         self.assertIn("this order", alert.spoken_text)
         self.assertEqual(followups.piled_up(now), 0)     # told once
 
+
+class TasksAreNotMeetingsTests(BaseCase):
+    """Asked for tasks, JARVIS lists tasks; asked for meetings, meetings; asked for the day, everything."""
+
+    def interpret(self, client, text, cmd):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def setUp(self):
+        super().setUp()
+        today = tu.today_local()
+        services.create_pa_task(self.md, {"title": "Send the urgent list", "kind": Kind.TASK, "priority": Priority.URGENT})
+        services.create_pa_task(self.md, {"title": "Weekly sync", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                          "due_date": today, "due_time": time(23, 50)}, meeting_with_pa=True)
+
+    def _titles(self, d):
+        view = d["view"]
+        return {r.get("title") for r in (view.get("rows") or view.get("items") or [])}
+
+    def test_tasks_means_tasks_whoever_gave_them(self):
+        day = tu.today_local().isoformat()
+        d = self.interpret(self.pa_client, "aaj mere kya tasks hain",
+                           _cmd(intent="query", view_kind="tasks", view_who="me", view_from=day, view_to=day, view_from_whom="me"))
+        self.assertIn("Send the urgent list", d["spoken_reply"])
+        self.assertNotIn("Weekly sync", d["spoken_reply"])
+
+    def test_meetings_means_meetings(self):
+        day = tu.today_local().isoformat()
+        d = self.interpret(self.pa_client, "aaj meri meetings kya hain",
+                           _cmd(intent="query", view_kind="tasks", view_who="me", view_from=day, view_to=day, view_types=["MEETING"]))
+        self.assertIn("Weekly sync", d["spoken_reply"])
+        self.assertNotIn("Send the urgent list", d["spoken_reply"])
+
+    def test_task_or_meeting_asked_together_gives_both(self):
+        day = tu.today_local().isoformat()
+        d = self.interpret(self.pa_client, "aaj mere koi task ya meeting hai",
+                           _cmd(intent="query", view_kind="tasks", view_who="me", view_from=day, view_to=day))
+        self.assertIn("Send the urgent list", d["spoken_reply"])
+        self.assertIn("Weekly sync", d["spoken_reply"])
+

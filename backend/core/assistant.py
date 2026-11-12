@@ -194,6 +194,9 @@ def _is_pa_name(name: str) -> bool:
 
 _PERSONAL = re.compile(
     r"\b(mera|meri|mere|mujhe|mujhko|personal|yaad|remind me|reminder|my own|khud|apna|apni)\b", re.IGNORECASE)
+_TASK_WORD = re.compile(r"\b(tasks?|to-?dos?)\b|टास्क|टास्क्स", re.IGNORECASE)
+_MEETING_WORD = re.compile(r"\b(meetings?|calls?|appointments?|schedule|plan|agenda|baithak)\b|मीटिंग|मीटिंग्स|कॉल|बैठक|प्लान|शेड्यूल", re.IGNORECASE)
+_OWN_WORD = re.compile(r"\b(apna|apne|apni|khud|own|personal|niji)\b|अपना|अपने|अपनी|खुद|पर्सनल|निजी", re.IGNORECASE)
 _WITH = re.compile(r"\b(ke saath|ke sath|ke sang|with)\b", re.IGNORECASE)
 _TEAM_SUFFIX = re.compile(r"\b(team|department|dept|waalon|walon|waale|wale|log)\s*$", re.IGNORECASE)
 
@@ -1344,9 +1347,20 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             ids = [r for r in (cmd.get("target_refs") or []) if isinstance(r, str) and r in known]
             if not ids and cmd.get("target_ref") in known:
                 ids = [cmd["target_ref"]]
+            # A task is not a meeting. Asked for "tasks" (and not meetings or calls as well), the list is tasks only;
+            # asked for "kaam", "plan" or "schedule", it is everything. And "mere tasks" is everything on the
+            # speaker's list, whoever gave it: only "mere APNE" narrows it to what they added themselves.
+            types = [t for t in (cmd.get("view_types") or []) if isinstance(t, str)]
+            # Only for the two general lists; the special views (pending, personal, official…) keep their own shape.
+            general = kind in {"tasks", "today"}
+            if not types and general and _TASK_WORD.search(full_text) and not _MEETING_WORD.search(full_text):
+                types = ["TASK", "PAYMENT", "FOLLOW_UP"]
+            from_whom = cmd.get("view_from_whom")
+            if from_whom == "me" and general and not _OWN_WORD.search(full_text):
+                from_whom = ""
             request = {"who": cmd.get("view_who"), "from": cmd.get("view_from"), "to": cmd.get("view_to"),
                        "by": cmd.get("view_by"), "filter": cmd.get("view_filter"), "group": cmd.get("view_group"),
-                       "types": cmd.get("view_types"), "from_whom": cmd.get("view_from_whom"),
+                       "types": types, "from_whom": from_whom,
                        "priority": cmd.get("view_priority"), "words": cmd.get("view_words"), "ids": ids}
             view = datacards.build(user, kind, include_private, params=request, missing=cmd.get("view_missing") or "")
             if view and view.get("ask"):
