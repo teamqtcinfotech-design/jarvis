@@ -1,9 +1,9 @@
 import { Redirect } from 'expo-router';
 import React, { useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { Button, Chip, Icon, Txt } from '@/components/ui';
+import { Button, Icon, Txt } from '@/components/ui';
 import { ApiError, normalizeServer } from '@/lib/api';
 import { DEFAULT_SERVER, LOCAL_SERVER } from '@/lib/config';
 import { useSession } from '@/lib/session';
@@ -11,9 +11,10 @@ import { colors, fonts, radius, shadow } from '@/lib/theme';
 
 export default function Login() {
   const { user, signIn, server: savedServer } = useSession();
-  // The last address used on this phone is kept (live server or laptop); a fresh install gets the live server.
+  // Everyone signs in to the live JARVIS server; there is nothing to choose. For the developer only: holding the
+  // shield for two seconds switches this phone to the laptop over USB (and back), shown by a small line below it.
   const [server, setServer] = useState(savedServer || DEFAULT_SERVER);
-  const current = normalizeServer(server);
+  const testing = normalizeServer(server) === LOCAL_SERVER;
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -37,28 +38,21 @@ export default function Login() {
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={s.wrap} keyboardShouldPersistTaps="handled">
-          <View style={s.crest}>
+          <Pressable
+            style={s.crest}
+            delayLongPress={2000}
+            onLongPress={() => setServer(testing ? DEFAULT_SERVER : LOCAL_SERVER)}
+            accessibilityLabel="JARVIS"
+          >
             <Icon name="shield-checkmark-outline" size={34} color={colors.gold} />
-          </View>
+          </Pressable>
           <Txt style={s.brand}>JARVIS</Txt>
           <Txt variant="small" style={{ color: colors.muted, marginTop: 2 }}>Private executive assistant</Txt>
+          {testing ? (
+            <Txt variant="caption" style={{ color: colors.warn, marginTop: 6 }}>Testing: laptop over USB</Txt>
+          ) : null}
 
           <View style={s.card}>
-            <Txt variant="label" style={s.label}>Server address</Txt>
-            <TextInput
-              value={server}
-              onChangeText={setServer}
-              placeholder={DEFAULT_SERVER.replace(/^https?:\/\//, '')}
-              placeholderTextColor={colors.faint}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              style={s.input}
-            />
-            <View style={s.servers}>
-              <Chip label="Live server" icon="cloud-outline" selected={current === DEFAULT_SERVER} onPress={() => setServer(DEFAULT_SERVER)} />
-              <Chip label="Laptop over USB" icon="laptop-outline" selected={current === LOCAL_SERVER} onPress={() => setServer(LOCAL_SERVER)} />
-            </View>
             <Txt variant="label" style={s.label}>Username</Txt>
             <TextInput value={username} onChangeText={setUsername} autoCapitalize="none" autoCorrect={false} style={s.input} />
             <Txt variant="label" style={s.label}>Password</Txt>
@@ -69,12 +63,12 @@ export default function Login() {
               icon="log-in-outline"
               onPress={submit}
               loading={busy}
-              disabled={!server.trim() || !username.trim() || !password}
+              disabled={!username.trim() || !password}
               style={{ marginTop: 20 }}
             />
           </View>
           <Txt variant="caption" style={{ color: colors.faint, marginTop: 18, textAlign: 'center' }}>
-            Only enrolled MD and PA accounts can sign in.
+            Only invited accounts can sign in.
           </Txt>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -90,7 +84,6 @@ const s = StyleSheet.create({
   brand: { fontFamily: fonts.serif, fontSize: 28, fontWeight: '700', lineHeight: 40, letterSpacing: 3, paddingLeft: 4, textAlign: 'center', color: colors.ink, marginTop: 16 },
   card: { alignSelf: 'stretch', backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, padding: 20, marginTop: 30, ...shadow },
   label: { marginTop: 12, color: colors.inkSoft },
-  servers: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 8 },
   input: {
     backgroundColor: colors.bg,
     borderWidth: 1,

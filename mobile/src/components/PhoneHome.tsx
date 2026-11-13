@@ -17,7 +17,6 @@ import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
 import type { SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
-import { currentServer } from '@/lib/api';
 
 import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
@@ -202,7 +201,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
                 </Txt>
                 <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>
                   {!data && loadError
-                    ? `${loadError} Server: ${currentServer().replace(/^https?:\/\//, '')}. Tap here to try again.`
+                    ? `${loadError} Check the internet connection, then tap here to try again.`
                     : 'Say “Hey JARVIS” and ask for the plan, or give a task.'}
                 </Txt>
               </>
