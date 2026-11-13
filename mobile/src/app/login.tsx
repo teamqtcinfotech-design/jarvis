@@ -1,20 +1,18 @@
 import { Redirect } from 'expo-router';
 import React, { useState } from 'react';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Button, Icon, Txt } from '@/components/ui';
-import { ApiError, normalizeServer } from '@/lib/api';
-import { DEFAULT_SERVER, LOCAL_SERVER } from '@/lib/config';
+import { ApiError } from '@/lib/api';
+import { DEFAULT_SERVER } from '@/lib/config';
 import { useSession } from '@/lib/session';
 import { colors, fonts, radius, shadow } from '@/lib/theme';
 
 export default function Login() {
-  const { user, signIn, server: savedServer } = useSession();
-  // Everyone signs in to the live JARVIS server; there is nothing to choose. For the developer only: holding the
-  // shield for two seconds switches this phone to the laptop over USB (and back), shown by a small line below it.
-  const [server, setServer] = useState(savedServer || DEFAULT_SERVER);
-  const testing = normalizeServer(server) === LOCAL_SERVER;
+  const { user, signIn } = useSession();
+  // Everyone signs in to the live JARVIS server (the VPS); there is nothing to choose. A build for another server is
+  // made with EXPO_PUBLIC_JARVIS_SERVER set (lib/config.ts).
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -26,7 +24,7 @@ export default function Login() {
     setBusy(true);
     setError('');
     try {
-      await signIn(server, username, password);
+      await signIn(DEFAULT_SERVER, username, password);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not sign in.');
     } finally {
@@ -38,19 +36,11 @@ export default function Login() {
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={s.wrap} keyboardShouldPersistTaps="handled">
-          <Pressable
-            style={s.crest}
-            delayLongPress={2000}
-            onLongPress={() => setServer(testing ? DEFAULT_SERVER : LOCAL_SERVER)}
-            accessibilityLabel="JARVIS"
-          >
+          <View style={s.crest}>
             <Icon name="shield-checkmark-outline" size={34} color={colors.gold} />
-          </Pressable>
+          </View>
           <Txt style={s.brand}>JARVIS</Txt>
           <Txt variant="small" style={{ color: colors.muted, marginTop: 2 }}>Private executive assistant</Txt>
-          {testing ? (
-            <Txt variant="caption" style={{ color: colors.warn, marginTop: 6 }}>Testing: laptop over USB</Txt>
-          ) : null}
 
           <View style={s.card}>
             <Txt variant="label" style={s.label}>Username</Txt>
