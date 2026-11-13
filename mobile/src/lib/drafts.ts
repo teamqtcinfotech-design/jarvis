@@ -2,7 +2,7 @@ import { dayLabel } from './format';
 import type { Draft, DraftAction } from './types';
 
 export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delegation', 'team_delegation', 'pa_task', 'pa_meeting',
-  'pa_self_task'];
+  'pa_self_task', 'mg_task'];
 
 /** Cards that end with a question ("shall I save it?") and wait for a yes / no / change. */
 export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'accept_request', 'decline_request', 'complete', 'remember',
@@ -46,6 +46,8 @@ export function draftHeading(d: Draft, md = 'Sir', him = 'him'): { title: string
       };
     case 'md_request':
       return { title: `Request to ${md}`, detail: `${md} will accept or decline it.`, icon: 'paper-plane-outline' };
+    case 'mg_task':
+      return { title: `Task for ${d.mg_name || 'the manager'}`, detail: `${d.mg_name || 'The manager'} is told at once.`, icon: 'person-outline' };
     case 'pa_self_task':
       return { title: 'Your own task', detail: `On your list. ${md} can see it; it is not sent to ${him}.`, icon: 'person-outline' };
     case 'accept_request':

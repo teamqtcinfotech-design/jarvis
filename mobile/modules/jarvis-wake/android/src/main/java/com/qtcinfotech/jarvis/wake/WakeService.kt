@@ -614,7 +614,7 @@ class WakeService : Service() {
         private const val NOISE_FLOOR = 110.0       // below this it is room noise: never amplified
         private const val MAX_GAIN = 3.0            // quiet speech is helped a little; hiss is never turned into "speech"
         private const val SILENT_CHUNKS_LIMIT = 75  // 6 s of pure zeros
-        private const val WATCH_EVERY_MS = 30_000L  // a message from Sir or Mansi reaches a closed app within half a minute
+        private const val WATCH_EVERY_MS = 15_000L  // a message reaches a closed app within seconds even if a push is lost
 
         /** (Re)start the service; it reads the saved settings and switches the microphone part on or off to match. */
         fun start(context: Context, withMicrophone: Boolean = true) {

@@ -98,7 +98,7 @@ const ConversationContext = createContext<ConversationValue | null>(null);
 const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 // AI-written "done" lines are used only where "saved" really means done. A staff task still waiting for
 // the staff app, or a team split, gets an exact status line instead.
-const AI_DONE_OK: DraftAction[] = ['private_task', 'pa_task', 'pa_meeting', 'md_request', 'pa_self_task', 'remember',
+const AI_DONE_OK: DraftAction[] = ['private_task', 'pa_task', 'pa_meeting', 'md_request', 'pa_self_task', 'mg_task', 'remember',
   'accept_request', 'decline_request', 'complete'];
 const BASE_HINTS = ['JARVIS', 'Jarvis', 'Hey JARVIS'];
 // Quiet rounds (each about 6 s of the recogniser hearing nothing). While JARVIS is waiting on him (a question, a
@@ -846,6 +846,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           spoken = `Given to ${who}, ${address}. I'll remind you both and tell you when it's done.`;
           spokenHi = `${who} को दे दिया, ${addressHi}। आप दोनों को याद दिलाऊँगा और पूरा होने पर बताऊँगा।`;
         }
+      } else if (d.action === 'mg_task') {
+        // The manager's task, from the MD or the PA: she is told at once.
+        const res = await api<any>('/mg-tasks/', { method: 'POST', body: { ...body, description: d.transcript }, idempotencyKey: key });
+        const who = res.data?.assignee?.staff_name ?? d.mg_name ?? 'the manager';
+        spoken = `Given to ${who}, ${address}. I'll tell you when it's done.`;
+        spokenHi = `${who} को दे दिया, ${addressHi}। पूरा होने पर बताऊँगा।`;
       } else if (d.action === 'md_request') {
         await api('/requests/', { method: 'POST', body, idempotencyKey: key });
         spoken = `Sent to ${md}, ${address}. I'll tell you when ${mdHe(dash)} answers.`;

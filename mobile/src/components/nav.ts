@@ -22,10 +22,12 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
           { key: 'private', label: 'Private reminders', icon: 'lock-closed-outline', count: privateCount, detail: 'Only you can see these' },
           { key: 'requests', label: 'Need your OK', icon: 'hand-left-outline', count: pending, tone: colors.gold },
           { key: 'pa', label: 'Given to your PA', icon: 'person-outline', count: open(data?.pa_tasks) },
+          { key: 'mg', label: `Given to ${data?.manager_name || 'the manager'}`, icon: 'people-outline', count: open(data?.mg_tasks) },
         ]
       : [
           { key: 'requests', label: `Waiting for ${md}`, icon: 'hand-left-outline', count: pending, tone: colors.gold },
           { key: 'md_tasks', label: `${md}’s tasks from you`, icon: 'person-outline', count: open(data?.md_tasks) },
+          { key: 'given', label: `Given to ${user.role === 'MG' ? data?.pa_name || 'the PA' : data?.manager_name || 'the manager'}`, icon: 'people-outline', count: open(data?.given_tasks) },
           { key: 'busy', label: `When ${md} is busy`, icon: 'time-outline' },
         ]),
     { key: 'staff', label: 'Given to staff', icon: 'briefcase-outline', count: open(data?.delegated) },
@@ -40,5 +42,5 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
 /** Which server data view a list key maps to (for the tablet workspace). */
 export const VIEW_FOR_KEY: Record<string, string> = {
   today: 'today', late: 'late', upcoming: 'upcoming', nodate: 'nodate', private: 'private', requests: 'requests',
-  pa: 'pa', md_tasks: 'pa', busy: 'busy', staff: 'staff', cancelled: 'cancelled',
+  pa: 'pa', mg: 'pa', given: 'pa', md_tasks: 'pa', busy: 'busy', staff: 'staff', cancelled: 'cancelled',
 };

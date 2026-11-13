@@ -108,7 +108,7 @@ def piled_up(now=None) -> int:
     now = now or timezone.now()
     raised = 0
     rank = {Priority.URGENT: 0, Priority.HIGH: 1, Priority.NORMAL: 2, Priority.LOW: 3}
-    for person in (get_md(), get_pa()):
+    for person in (get_md(), get_pa(), services.get_manager()):
         if not person:
             continue
 
@@ -120,8 +120,8 @@ def piled_up(now=None) -> int:
                                                   created_at__gte=start, created_at__lte=end)
                 return [(str((r.payload or {}).get("priority") or Priority.NORMAL), None, r.created_at,
                          str((r.payload or {}).get("title") or "Request")) for r in rows]
-            rows = SharedTask.objects.filter(assignee_type=SharedTask.Assignee.PA, status__in=OPEN,
-                                             created_at__gte=start, created_at__lte=end).exclude(origin=SharedTask.Origin.PA_SELF)
+            rows = SharedTask.objects.filter(assignee_type=services.bucket_of(person), status__in=OPEN,
+                                             created_at__gte=start, created_at__lte=end).exclude(origin__in=services.OWN_ORIGINS)
             return [(t.priority, t.due_at, t.created_at, t.title) for t in rows]
 
         for c in scheduling.commitments(person, tu.to_local(now).date()):

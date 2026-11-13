@@ -16,10 +16,26 @@ export function AlertBanner() {
   const later = `Later · ${prefs.snoozeMinutes}m`;
   const insets = useSafeAreaInsets();
   const [slide] = useState(() => new Animated.Value(-260));
+  const [glow] = useState(() => new Animated.Value(0));
+  const flashing = Boolean(item?.personal);
 
   useEffect(() => {
     Animated.spring(slide, { toValue: item ? 0 : -260, useNativeDriver: true, friction: 9 }).start();
   }, [item, slide]);
+
+  // A message or a task from one of the three keeps flashing until it is answered or tapped "Got it".
+  useEffect(() => {
+    if (!flashing) {
+      glow.setValue(0);
+      return undefined;
+    }
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(glow, { toValue: 1, duration: 550, useNativeDriver: true }),
+      Animated.timing(glow, { toValue: 0, duration: 550, useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [flashing, glow]);
 
   if (!item) return null;
   const isRequest = item.alertKind === 'NEW_REQUEST' && Boolean(item.requestId);
@@ -29,6 +45,9 @@ export function AlertBanner() {
   return (
     <Animated.View style={[s.wrap, { top: insets.top + 8, transform: [{ translateY: slide }] }]} pointerEvents="box-none">
       <View style={[s.card, { borderLeftColor: color }]}>
+        {flashing ? (
+          <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, s.flash, { borderColor: color, opacity: glow }]} />
+        ) : null}
         <View style={s.head}>
           <View style={[s.iconWrap, { backgroundColor: color }]}>
             <Icon
@@ -39,7 +58,7 @@ export function AlertBanner() {
           </View>
           <View style={{ flex: 1 }}>
             <Txt variant="label" style={{ color }}>
-              {isRequest ? 'Incoming task' : item.source === 'server' ? 'Update' : `${priorityLabel[item.priority]} reminder`}
+              {isRequest ? 'Incoming task' : item.alertKind === 'TASK_ASSIGNED' ? 'New task' : item.personal ? 'Message' : item.source === 'server' ? 'Update' : `${priorityLabel[item.priority]} reminder`}
               {item.mode === 'silent' ? ' · silent' : ''}
               {item.followups ? ` · repeat ${item.followups}` : ''}
             </Txt>
@@ -88,6 +107,7 @@ const s = StyleSheet.create({
     elevation: 12,
   },
   head: { flexDirection: 'row', alignItems: 'flex-start' },
+  flash: { borderRadius: radius.lg, borderWidth: 3 },
   iconWrap: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   reveal: { flexDirection: 'row', alignItems: 'center', marginTop: 10, marginLeft: 46 },
   actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },

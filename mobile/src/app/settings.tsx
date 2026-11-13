@@ -95,7 +95,7 @@ function SettingsScreen() {
   const p = engine.presence;
 
   /** Save a name on the server; the phones pick it up from there. Returns the line to show under the field. */
-  const saveName = (key: 'myName' | 'paName') => async (value: string): Promise<string> => {
+  const saveName = (key: 'myName' | 'paName' | 'managerName') => async (value: string): Promise<string> => {
     try {
       await api('/me/prefs/', { method: 'PATCH', body: { [key]: value } });
       await reloadDash();
@@ -255,6 +255,7 @@ function SettingsScreen() {
                 <Chip label="A man" selected={prefs.paGender === 'male'} onPress={() => update({ paGender: 'male' })} />
                 <Chip label="A woman" selected={prefs.paGender === 'female'} onPress={() => update({ paGender: 'female' })} />
               </View>
+              <NameField title="Your manager's name" detail="How JARVIS names your manager, on all phones (signs in as “manager”)." value={dash?.manager_name ?? ''} onSave={saveName('managerName')} />
             </Card>
           </>
         ) : null}

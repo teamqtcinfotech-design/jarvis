@@ -355,11 +355,13 @@ def _complete_one(user: User, t: dict) -> bool:
         services.update_private_task(user, t["id"], {"status": Status.COMPLETED}, version)
         return False
     task = SharedTask.objects.get(id=t["id"])
-    if task.assignee_type == SharedTask.Assignee.PA:
-        if user.is_pa:
+    if task.assignee_type in (SharedTask.Assignee.PA, SharedTask.Assignee.MG):
+        if user.is_assistant and task.assignee_type == services.bucket_of(user):
             services.update_pa_task_status(user, t["id"], Status.COMPLETED, version)
-        else:
+        elif user.is_md:
             services.update_shared_md_task(user, t["id"], {"status": Status.COMPLETED}, version)
+        else:
+            services.update_given_task(user, t["id"], {"status": Status.COMPLETED}, version)
         return False
     if user.is_md:
         services.update_shared_md_task(user, t["id"], {"status": Status.COMPLETED}, version)
@@ -382,13 +384,17 @@ def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
     if user.is_md:
         services.update_shared_md_task(user, t["id"], clean, version)
         return False
-    own = SharedTask.objects.filter(id=t["id"], origin=SharedTask.Origin.PA_SELF, created_by=user).exists()
-    if own:  # her own task: she changes it herself
+    own = SharedTask.objects.filter(id=t["id"], origin__in=services.OWN_ORIGINS, created_by=user).exists()
+    if own:  # their own task: they change it themselves
         services.update_pa_self_task(user, t["id"], clean, version)
         return False
-    if SharedTask.objects.filter(id=t["id"], assignee_type=SharedTask.Assignee.PA).exists():
-        he = services.md_pronouns()[0]
-        raise ServiceError("forbidden", f"only {services.md_address()} can change a task {he} gave you. You can update its status.", 403)
+    if SharedTask.objects.filter(id=t["id"], origin__in=services.GIVEN_ORIGINS, created_by=user).exists():
+        services.update_given_task(user, t["id"], clean, version)  # one they gave the other
+        return False
+    mine = SharedTask.objects.filter(id=t["id"], assignee_type=services.bucket_of(user)).select_related("created_by").first()
+    if mine is not None:
+        giver = services.giver_words(mine.created_by)[0]
+        raise ServiceError("forbidden", f"only {giver} can change a task given to you. You can update its status.", 403)
     services.propose_change(user, t["id"], clean, version, reason)
     return True
 
@@ -441,6 +447,12 @@ def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
             else:
                 spoken = f"Given to {pa}, {address}. I'll remind you both and tell you when it's done."
                 hi = f"{pa} को दे दिया, {address_hi}। आप दोनों को याद दिलाऊँगा और पूरा होने पर बताऊँगा।"
+        elif a == "mg_task":
+            data["description"] = p.get("transcript", "")
+            services.create_mg_task(user, data)
+            mg = p.get("mg_name") or "the manager"
+            spoken = f"Given to {mg}, {address}. I'll tell you when it's done."
+            hi = f"{mg} को दे दिया, {address_hi}। पूरा होने पर बताऊँगा।"
         elif a == "md_request":
             services.create_md_request(user, data)
             spoken = f"Sent to {sir}, {address}. I'll tell you when {he} answers."

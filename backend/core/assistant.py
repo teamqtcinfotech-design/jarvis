@@ -18,7 +18,7 @@ from .models import Kind, Priority, PrivateTask, SharedTask, TaskCategory, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
-TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation", "pa_self_task"}
+TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation", "pa_self_task", "mg_task"}
 EDIT_ACTIONS = {"change_task", "delete_task"}
 _CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind", "duration_minutes"}
 # Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the PA's
@@ -202,6 +202,18 @@ _WITH = re.compile(r"\b(ke saath|ke sath|ke sang|with)\b", re.IGNORECASE)
 _TEAM_SUFFIX = re.compile(r"\b(team|department|dept|waalon|walon|waale|wale|log)\s*$", re.IGNORECASE)
 
 
+def _is_manager_name(name: str) -> bool:
+    norm = " ".join((name or "").lower().split())
+    if not norm:
+        return False
+    if norm in {"manager", "the manager", "manager sahab", "manager ji"}:
+        return True
+    mg = services.get_manager()
+    if not mg:
+        return False
+    return norm in {n.lower() for n in (mg.display_name, mg.first_name, mg.get_full_name()) if n}
+
+
 def _mentions_pa(text: str) -> bool:
     low = f" {text.lower()} "
     if any(f" {w} " in low for w in ("pa", "p.a.", "meri pa", "my pa", "assistant")):
@@ -245,14 +257,22 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
     # And a meeting with someone else is never "with the PA", whatever the model said.
     if user.is_md and intent == "meet_with_pa" and not pa_here:
         intent = "create_task"
-    # "Mansi ko bolo…" / "PA ko bolo…" from the MD = a direct PA task (inside JARVIS), not TaskPanel.
-    if user.is_md and intent == "assign_to_staff" and _is_pa_name(staff_name):
-        intent = "assign_to_pa"
+    # "Himanshu ko bolo…" / "PA ko bolo…" = a direct PA task (inside JARVIS), not TaskPanel; "Mansi ko bolo…" /
+    # "manager ko bolo…" = a task for the manager. A staff member with the same name never takes their place.
+    if intent in {"assign_to_staff", "assign_to_pa", "create_task", "needs_destination", "assign_to_manager"}             and not (intent == "create_task" and cmd.get("kind") in {Kind.MEETING, Kind.CALL}):
+        if _is_manager_name(staff_name) and not user.is_mg:
+            intent = "assign_to_manager"
+        elif _is_pa_name(staff_name) and not user.is_pa and intent != "create_task":
+            intent = "assign_to_pa"
+    if intent == "assign_to_manager" and user.is_mg:
+        intent = "create_task"   # the manager giving herself work: her own
+    if intent == "assign_to_pa" and user.is_pa:
+        intent = "create_task"   # the PA giving himself work: his own
     # Offline parser cannot judge ownership: unless it is plainly the MD's own, ask.
     if cmd.get("engine") == "rules" and intent == "create_task" and cmd.get("kind") == Kind.TASK \
             and not _PERSONAL.search(text):
         intent = "needs_destination"
-    if user.is_pa:
+    if user.is_assistant:
         # Whose is it? For Sir, her own, or the team: it is never assumed. The model judges the meaning
         # ("Sir ki cab book karni hai" is HER job); the words must back it up, otherwise JARVIS asks.
         sir_at, own_at = _last_cue(_FOR_SIR, text), _last_cue(_PA_OWN, text)
@@ -279,7 +299,8 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
             # Not said to be for the MD or for someone in the team: it is her own, and JARVIS does not ask. The
             # read-back says so ("your own meeting"), and "nahi, Ma'am ke liye" turns it into a request.
             intent = "pa_own"
-        if intent in {"accept_request", "decline_request", "assign_to_pa"}:
+        if intent in {"accept_request", "decline_request"} or (intent == "assign_to_pa" and not user.is_mg) \
+                or (intent == "assign_to_manager" and not user.is_pa):
             intent = "unknown"
     elif intent == "request_for_md":
         intent = "create_task"
@@ -404,7 +425,7 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str, addres
 
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 _TASK_INTENTS = {"create_task", "assign_to_staff", "assign_to_team", "assign_to_pa", "meet_with_pa",
-                 "request_for_md", "needs_destination"}
+                 "request_for_md", "needs_destination", "assign_to_manager"}
 
 
 # ------------------------------------------------------------------ does it fit the diary?
@@ -568,7 +589,8 @@ def _send_alert(user: User, cmd: dict, draft: dict, exact_at, address: str, addr
         when = None  # a moment already here: now
     priority = cmd.get("priority") if cmd.get("priority") in _PRIORITIES else Priority.NORMAL
     try:
-        to_name = services.send_message(user, text, when=when, priority=priority)
+        to_name = services.send_message(user, text, when=when, priority=priority,
+                                        to=str(cmd.get("staff_name") or (cmd.get("people") or [""])[0] or ""))
     except services.ServiceError as exc:
         _say(draft, f"Sorry {address}, {exc.message}", f"माफ़ कीजिए {address_hi}, अलर्ट नहीं भेज पाया।")
         return
@@ -1123,10 +1145,12 @@ def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
     what = {"private_task": f"personal {kind_en}", "md_request": f"request for {services.md_address()}",
             "delegation": f"{kind_en} for {staff}" if staff else "task for staff", "team_delegation": f"task for {(d.get('team') or {}).get('label') or 'the team'}",
             "pa_task": f"{kind_en} for {pa_name}", "pa_meeting": f"meeting with {pa_name}", "pa_self_task": f"your own {kind_en}",
+            "mg_task": f"{kind_en} for {d.get('mg_name') or 'the manager'}",
             "choose_destination": kind_en}.get(d.get("action"), kind_en)
     what_hi = {"private_task": f"पर्सनल {kind_hi}", "md_request": f"{sir_hi} के लिए रिक्वेस्ट",
                "delegation": f"{staff} के लिए {kind_hi}" if staff else "स्टाफ़ के लिए टास्क", "team_delegation": "टीम के लिए टास्क",
                "pa_task": f"{pa_name} के लिए {kind_hi}", "pa_meeting": f"{pa_name} के साथ मीटिंग", "pa_self_task": f"आपका अपना {kind_hi}",
+               "mg_task": f"{d.get('mg_name') or 'मैनेजर'} के लिए {kind_hi}",
                "choose_destination": kind_hi}.get(d.get("action"), kind_hi)
     due_en = d.get("due_label") or ""
     due_hi = (f"{tu.minutes_phrase_hi(d['due_in_minutes'])} में" if d.get("due_in_minutes") else _due_label_hi(d.get("due_date", ""), d.get("due_time", "")))
@@ -1261,6 +1285,12 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     elif intent == "assign_to_team":
         draft["action"] = "team_delegation"
         _prepare_team(draft, cmd, address, address_hi)
+    elif intent == "assign_to_manager":
+        draft["action"] = "mg_task"
+        mg = services.get_manager()
+        draft["mg_name"] = draft["pa_name"] = mg.spoken_name if mg else ""
+        if not mg:
+            _ask(draft, f"{address}, there is no manager account yet.", f"{address_hi}, अभी कोई मैनेजर अकाउंट नहीं है।")
     elif intent in {"assign_to_pa", "meet_with_pa"}:
         draft["action"] = "pa_meeting" if intent == "meet_with_pa" else "pa_task"
         if intent == "meet_with_pa":
@@ -1622,6 +1652,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 "delegation": f"Assign to {draft['staff']['name']}" if draft["staff"] else "Assign to staff",
                 "pa_task": f"Task for {pa_name}",
                 "pa_self_task": "Your own task",
+                "mg_task": f"Task for {draft.get('mg_name') or 'the manager'}",
             }[draft["action"]]
             what_hi = {
                 "private_task": "पर्सनल टास्क",
@@ -1629,6 +1660,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 "delegation": f"{draft['staff']['name']} को असाइन" if draft["staff"] else "स्टाफ़ को असाइन",
                 "pa_task": f"{pa_name} के लिए टास्क",
                 "pa_self_task": "आपका अपना टास्क",
+                "mg_task": f"{draft.get('mg_name') or 'मैनेजर'} के लिए टास्क",
             }[draft["action"]]
             bits = [b for b in (draft["due_label"], f"{priority.lower()} priority" if priority != "NORMAL" else "") if b]
             bits_hi = [b for b in (due_hi, f"{_PRIORITY_HI[priority]} प्रायोरिटी" if priority != "NORMAL" else "") if b]

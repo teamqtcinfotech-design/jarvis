@@ -342,7 +342,10 @@ def _done_view(user, include_private: bool) -> dict:
             status=Status.COMPLETED, completed_at__gte=since, origin=SharedTask.Origin.PA_REQUEST).select_related("staff")
     pa = services.get_pa()
     for t in shared.distinct():
-        who = t.staff.name if t.staff else (pa.spoken_name if pa and t.assignee_type == SharedTask.Assignee.PA else services.md_address() if user.is_pa else "You")
+        mg = services.get_manager()
+        who = (t.staff.name if t.staff else pa.spoken_name if pa and t.assignee_type == SharedTask.Assignee.PA
+               else mg.spoken_name if mg and t.assignee_type == SharedTask.Assignee.MG
+               else "You" if user.is_md else services.md_address())
         items.append((t.completed_at, t.title, who, "shared", str(t.id), t.version))
     items.sort(key=lambda x: x[0], reverse=True)
     today = tu.today_local()

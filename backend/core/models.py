@@ -18,6 +18,7 @@ class User(AbstractUser):
     class Role(models.TextChoices):
         MD = "MD", "Managing Director"
         PA = "PA", "Personal Assistant"
+        MG = "MG", "Manager"
 
     role = models.CharField(max_length=2, choices=Role.choices, default=Role.PA)
     display_name = models.CharField(max_length=80, blank=True)
@@ -35,6 +36,15 @@ class User(AbstractUser):
     @property
     def is_pa(self) -> bool:
         return self.role == self.Role.PA
+
+    @property
+    def is_mg(self) -> bool:
+        return self.role == self.Role.MG
+
+    @property
+    def is_assistant(self) -> bool:
+        """The PA or the manager: the people who work with the MD (never see the MD's private items)."""
+        return self.role in (self.Role.PA, self.Role.MG)
 
     @property
     def spoken_name(self) -> str:
@@ -167,6 +177,7 @@ class SharedTask(TaskFields):
     class Assignee(models.TextChoices):
         MD = "MD", "MD"
         PA = "PA", "PA"
+        MG = "MG", "Manager"
         STAFF = "STAFF", "Staff"
 
     class Origin(models.TextChoices):
@@ -174,6 +185,10 @@ class SharedTask(TaskFields):
         MD_TO_PA = "MD_TO_PA", "Assigned by MD to PA"
         MD_MEET_PA = "MD_MEET_PA", "Meeting between MD and PA"
         PA_SELF = "PA_SELF", "PA's own task"
+        MG_SELF = "MG_SELF", "Manager's own task"
+        MD_TO_MG = "MD_TO_MG", "Assigned by MD to the manager"
+        MG_TO_PA = "MG_TO_PA", "Assigned by the manager to the PA"
+        PA_TO_MG = "PA_TO_MG", "Assigned by the PA to the manager"
         MD_DELEGATION = "MD_DELEGATION", "Delegated by MD"
         PA_DELEGATION = "PA_DELEGATION", "Delegated by PA"
         TASKPANEL_WEB = "TASKPANEL_WEB", "Assigned in TaskPanel"

@@ -2130,7 +2130,7 @@ class TodayAndNarrowingTests(BaseCase):
         self.assertIn("Cleared", out.getvalue())
         for model in (PrivateTask, SharedTask, TaskRequest, Alert, Memory, ConversationState):
             self.assertEqual(model.objects.count(), 0, model.__name__)
-        self.assertEqual(User.objects.count(), 2)
+        self.assertEqual(User.objects.count(), 3)  # the MD, the PA and the manager (made by migration 0017)
         self.assertEqual(TaskPanelLink.objects.filter(active=True).count(), 2)
         self.assertTrue(StaffMember.objects.filter(active=True).exists())
         self.assertTrue(self.md_client.get("/api/v1/me/prefs/").json()["meetingMode"])  # settings kept
@@ -3171,4 +3171,106 @@ class AlertsAndRescheduleTests(BaseCase):
         self.assertEqual(d["action"], "private_task")
         self.assertFalse(d["needs_clarification"])
         self.assertFalse((d.get("schedule") or {}).get("clashes"))
+
+
+class ManagerTests(BaseCase):
+    """The manager (Mansi) beside the MD and the PA: her own list, work between her and the PA in both directions,
+    requests and alerts, and never a sight of the MD's personal items."""
+
+    def setUp(self):
+        super().setUp()
+        self.mg = User.objects.get(username="manager")
+        self.mg.display_name = self.mg.first_name = "Mansi"
+        self.mg.save()
+        self.mg_client = APIClient()
+        self.mg_client.force_authenticate(self.mg)
+
+    def interpret(self, client, text, cmd):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/interpret/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def turn(self, client, text, cmd):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = client.post("/api/v1/assistant/turn/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_the_manager_account_signs_in(self):
+        r = APIClient().post("/api/v1/auth/login/", {"username": "manager", "password": "manager"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(self.mg_client.get("/api/v1/me/").json()["role"], "MG")
+
+    def test_never_the_mds_personal_items(self):
+        self.assertEqual(self.mg_client.get("/api/v1/private-tasks/").status_code, 403)
+        dash = json.dumps(self.mg_client.get("/api/v1/today/").json())
+        self.assertNotIn(SECRET, dash)
+        for kind in ("today", "tasks", "pending", "done", "week"):
+            r = self.mg_client.get(f"/api/v1/views/{kind}/")
+            if r.status_code == 200:
+                self.assertNotIn(SECRET, json.dumps(r.json()), kind)
+        d = self.interpret(self.mg_client, "Sir ke kya kaam hain", _cmd(intent="query", view_kind="tasks", view_who="sir"))
+        self.assertNotIn(SECRET, json.dumps(d))
+
+    def test_md_gives_the_manager_a_task_and_she_is_told(self):
+        d = self.turn(self.md_client, "Mansi ko bolo vendor list bana de",
+                      _cmd(intent="assign_to_staff", staff_name="Mansi", title="Make the vendor list", engine="ai"))
+        self.assertEqual(d["action"], "mg_task")
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        task = SharedTask.objects.get(title="Make the vendor list")
+        self.assertEqual((task.assignee_type, task.origin), ("MG", "MD_TO_MG"))
+        self.assertTrue(Alert.objects.filter(recipient=self.mg, ref_type="shared_task", ref_id=str(task.id)).exists())
+        dash = self.mg_client.get("/api/v1/today/").json()
+        self.assertIn("Make the vendor list", json.dumps(dash))
+
+    def test_manager_gives_the_pa_work_and_hears_when_it_is_done(self):
+        d = self.turn(self.mg_client, "Priya ko bolo courier bhej de",
+                      _cmd(intent="assign_to_pa", staff_name="Priya", title="Send the courier", engine="ai"))
+        self.assertEqual(d["action"], "pa_task")
+        self.turn(self.mg_client, "haan", _cmd(intent="confirm_pending"))
+        task = SharedTask.objects.get(title="Send the courier")
+        self.assertEqual((task.assignee_type, task.origin, task.created_by_id), ("PA", "MG_TO_PA", self.mg.id))
+        given = self.mg_client.get("/api/v1/today/").json()["given_tasks"]
+        self.assertEqual([g["title"] for g in given], ["Send the courier"])
+        r = self.pa_client.post(f"/api/v1/pa-tasks/{task.id}/status/", {"status": "COMPLETED", "expected_version": task.version}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(Alert.objects.filter(recipient=self.mg, kind="STAFF_UPDATE").exists())
+
+    def test_pa_gives_the_manager_work(self):
+        self.turn(self.pa_client, "Mansi ko bolo report check kar le",
+                  _cmd(intent="assign_to_manager", staff_name="Mansi", title="Check the report", engine="ai"))
+        r = self.turn(self.pa_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        task = SharedTask.objects.get(title="Check the report")
+        self.assertEqual((task.assignee_type, task.origin), ("MG", "PA_TO_MG"))
+
+    def test_her_own_task_and_request_to_the_md(self):
+        own = self.turn(self.mg_client, "mujhe kal bank jaana hai", _cmd(intent="create_task", title="Go to the bank", engine="ai"))
+        self.assertEqual(own["action"], "pa_self_task")
+        self.turn(self.mg_client, "haan", _cmd(intent="confirm_pending"))
+        mine = SharedTask.objects.get(title="Go to the bank")
+        self.assertEqual((mine.assignee_type, mine.origin), ("MG", "MG_SELF"))
+        req = self.turn(self.mg_client, "Sir ke liye kal 11 baje bank meeting",
+                        _cmd(intent="request_for_md", title="Bank meeting", kind="MEETING",
+                             due_date=(tu.today_local() + timedelta(days=1)).isoformat(), due_time="11:00", engine="ai"))
+        self.assertEqual(req["action"], "md_request")
+
+    def test_alerts_go_to_whoever_is_named(self):
+        self.interpret(self.md_client, "Mansi ko alert bhejo ki meeting 5 baje hai",
+                       _cmd(intent="send_alert", staff_name="Mansi", notes="Meeting 5 baje hai.", engine="ai"))
+        self.assertTrue(Alert.objects.filter(recipient=self.mg, ref_type="message").exists())
+        self.interpret(self.mg_client, "Priya ko alert bhejo ki file ready hai",
+                       _cmd(intent="send_alert", staff_name="Priya", notes="File ready hai.", engine="ai"))
+        self.assertTrue(Alert.objects.filter(recipient=self.pa, ref_type="message", body="File ready hai.").exists())
+        self.interpret(self.mg_client, "Sir ko bata do client aa gaye",
+                       _cmd(intent="send_alert", notes="Client aa gaye.", engine="ai"))
+        self.assertTrue(Alert.objects.filter(recipient=self.md, ref_type="message", body="Client aa gaye.").exists())
+
+    def test_a_staff_member_with_her_name_never_takes_her_work(self):
+        StaffMember.objects.create(external_id="staff_mansi", name="Mansi", department="Accounts", active=True)
+        d = self.interpret(self.md_client, "Mansi ko bolo GST file kare",
+                           _cmd(intent="assign_to_staff", staff_name="Mansi", title="File GST", engine="ai"))
+        self.assertEqual(d["action"], "mg_task")
 

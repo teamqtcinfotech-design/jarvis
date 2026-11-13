@@ -38,13 +38,15 @@ Notifications.setNotificationHandler({
 const CHANNELS = { URGENT: 'jarvis-urgent', HIGH: 'jarvis-normal', NORMAL: 'jarvis-normal', LOW: 'jarvis-low' } as const;
 const RANK: Record<Priority, number> = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
 // With live push (reminders and alerts arrive by themselves on this build) the poll is only a safety net.
-const POLL_MS = wakeSupported ? 60_000 : 20_000;
+const POLL_MS = 15_000; // a message from Sir, Mansi or Himanshu shows within seconds even if a push is lost
 const TICK_MS = 4_000;
 const STALE_MS = 2 * 60_000;
 const FOLLOWUP_MINUTES = [5, 15];
 
 export interface EngineItem {
   key: string;
+  /** A message or a task from one of the three to another: never held back, flashing until "Got it". */
+  personal?: boolean;
   source: 'reminder' | 'server';
   priority: Priority;
   title: string;
@@ -215,6 +217,7 @@ function fromAlert(a: ServerAlert): EngineItem {
     alertId: a.id,
     alertKind: a.kind,
     requestId: a.ref_type === 'request' ? a.ref_id : undefined,
+    personal: a.ref_type === 'message' || a.kind === 'TASK_ASSIGNED' || a.kind === 'NEW_REQUEST',
     fireAt: Date.parse(a.snoozed_until && Date.parse(a.snoozed_until) > Date.parse(a.created_at) ? a.snoozed_until : a.created_at),
     followups: 0,
     question: a.question,
@@ -601,6 +604,13 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
           return null;
         }
         return 'loud';
+      }
+      // A message or a task from one of the three: never kept back. Phone left on the desk: still said and shown;
+      // in a meeting, quiet hours or face down: shown and buzzed, flashing until he taps it.
+      if (item.personal) {
+        if (state === 'away') return 'loud';
+        deliver(item, 'silent');
+        return null;
       }
       if (state === 'away') {
         hold(item, 'away');

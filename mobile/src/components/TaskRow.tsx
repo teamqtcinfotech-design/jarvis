@@ -38,7 +38,7 @@ export function TaskRow({ item, onPress, showStaffStatus, flat, last }: {
   const when = item.scheduled_start
     ? `${timeOf(item.scheduled_start)}${item.scheduled_end ? ` – ${timeOf(item.scheduled_end)}` : ''}`
     : item.due_label;
-  const staff = item.assignee?.type === 'STAFF' || item.assignee?.type === 'PA' ? item.assignee.staff_name : null;
+  const staff = item.assignee?.type === 'STAFF' || item.assignee?.type === 'PA' || item.assignee?.type === 'MG' ? item.assignee.staff_name : null;
   const status = item.status_label ? plainStatus(item.status_label) : null;
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [s.row, flat && s.rowFlat, flat && !last && s.rowLine, pressed && { opacity: 0.8 }]}>

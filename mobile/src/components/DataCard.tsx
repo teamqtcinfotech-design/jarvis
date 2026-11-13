@@ -405,7 +405,7 @@ export function DataCard({ view, extraText, onRemove, compact, fit }: DataCardPr
 
   const openRow = (id: string, scope: string) => {
     if (!data) return;
-    const pool = [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated];
+    const pool = [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated];
     const item = pool.find((t) => t.id === id && t.scope === scope) ?? pool.find((t) => t.id === id);
     if (item) setOpen(item);
   };

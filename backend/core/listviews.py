@@ -140,6 +140,10 @@ def resolve_subject(user, who: str) -> dict:
     pa_names = {services.norm_person(n) for n in (pa.display_name, pa.first_name, pa.username, pa.get_full_name()) if n} if pa else set()
     if raw in _PA or (key and key in pa_names):
         return {"type": "me", "label": "you"} if user.is_pa else {"type": "pa", "label": pa_name}
+    mg = services.get_manager()
+    mg_names = {services.norm_person(n) for n in (mg.display_name, mg.first_name, mg.get_full_name()) if n} if mg else set()
+    if raw in {"manager", "the manager"} or (key and key in mg_names):
+        return {"type": "me", "label": "you"} if user.is_mg else {"type": "mg", "label": mg.spoken_name if mg else "the manager"}
     if raw in _STAFF:
         return {"type": "staff_all", "label": "the staff"}
     if raw in _ALL:
@@ -202,12 +206,15 @@ def _collect(user, subject: dict, include_private: bool) -> list[dict]:
             items += _shared(services.shared_md_tasks_qs())
             items += _shared(services.pa_tasks_qs().filter(origin=SharedTask.Origin.MD_MEET_PA))
         else:
-            items += _shared(services.pa_tasks_qs())
+            items += _shared(services.assistant_tasks_qs(user))
     if kind == "pa":
         items += _shared(services.pa_tasks_qs())
+    if kind == "mg":
+        items += _shared(services.mg_tasks_qs())
     if kind == "all" and user.is_md:
         items += _shared(services.pa_tasks_qs().exclude(origin=SharedTask.Origin.MD_MEET_PA))
-    if kind == "md" or (kind == "all" and user.is_pa):
+        items += _shared(services.mg_tasks_qs())
+    if kind == "md" or (kind == "all" and user.is_assistant):
         items += _shared(services.shared_md_tasks_qs())  # official only: his personal items are never read here
     if kind == "staff_one":
         items += _shared(services.delegated_qs().filter(staff=subject["staff"]))
@@ -282,10 +289,12 @@ def _from_whom(item: dict, whom: str, user) -> bool:
     assignee = item.get("assignee", {}).get("type")
     if whom == "staff":
         return assignee == "STAFF"
-    if user.is_pa:
+    if user.is_assistant:
         if whom == "sir":
-            return origin in (SharedTask.Origin.MD_TO_PA, SharedTask.Origin.MD_MEET_PA) or assignee == "MD"
-        return origin == SharedTask.Origin.PA_SELF  # "me" / "pa": her own
+            return origin in (SharedTask.Origin.MD_TO_PA, SharedTask.Origin.MD_MEET_PA, SharedTask.Origin.MD_TO_MG) or assignee == "MD"
+        if whom == "pa" and user.is_mg:
+            return origin == SharedTask.Origin.PA_TO_MG  # what the PA gave the manager
+        return origin in services.OWN_ORIGINS  # "me": their own
     if whom == "pa":
         return origin in (SharedTask.Origin.PA_REQUEST, SharedTask.Origin.PA_SELF)
     # "me" / "sir" for Sir: his own, personal or official, not what the PA sent him
@@ -349,6 +358,8 @@ def _owner(item: dict, user) -> str:
         return who.get("staff_name") or "Staff"
     if who.get("type") == "PA":
         return "You" if user.is_pa else (who.get("staff_name") or "PA")
+    if who.get("type") == "MG":
+        return "You" if user.is_mg else (who.get("staff_name") or "Manager")
     return "You" if user.is_md else services.md_address()
 
 
@@ -533,7 +544,7 @@ def _phrases(p: dict, user, pa_name: str) -> dict:
     w = p["from_whom"]
     if w == "staff":
         from_en, from_hi = "with staff", "स्टाफ़ के"
-    elif w and user.is_pa:
+    elif w and user.is_assistant:
         from_en, from_hi = (f"from {services.md_address()}", f"{services.md_address_hi()} के दिए हुए") if w == "sir" else ("of your own", "आपके अपने")
     elif w:
         from_en, from_hi = (f"from {pa_name}", f"{pa_name} के भेजे हुए") if w == "pa" else ("of your own", "आपके अपने")

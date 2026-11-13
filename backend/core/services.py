@@ -86,6 +86,38 @@ def get_pa() -> User | None:
     return User.objects.filter(role=User.Role.PA, is_active=True).first()
 
 
+def get_manager() -> User | None:
+    return User.objects.filter(role=User.Role.MG, is_active=True).first()
+
+
+# The task bucket of each person who works with the MD, and the origin of the tasks they keep for themselves.
+_BUCKET = {"PA": SharedTask.Assignee.PA, "MG": SharedTask.Assignee.MG}
+_OWN_ORIGIN = {"PA": SharedTask.Origin.PA_SELF, "MG": SharedTask.Origin.MG_SELF}
+OWN_ORIGINS = (SharedTask.Origin.PA_SELF, SharedTask.Origin.MG_SELF)
+# Work one of the two gave the other (each sees what they gave, and its progress).
+GIVEN_ORIGINS = (SharedTask.Origin.MG_TO_PA, SharedTask.Origin.PA_TO_MG)
+
+
+def bucket_of(user: User) -> str:
+    return _BUCKET.get(user.role, SharedTask.Assignee.PA)
+
+
+def assistant_tasks_qs(user: User):
+    """The PA's or the manager's own list: what was given to them, and what they keep for themselves."""
+    return SharedTask.objects.filter(assignee_type=bucket_of(user)).select_related("created_by", "staff")
+
+
+def role_label(user: User) -> str:
+    return {"MD": "the Managing Director", "PA": "the MD's personal assistant", "MG": "the manager"}.get(user.role, "")
+
+
+def giver_words(user: User | None) -> tuple[str, str]:
+    """How the giver of a task is named in a spoken line: the MD by the form of address, the others by name."""
+    if user is None:
+        return md_address(), md_address_hi()
+    return (md_address(), md_address_hi()) if user.is_md else (user.spoken_name, user.spoken_name)
+
+
 # --------------------------------------------------------------------------- how people are addressed
 # The MD chooses how JARVIS addresses them, and the PA refers to the MD the same way: "Sir", "Ma'am", "Madam" or
 # the MD's own name. The PA is always addressed by first name. Nothing else in the code should spell "Sir".
@@ -270,14 +302,15 @@ def private_item(task: PrivateTask) -> dict:
 
 def shared_item(task: SharedTask) -> dict:
     item = _base_item(task, "shared")
-    pa = get_pa() if task.assignee_type == SharedTask.Assignee.PA else None
+    pa = get_pa() if task.assignee_type == SharedTask.Assignee.PA else         get_manager() if task.assignee_type == SharedTask.Assignee.MG else None
+    team = {SharedTask.Assignee.PA: "PA", SharedTask.Assignee.MG: "Manager"}.get(task.assignee_type)
     item.update(
         {
             "assignee": {
                 "type": task.assignee_type,
                 "staff_id": task.staff_id,
                 "staff_name": task.staff.name if task.staff else (pa.spoken_name if pa else None),
-                "department": task.staff.department if task.staff else ("PA" if pa else None),
+                "department": task.staff.department if task.staff else (team if pa else None),
             },
             "origin": task.origin,
             "created_by": task.created_by.spoken_name if task.created_by_id else None,
@@ -289,7 +322,7 @@ def shared_item(task: SharedTask) -> dict:
             "remote_status": task.remote_status,
             "status_label": (
                 tp_sync.status_label(task) if task.assignee_type == SharedTask.Assignee.STAFF
-                else PA_STATUS_LABEL.get(task.status, "") if task.assignee_type == SharedTask.Assignee.PA
+                else PA_STATUS_LABEL.get(task.status, "") if task.assignee_type in (SharedTask.Assignee.PA, SharedTask.Assignee.MG)
                 else ""
             ),
             "hold_reason": task.hold_reason,
@@ -507,6 +540,11 @@ def pa_tasks_qs():
     return SharedTask.objects.filter(assignee_type=SharedTask.Assignee.PA).select_related("created_by", "staff")
 
 
+def mg_tasks_qs():
+    """The manager's list: what the MD or the PA gave her, and her own."""
+    return SharedTask.objects.filter(assignee_type=SharedTask.Assignee.MG).select_related("created_by", "staff")
+
+
 PA_STATUS_LABEL = {
     Status.OPEN: "Not started", Status.IN_PROGRESS: "Working", Status.BLOCKED: "Hold",
     Status.COMPLETED: "Completed", Status.CANCELLED: "Cancelled",
@@ -572,7 +610,7 @@ def pending_split(user: User, dash: dict, include_private: bool = True) -> dict:
         if include_private:
             counts["personal"] = personal
     else:
-        own = sum(1 for i in items if i.get("origin") == SharedTask.Origin.PA_SELF)
+        own = sum(1 for i in items if i.get("origin") in OWN_ORIGINS)
         counts["from_sir"] = len(items) - own
         counts["own"] = own
     return {"items": items, "counts": counts}
@@ -590,11 +628,15 @@ def dashboard(user: User) -> dict:
                   .exclude(status=Status.CANCELLED)]
         pending = TaskRequest.objects.filter(state=TaskRequest.State.PENDING).select_related("requested_by", "target")
         requests_out = [request_item(r) for r in pending]
-        # What the MD gave the PA to do, with progress.
+        # What the MD gave the PA and the manager to do, with progress.
         extra["pa_tasks"] = _recent_first_open(pa_tasks_qs().exclude(origin=SharedTask.Origin.MD_MEET_PA))
+        extra["mg_tasks"] = _recent_first_open(mg_tasks_qs())
     else:
-        # The PA's own to-do list = tasks the MD assigned to her.
-        items = [shared_item(t) for t in pa_tasks_qs().exclude(status=Status.CANCELLED)]
+        # Her (or his) own to-do list: what was given to them, and their own.
+        items = [shared_item(t) for t in assistant_tasks_qs(user).exclude(status=Status.CANCELLED)]
+        # What this one gave the other (the manager to the PA, or the PA to the manager), with progress.
+        extra["given_tasks"] = _recent_first_open(SharedTask.objects.filter(created_by=user, origin__in=GIVEN_ORIGINS)
+                                                  .select_related("created_by", "staff"))
         # A meeting or call the PA arranged for the MD (her request, accepted) belongs in the PA's day as well:
         # she set it up and has to see it coming, not only in the "approved" list.
         items += [shared_item(t) for t in shared_md_tasks_qs().filter(kind__in=[Kind.MEETING, Kind.CALL])
@@ -609,12 +651,13 @@ def dashboard(user: User) -> dict:
         if i["status"] == Status.COMPLETED and i["completed_at"]
         and tu.to_local(datetime.fromisoformat(i["completed_at"])).date() == now.date()
     ]
-    pa_user, md_user = get_pa(), get_md()
+    pa_user, md_user, mg_user = get_pa(), get_md(), get_manager()
     out = {
         "user": {"username": user.username, "role": user.role, "name": user.spoken_name},
         # The two names as JARVIS says them, and how the MD is addressed, so no screen has to carry a typed-in word.
         "pa_name": pa_user.spoken_name if pa_user else "",
         "md_name": md_user.spoken_name if md_user else "",
+        "manager_name": mg_user.spoken_name if mg_user else "",
         "md_address": md_address(),
         "md_address_hi": md_address_hi(),
         "server_time": now.isoformat(),
@@ -626,7 +669,7 @@ def dashboard(user: User) -> dict:
         "taskpanel": taskpanel,
         **extra,
     }
-    if user.is_pa:
+    if user.is_assistant:
         out["md_busy_today"] = busy_windows(now.date())
     return out
 
@@ -697,7 +740,7 @@ def update_shared_md_task(md: User, task_id, changes: dict, expected_version: in
     # Lock only the task row: PostgreSQL rejects FOR UPDATE across the nullable staff join.
     # The MD may edit his own shared tasks and the tasks he gave the PA.
     task = SharedTask.objects.select_for_update().get(
-        id=task_id, assignee_type__in=[SharedTask.Assignee.MD, SharedTask.Assignee.PA]
+        id=task_id, assignee_type__in=[SharedTask.Assignee.MD, SharedTask.Assignee.PA, SharedTask.Assignee.MG]
     )
     _check_version(task, expected_version)
     _apply_changes(task, changes)
@@ -709,9 +752,11 @@ def update_shared_md_task(md: User, task_id, changes: dict, expected_version: in
 # --------------------------------------------------------------------------- MD -> PA tasks
 @transaction.atomic
 def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> SharedTask:
-    """The MD gives the PA a task, or schedules a meeting with her. Both see it and both get reminders."""
-    if not md.is_md:
-        raise ServiceError("forbidden", "Only the MD can assign tasks to the PA.", 403)
+    """The MD (or the manager) gives the PA a task, or the MD schedules a meeting with the PA. Both see it and both
+    get reminders. `md` is whoever gives it."""
+    if not (md.is_md or md.is_mg):
+        raise ServiceError("forbidden", "Only the MD or the manager can give the PA a task.", 403)
+    meeting_with_pa = meeting_with_pa and md.is_md
     pa = get_pa()
     if pa is None:
         raise ServiceError("no_pa", "There is no active PA account.", 422)
@@ -719,12 +764,13 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
         title=data["title"].strip(), notes=data.get("notes", ""),
         kind=Kind.MEETING if meeting_with_pa else data.get("kind", Kind.TASK),
         priority=data.get("priority", Priority.NORMAL), assignee_type=SharedTask.Assignee.PA,
-        origin=SharedTask.Origin.MD_MEET_PA if meeting_with_pa else SharedTask.Origin.MD_TO_PA,
+        origin=(SharedTask.Origin.MD_MEET_PA if meeting_with_pa
+                else SharedTask.Origin.MD_TO_PA if md.is_md else SharedTask.Origin.MG_TO_PA),
         created_by=md, description=(data.get("description") or "").strip()[:5000],
         sync_state=SharedTask.Sync.NOT_REQUIRED,
     )
     apply_schedule(task, {**data, "kind": task.kind, "_prefs": get_prefs(md)}, creating=True)
-    sir, sir_hi = md_address(), md_address_hi()
+    sir, sir_hi = giver_words(md)
     task.announcement = (data.get("announcement") or "")[:300]
     task.save()
     if task.kind == Kind.MEETING and data.get("duration_minutes"):
@@ -744,7 +790,7 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
     # A brief professional note in the MD's name (template above if the AI is unavailable), in both languages.
     from .compose import compose  # local import: compose depends on the AI client, services must not
     message, message_hi = compose(
-        "meeting_with_pa" if meeting_with_pa else "task_for_pa", f"{sir} (the Managing Director)", pa.spoken_name,
+        "meeting_with_pa" if meeting_with_pa else "task_for_pa", f"{sir} ({role_label(md)})", pa.spoken_name,
         {"title": task.title, "when": when, "priority": task.priority.lower(), "instruction": task.description,
          "notes": task.notes}, fallback=spoken, fallback_hi=spoken_hi, user=md,
     )
@@ -758,15 +804,67 @@ def create_pa_task(md: User, data: dict, *, meeting_with_pa: bool = False) -> Sh
 
 
 @transaction.atomic
+def create_mg_task(giver: User, data: dict) -> SharedTask:
+    """The MD or the PA gives the manager a task. She is told at once, in the giver's name; both see it."""
+    if not (giver.is_md or giver.is_pa):
+        raise ServiceError("forbidden", "Only the MD or the PA can give the manager a task.", 403)
+    mg = get_manager()
+    if mg is None:
+        raise ServiceError("no_manager", "There is no manager account.", 422)
+    task = SharedTask(
+        title=data["title"].strip(), notes=data.get("notes", ""), kind=data.get("kind", Kind.TASK),
+        priority=data.get("priority", Priority.NORMAL), assignee_type=SharedTask.Assignee.MG,
+        origin=SharedTask.Origin.MD_TO_MG if giver.is_md else SharedTask.Origin.PA_TO_MG,
+        created_by=giver, description=(data.get("description") or "").strip()[:5000],
+        sync_state=SharedTask.Sync.NOT_REQUIRED,
+    )
+    apply_schedule(task, {**data, "_prefs": get_prefs(giver)}, creating=True)
+    task.announcement = (data.get("announcement") or "")[:300]
+    task.save()
+    who, who_hi = giver_words(giver)
+    when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
+    when_hi = tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at)
+    pr_en = {"URGENT": "urgent ", "HIGH": "high-priority "}.get(task.priority, "")
+    pr_hi = {"URGENT": "अर्जेंट ", "HIGH": "ज़रूरी "}.get(task.priority, "")
+    spoken = f"{mg.spoken_name}, {who} has given you a new {pr_en}task: {task.title}" + (f", {when}" if when else "") + "."
+    spoken_hi = f"{mg.spoken_name}, {who_hi} ने आपको एक नया {pr_hi}टास्क दिया है: {task.title}" + (f", {when_hi}" if when_hi else "") + "।"
+    from .compose import compose
+    message, message_hi = compose("task_for_pa", f"{who} ({role_label(giver)})", mg.spoken_name,
+                                  {"title": task.title, "when": when, "priority": task.priority.lower(),
+                                   "instruction": task.description, "notes": task.notes},
+                                  fallback=spoken, fallback_hi=spoken_hi, user=giver)
+    Alert.objects.create(
+        recipient=mg, kind=Alert.Kind.TASK_ASSIGNED, priority=task.priority, title=f"New task from {who}",
+        body=message[:400], spoken_text=message[:400], spoken_text_hi=message_hi[:400],
+        ref_type="shared_task", ref_id=str(task.id),
+    )
+    audit(giver, "mg_task.create", "shared_task", task.id)
+    return task
+
+
+@transaction.atomic
+def update_given_task(user: User, task_id, changes: dict, expected_version: int) -> SharedTask:
+    """The manager or the PA changes, moves or cancels a task they gave the other one."""
+    if not user.is_assistant:
+        raise ServiceError("forbidden", "Not allowed.", 403)
+    task = SharedTask.objects.select_for_update().get(id=task_id, created_by=user, origin__in=GIVEN_ORIGINS)
+    _check_version(task, expected_version)
+    _apply_changes(task, changes)
+    task.save()
+    audit(user, "given_task.update", "shared_task", task.id, "fields: " + ",".join(sorted(changes)))
+    return task
+
+
+@transaction.atomic
 def create_pa_self_task(pa: User, data: dict) -> SharedTask:
     """Mansi's own task or reminder ("mere liye", "mujhe yaad dilana"). Sir can see it in her list; it is not
     sent to him for approval and he is not nagged about it."""
-    if not pa.is_pa:
-        raise ServiceError("forbidden", "Only the PA keeps their own tasks here.", 403)
+    if not pa.is_assistant:
+        raise ServiceError("forbidden", "Only the PA or the manager keeps their own tasks here.", 403)
     task = SharedTask(
         title=data["title"].strip(), notes=data.get("notes", ""), kind=data.get("kind", Kind.TASK),
-        priority=data.get("priority", Priority.NORMAL), assignee_type=SharedTask.Assignee.PA,
-        origin=SharedTask.Origin.PA_SELF, created_by=pa, description=(data.get("description") or "").strip()[:5000],
+        priority=data.get("priority", Priority.NORMAL), assignee_type=bucket_of(pa),
+        origin=_OWN_ORIGIN[pa.role], created_by=pa, description=(data.get("description") or "").strip()[:5000],
         sync_state=SharedTask.Sync.NOT_REQUIRED,
     )
     apply_schedule(task, {**data, "_prefs": get_prefs(pa)}, creating=True)
@@ -781,10 +879,10 @@ def create_pa_self_task(pa: User, data: dict) -> SharedTask:
 @transaction.atomic
 def update_pa_self_task(pa: User, task_id, changes: dict, expected_version: int) -> SharedTask:
     """Mansi changes, moves or cancels a task that is her own (never one Sir gave her)."""
-    if not pa.is_pa:
+    if not pa.is_assistant:
         raise ServiceError("forbidden", "Not allowed.", 403)
-    task = SharedTask.objects.select_for_update().get(id=task_id, assignee_type=SharedTask.Assignee.PA,
-                                                      origin=SharedTask.Origin.PA_SELF, created_by=pa)
+    task = SharedTask.objects.select_for_update().get(id=task_id, assignee_type=bucket_of(pa),
+                                                      origin=_OWN_ORIGIN[pa.role], created_by=pa)
     _check_version(task, expected_version)
     _apply_changes(task, changes)
     task.save()
@@ -798,14 +896,14 @@ PA_SETTABLE_STATUSES = {Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED, Status.
 @transaction.atomic
 def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: int, note: str = "") -> SharedTask:
     """The PA moves her task: Not started / Working / Hold (with reason) / Done. MD is told."""
-    if not pa.is_pa:
-        raise ServiceError("forbidden", "Only the PA updates the status of their tasks.", 403)
+    if not pa.is_assistant:
+        raise ServiceError("forbidden", "Only the PA or the manager updates the status of their tasks.", 403)
     if new_status not in PA_SETTABLE_STATUSES:
         raise ServiceError("invalid_status", "Choose Not started, Working, Hold or Done.", 422)
-    task = SharedTask.objects.select_for_update().get(id=task_id, assignee_type=SharedTask.Assignee.PA)
+    task = SharedTask.objects.select_for_update().select_related("created_by").get(id=task_id, assignee_type=bucket_of(pa))
     if task.status == Status.CANCELLED:
-        own = task.origin == SharedTask.Origin.PA_SELF
-        raise ServiceError("cancelled", "This task was cancelled." if own else f"{md_address()} has cancelled this task.", 409)
+        own = task.origin in OWN_ORIGINS
+        raise ServiceError("cancelled", "This task was cancelled." if own else f"{giver_words(task.created_by)[0]} has cancelled this task.", 409)
     _check_version(task, expected_version)
     if new_status == Status.BLOCKED and not note.strip():
         raise ServiceError("reason_required", "Please give a reason for putting this on hold.", 422)
@@ -815,9 +913,10 @@ def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: 
     task.completed_at = timezone.now() if new_status == Status.COMPLETED else None
     task.version += 1
     task.save()
-    md = get_md()
-    if md and new_status != old and task.origin != SharedTask.Origin.PA_SELF:
-        name, sir, sir_hi = pa.spoken_name, md_address(), md_address_hi()
+    # The one who gave it is told (the MD, or the manager / the PA for work they gave each other).
+    md = task.created_by if task.created_by_id and task.created_by_id != pa.id else get_md()
+    if md and new_status != old and task.origin not in OWN_ORIGINS:
+        name, sir, sir_hi = pa.spoken_name, address_of(md), address_hi_of(md)
         spoken_hi = ""
         if new_status == Status.COMPLETED:
             title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"{sir}, {name} has completed: {task.title}."
@@ -879,7 +978,7 @@ def _notify_md_new_request(req: TaskRequest):
         kind = "change_request"
     # A courteous note in the PA's name (template above if the AI is unavailable), in both languages.
     from .compose import compose
-    message, message_hi = compose(kind, f"{pa_name} (the MD's personal assistant)", sir, {
+    message, message_hi = compose(kind, f"{pa_name} ({role_label(req.requested_by)})", sir, {
         "title": item["title"], "when": item["due_label"], "priority": item["priority"].lower(),
         "reason": req.reason, "target": item.get("target_title") or "",
     }, fallback=spoken, fallback_hi=spoken_hi, user=req.requested_by)
@@ -891,8 +990,8 @@ def _notify_md_new_request(req: TaskRequest):
 
 @transaction.atomic
 def create_md_request(pa: User, data: dict) -> TaskRequest:
-    if not pa.is_pa:
-        raise ServiceError("forbidden", "Only the PA sends requests to the MD.", 403)
+    if not pa.is_assistant:
+        raise ServiceError("forbidden", "Only the PA or the manager sends requests to the MD.", 403)
     payload = _payload_for_storage({k: v for k, v in data.items() if k != "reason"})
     req = TaskRequest.objects.create(
         kind=TaskRequest.Kind.CREATE, payload=payload, payload_hash=canonical_hash(payload),
@@ -905,8 +1004,8 @@ def create_md_request(pa: User, data: dict) -> TaskRequest:
 
 @transaction.atomic
 def propose_change(pa: User, task_id, changes: dict, expected_version: int, reason: str = "") -> TaskRequest:
-    if not pa.is_pa:
-        raise ServiceError("forbidden", "Only the PA proposes changes.", 403)
+    if not pa.is_assistant:
+        raise ServiceError("forbidden", "Only the PA or the manager proposes changes.", 403)
     task = shared_md_tasks_qs().get(id=task_id)
     _check_version(task, expected_version)
     payload = _payload_for_storage(changes)
@@ -1276,15 +1375,22 @@ def ai_context(user: User, include_private: bool = True) -> dict:
         ctx["note"] = ("The phone is locked, so the MD's private items are not in this list. If asked about them, "
                        "say they will be available once the phone is unlocked.")
     ctx["delegated"] = [brief(i) for i in dash["delegated"][:10]]
-    pa = get_pa()
+    pa, mg = get_pa(), get_manager()
+    # The names of the three, for every speaker (who is who decides where work goes).
+    ctx["pa_name"] = pa.spoken_name if pa else ""
+    ctx["manager_name"] = mg.spoken_name if mg else ""
     if user.is_md:
-        ctx["pa_name"] = pa.spoken_name if pa else ""
         ctx["tasks_given_to_pa"] = [
             brief(i) | {"status_label": i["status_label"]}
             | ({"her_own_task": True} if i.get("origin") == SharedTask.Origin.PA_SELF else {})
             for i in dash.get("pa_tasks", [])[:10]]
+        ctx["tasks_given_to_manager"] = [
+            brief(i) | {"status_label": i["status_label"]}
+            | ({"her_own_task": True} if i.get("origin") == SharedTask.Origin.MG_SELF else {})
+            for i in dash.get("mg_tasks", [])[:10]]
     else:
         ctx["md_tasks_from_my_requests"] = [brief(i) for i in dash.get("md_tasks", [])[:10]]
+        ctx["tasks_i_gave"] = [brief(i) | {"status_label": i["status_label"]} for i in dash.get("given_tasks", [])[:10]]
     if user.is_md:
         ctx["pending_requests"] = [
             {"id": r["id"], "title": r["title"], "from": r["requested_by"], "priority": r["priority"],
@@ -1410,6 +1516,7 @@ PREF_SCHEMA = {
     # Names, set by voice from either phone. Not stored as settings: they go to the person (see set_prefs).
     "myName": {"type": "text", "default": "", "say": "your name", "hint": "the name JARVIS calls you by", "virtual": True},
     "paName": {"type": "text", "default": "", "say": "the PA's name", "hint": "the PA's name (MD only)", "virtual": True, "md_only": True},
+    "managerName": {"type": "text", "default": "", "say": "the manager's name", "hint": "the manager's name (MD only)", "virtual": True, "md_only": True},
     # Talking over JARVIS while it speaks stops it and it listens (like a person). Off if the room echoes.
     "bargeIn": {"type": "bool", "default": True, "say": "interrupt JARVIS by talking over it"},
     # The notification sound for reminders that arrive while the app is closed.
@@ -1763,21 +1870,34 @@ def set_pref_quiet(user: User, key: str, value) -> None:
     row.save(update_fields=["data"])
 
 
-def send_message(sender: User, text: str, *, when=None, priority: str = Priority.NORMAL) -> str:
+def message_recipient(sender: User, to: str = "") -> User | None:
+    """Who an alert is for: the person named ("Himanshu", "Mansi", "Sir", "PA", "manager"), else the usual one
+    (the MD's alert goes to the PA; the PA's and the manager's go to the MD)."""
+    key = norm_person(to or "")
+    people = [u for u in (get_md(), get_pa(), get_manager()) if u is not None]
+    if key:
+        for u in people:
+            names = {norm_person(n) for n in (u.display_name, u.first_name, u.username) if n}
+            if u.is_md:
+                names |= {"sir", "md", "boss", "maam", "ma am", "madam", norm_person(md_address())}
+            if u.is_pa:
+                names |= {"pa", "assistant", "personal assistant"}
+            if u.is_mg:
+                names |= {"manager", "mg"}
+            if key in names or any(k and k in names for k in key.split()):
+                return u
+    return get_pa() if sender.is_md else get_md()
+
+
+def send_message(sender: User, text: str, *, when=None, priority: str = Priority.NORMAL, to: str = "") -> str:
     """An alert from one of the two to the other: the MD to the PA, or the PA to the MD. Delivered now, or held until
     `when` (it stays out of sight until then and is announced at that moment). Returns the recipient's name as said."""
-    if sender.is_md:
-        recipient = get_pa()
-        if recipient is None:
-            raise ServiceError("no_pa", "there is no PA account yet.", 422)
-        to_name, to_addr, to_addr_hi = recipient.spoken_name, recipient.spoken_name, recipient.spoken_name
-        from_en, from_hi = md_address(), md_address_hi()
-    else:
-        recipient = get_md()
-        if recipient is None:
-            raise ServiceError("no_md", "there is no MD account.", 422)
-        to_name, to_addr, to_addr_hi = md_address(), md_address(), md_address_hi()
-        from_en = from_hi = sender.spoken_name
+    recipient = message_recipient(sender, to)
+    if recipient is None or recipient.id == sender.id:
+        raise ServiceError("no_recipient", "who should get the alert?", 422)
+    to_name, to_addr, to_addr_hi = (md_address(), md_address(), md_address_hi()) if recipient.is_md else \
+        (recipient.spoken_name, recipient.spoken_name, recipient.spoken_name)
+    from_en, from_hi = giver_words(sender)
     text = " ".join(str(text or "").split())[:500]
     if not text:
         raise ServiceError("invalid", "what should the alert say?", 422)
@@ -1812,13 +1932,19 @@ def set_names(user: User, names: dict) -> list[str]:
             if pa is None:
                 raise ServiceError("invalid", "There is no PA account yet.", 422)
             target = pa
+        elif key == "managerName":
+            if not user.is_md:
+                raise ServiceError("forbidden", f"Only {md_address()} can set the manager's name.", 403)
+            target = get_manager()
+            if target is None:
+                raise ServiceError("invalid", "There is no manager account yet.", 422)
         else:
             continue
         if target.spoken_name == name:
             continue
         old = target.spoken_name
         target.display_name = name
-        if target.is_pa:
+        if target.is_assistant:
             target.first_name = name
         target.save(update_fields=["display_name", "first_name"])
         audit(user, "name.set", "user", target.id, f"{old} -> {name}")
@@ -1957,6 +2083,11 @@ def resolve_person(user: User, name: str) -> dict:
         pa_names = {norm_person(n) for n in (pa.display_name, pa.first_name, pa.username, pa.get_full_name()) if n}
         if key in pa_names or key in {"pa", "assistant", "personal assistant"}:
             return {**known, "who": "PA"}
+    mg = get_manager()
+    if mg:
+        mg_names = {norm_person(n) for n in (mg.display_name, mg.first_name, mg.get_full_name()) if n}
+        if key in mg_names or key in {"manager"}:
+            return {**known, "who": "manager"}
     matches, partial = resolve_staff(key)
     if len(matches) == 1:
         return {**known, "who": f"{matches[0].name} ({matches[0].department})"}
@@ -1971,7 +2102,8 @@ def resolve_person(user: User, name: str) -> dict:
     # Already in his own diary ("Meeting with Sharma ji" exists): he clearly knows who that is.
     dash = dashboard(user)
     titles = [i["title"].lower() for bucket in ("overdue", "today", "upcoming", "anytime") for i in dash[bucket]]
-    titles += [i["title"].lower() for i in dash.get("pa_tasks", []) + dash.get("md_tasks", []) + dash["delegated"]]
+    titles += [i["title"].lower() for i in dash.get("pa_tasks", []) + dash.get("mg_tasks", []) + dash.get("md_tasks", [])
+               + dash.get("given_tasks", []) + dash["delegated"]]
     main = max(key.split(), key=len)
     if len(main) >= 3 and any(re.search(rf"\b{re.escape(main)}\b", t) for t in titles):
         return {**known, "who": "seen in your tasks"}

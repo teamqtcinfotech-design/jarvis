@@ -77,7 +77,7 @@ export function TabletHome({ user }: { user: SessionUser }) {
   const recent = conv.messages.slice(-6);
   // A task he asked to open by voice ("pehla wala kholo").
   const voiceItem = conv.itemToOpen && data
-    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
+    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
         .find((t) => t.id === conv.itemToOpen) ?? null
     : null;
   const suggestions = isMD

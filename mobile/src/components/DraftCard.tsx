@@ -28,6 +28,7 @@ const SAVE_LABEL: Partial<Record<DraftAction, string>> = {
   pa_meeting: 'Save meeting',
   md_request: 'Send to Sir',
   pa_self_task: 'Save',
+  mg_task: 'Give',
   accept_request: 'Accept',
   decline_request: 'Decline',
   complete: 'Mark done',

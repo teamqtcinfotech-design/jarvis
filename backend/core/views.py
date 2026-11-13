@@ -213,11 +213,16 @@ class SharedTaskDetailView(APIView):
         if request.user.is_md:
             task = services.update_shared_md_task(request.user, task_id, s.changes(), version)
             return Response(services.shared_item(task))
-        if SharedTask.objects.filter(id=task_id, origin=SharedTask.Origin.PA_SELF, created_by=request.user).exists():
-            task = services.update_pa_self_task(request.user, task_id, s.changes(), version)  # her own task
+        if SharedTask.objects.filter(id=task_id, origin__in=services.OWN_ORIGINS, created_by=request.user).exists():
+            task = services.update_pa_self_task(request.user, task_id, s.changes(), version)  # their own task
             return Response(services.shared_item(task))
-        if SharedTask.objects.filter(id=task_id, assignee_type=SharedTask.Assignee.PA).exists():
-            return error("forbidden", f"Only {services.md_address()} can change this task. You can update its status.", 403)
+        if SharedTask.objects.filter(id=task_id, origin__in=services.GIVEN_ORIGINS, created_by=request.user).exists():
+            task = services.update_given_task(request.user, task_id, s.changes(), version)  # one they gave the other
+            return Response(services.shared_item(task))
+        mine = SharedTask.objects.filter(id=task_id, assignee_type=services.bucket_of(request.user)).select_related("created_by").first()
+        if mine is not None:
+            giver = services.giver_words(mine.created_by)[0]
+            return error("forbidden", f"Only {giver} can change this task. You can update its status.", 403)
         req = services.propose_change(request.user, task_id, s.changes(), version, s.validated_data.get("reason", ""))
         return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
 
@@ -230,12 +235,16 @@ class SharedTaskCompleteView(APIView):
         s.is_valid(raise_exception=True)
         version = s.validated_data["expected_version"]
         task = SharedTask.objects.get(id=task_id)
-        if task.assignee_type == SharedTask.Assignee.PA:
-            # A task the MD gave the PA: the PA completes it herself; the MD may also close it.
-            if request.user.is_pa:
+        if task.assignee_type in (SharedTask.Assignee.PA, SharedTask.Assignee.MG):
+            # A task on the PA's or the manager's list: they complete it themselves; the one who gave it may close it.
+            if request.user.is_assistant and task.assignee_type == services.bucket_of(request.user):
                 done = services.update_pa_task_status(request.user, task_id, Status.COMPLETED, version)
-            else:
+            elif request.user.is_md:
                 done = services.update_shared_md_task(request.user, task_id, {"status": Status.COMPLETED}, version)
+            elif task.created_by_id == request.user.id:
+                done = services.update_given_task(request.user, task_id, {"status": Status.COMPLETED}, version)
+            else:
+                return error("forbidden", "This task is not yours to close.", 403)
             return Response(services.shared_item(done))
         if request.user.is_md:
             task = services.update_shared_md_task(request.user, task_id, {"status": Status.COMPLETED}, version)
@@ -254,12 +263,31 @@ class PaTaskListView(APIView):
 
     @idempotent("pa_tasks.create")
     def post(self, request):
-        if not request.user.is_md:
-            return error("forbidden", f"Only {services.md_address()} can assign tasks to the PA.", 403)
+        if not (request.user.is_md or request.user.is_mg):
+            return error("forbidden", f"Only {services.md_address()} or the manager can give the PA a task.", 403)
         s = PaTaskInputSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         task = services.create_pa_task(request.user, s.validated_data,
                                        meeting_with_pa=s.validated_data["meeting_with_pa"])
+        return Response(services.shared_item(task), status=201)
+
+
+class MgTaskListView(APIView):
+    """The manager's list; the MD or the PA gives her a task."""
+
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        qs = services.mg_tasks_qs().exclude(status=Status.CANCELLED).order_by("-created_at")[:100]
+        return Response({"results": [services.shared_item(t) for t in qs]})
+
+    @idempotent("mg_tasks.create")
+    def post(self, request):
+        if not (request.user.is_md or request.user.is_pa):
+            return error("forbidden", "Only the MD or the PA can give the manager a task.", 403)
+        s = PaTaskInputSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        task = services.create_mg_task(request.user, s.validated_data)
         return Response(services.shared_item(task), status=201)
 
 
@@ -412,7 +440,7 @@ class RequestListView(APIView):
 
     def get(self, request):
         qs = TaskRequest.objects.select_related("requested_by", "target")
-        if request.user.is_pa:
+        if not request.user.is_md:
             qs = qs.filter(requested_by=request.user)
         state = request.query_params.get("state")
         if state:
@@ -421,8 +449,8 @@ class RequestListView(APIView):
 
     @idempotent("requests.create")
     def post(self, request):
-        if not request.user.is_pa:
-            return error("forbidden", "MD creates tasks directly; requests come from the PA.", 403)
+        if not request.user.is_assistant:
+            return error("forbidden", "MD creates tasks directly; requests come from the PA or the manager.", 403)
         s = RequestInputSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         req = services.create_md_request(request.user, s.validated_data)
@@ -596,7 +624,7 @@ class AskView(APIView):
         result = ai_brain.answer(
             s.validated_data["question"], s.validated_data["history"], user=user,
             address=services.address_of(user),
-            reader="the Managing Director" if user.is_md else f"{user.spoken_name}, the MD's personal assistant,",
+            reader="the Managing Director" if user.is_md else f"{user.spoken_name}, {services.role_label(user)},",
             lang=s.validated_data["lang"],
         )
         return Response(result)

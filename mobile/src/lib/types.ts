@@ -1,4 +1,4 @@
-export type Role = 'MD' | 'PA';
+export type Role = 'MD' | 'PA' | 'MG';
 export type Priority = 'URGENT' | 'HIGH' | 'NORMAL' | 'LOW';
 export type Kind = 'TASK' | 'MEETING' | 'CALL' | 'PAYMENT' | 'FOLLOW_UP';
 export type Status = 'OPEN' | 'IN_PROGRESS' | 'BLOCKED' | 'COMPLETED' | 'CANCELLED';
@@ -33,7 +33,7 @@ export interface TaskItem {
   due_label: string;
   overdue: boolean;
   version: number;
-  assignee: { type: 'MD' | 'PA' | 'STAFF'; staff_id?: number | null; staff_name?: string | null; department?: string | null };
+  assignee: { type: 'MD' | 'PA' | 'MG' | 'STAFF'; staff_id?: number | null; staff_name?: string | null; department?: string | null };
   origin?: string;
   created_by?: string | null;
   description?: string;
@@ -87,6 +87,9 @@ export interface Dashboard {
   taskpanel: { mode: string; configured: boolean; label: string; linked: boolean };
   md_busy_today?: BusyWindow[];
   pa_tasks?: TaskItem[]; // MD view: tasks he gave the PA, with progress
+  mg_tasks?: TaskItem[]; // MD view: tasks he gave the manager, with progress
+  given_tasks?: TaskItem[]; // PA / manager view: what they gave the other one, with progress
+  manager_name?: string;
   md_tasks?: TaskItem[]; // PA view: MD tasks that came from her requests
 }
 
@@ -170,6 +173,7 @@ export type DraftAction =
   | 'pa_task'
   | 'pa_meeting'
   | 'pa_self_task'
+  | 'mg_task'
   | 'screen'
   | 'choose_destination'
   | 'accept_request'
@@ -298,6 +302,8 @@ export interface Draft {
   categories: CategoryOption[];
   warnings: string[];
   pa_name: string;
+  /** mg_task: the manager's name as JARVIS says it. */
+  mg_name?: string;
   team: { label: string; members: StaffOption[]; skipped: StaffOption[] } | null;
   target: { id: string; title: string; scope?: string; version?: number } | null;
   /** Every item this applies to: "mark both as done", "accept all three". */

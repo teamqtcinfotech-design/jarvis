@@ -41,8 +41,11 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
 
   const isMD = user?.role === 'MD';
   const isStaff = item.assignee?.type === 'STAFF';
-  const isPaTask = item.assignee?.type === 'PA';
-  const ownPaTask = isPaTask && item.origin === 'PA_SELF'; // the PA's own task: the MD can see it but is not told about each step
+  // A task on the PA's or the manager's list. The one whose list it is moves it (status); the MD (or whoever gave
+  // it) can change or cancel it.
+  const isPaTask = item.assignee?.type === 'PA' || item.assignee?.type === 'MG';
+  const isMine = !isMD && item.assignee?.type === (user?.role === 'MG' ? 'MG' : 'PA');
+  const ownPaTask = isPaTask && (item.origin === 'PA_SELF' || item.origin === 'MG_SELF'); // their own: no one is told each step
   const toldSir = ownPaTask ? '' : ` I've told ${md},`;
   const paStatus = (status: string, note = '') =>
     api(`/pa-tasks/${item.id}/status/`, { method: 'POST', body: { status, expected_version: item.version, note } });
@@ -161,7 +164,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                 () => (ownPaTask && !isMD ? paStatus('OPEN') : api(base, { method: 'PATCH', body: { expected_version: item.version, status: 'OPEN' } })),
                 `${item.status === 'CANCELLED' ? 'Restored' : 'Reopened'}, ${address}.`, `${item.status === 'CANCELLED' ? 'वापस ले आया' : 'फिर से खोल दिया'}, ${addressHi}।`)}
             />
-          ) : isPaTask && !isMD ? (
+          ) : isMine ? (
             <>
               {askHold ? (
                 <>

@@ -15,8 +15,9 @@ from . import scheduling
 from . import timeutils as tu
 from .models import Kind, Priority, PrivateTask, ReminderAck, ReminderSnooze, ReminderTold, SharedTask, Status, User
 from .services import (
-    address_hi_of, address_of, busy_windows, day_reminder_time, default_remind_before, delegated_qs, get_pa, get_prefs,
-    md_address, md_address_hi, md_private_qs, meeting_override_until, pa_tasks_qs, shared_md_tasks_qs,
+    OWN_ORIGINS, address_hi_of, address_of, assistant_tasks_qs, busy_windows, day_reminder_time, default_remind_before,
+    delegated_qs, get_pa, get_prefs, giver_words, md_address, md_address_hi, md_private_qs, meeting_override_until,
+    pa_tasks_qs, shared_md_tasks_qs,
 )
 
 LOOKBACK = timedelta(hours=12)
@@ -177,9 +178,13 @@ def reminders_for(user: User, hours: int = 48) -> dict:
                         item["spoken_hi"] = f"{sir_hi}, {pa_name} का टास्क अभी ड्यू है: {task.title}। {pa_name} से पूछ लीजिए।"
                 items.append(item)
     else:
-        name, sir, sir_hi = user.spoken_name, md_address(), md_address_hi()
-        for task in pa_tasks_qs().filter(**open_filter):  # her own tasks, and the ones from Sir
-            meeting, from_sir = task.origin == SharedTask.Origin.MD_MEET_PA, task.origin != SharedTask.Origin.PA_SELF
+        name = user.spoken_name
+        # Their own list (the PA's or the manager's): their own tasks, and the ones given to them (by the MD, or by
+        # the other one); a task given to them is called by its giver ("Sir's task", "Mansi's task").
+        for task in assistant_tasks_qs(user).filter(**open_filter):
+            meeting = task.origin == SharedTask.Origin.MD_MEET_PA
+            from_sir = task.origin not in OWN_ORIGINS
+            sir, sir_hi = giver_words(task.created_by) if not meeting else (md_address(), md_address_hi())
             for item in _task_reminders(task, "shared", False, name, prefs, address_hi=name):
                 label = item["label"]
                 lead, lead_hi = _lead_phrase(lead_for(task, prefs)), _lead_phrase_hi(lead_for(task, prefs))

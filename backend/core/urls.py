@@ -27,6 +27,7 @@ urlpatterns = [
     # MD -> PA tasks (inside JARVIS)
     path("pa-tasks/", views.PaTaskListView.as_view()),
     path("pa-tasks/self/", views.PaSelfTaskView.as_view()),
+    path("mg-tasks/", views.MgTaskListView.as_view()),
     path("pa-tasks/<uuid:task_id>/status/", views.PaTaskStatusView.as_view()),
     # People JARVIS knows (owner-only)
     path("contacts/", views.ContactListView.as_view()),

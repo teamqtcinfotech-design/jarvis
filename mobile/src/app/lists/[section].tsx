@@ -35,6 +35,8 @@ const SECTIONS: Record<string, Section> = {
   private: { title: 'Private reminders', empty: 'No private reminders.', items: (d) => all(d).filter((t) => t.scope === 'private') },
   pa: { title: 'Given to your PA', empty: 'Say “PA ko bolo…” to give your PA a task.', staff: true, items: (d) => d.pa_tasks ?? [] },
   md_tasks: { title: 'Tasks from your requests', empty: 'None yet.', items: (d) => d.md_tasks ?? [] },
+  mg: { title: 'Given to the manager', empty: 'Say “Mansi ko bolo…” to give the manager a task.', staff: true, items: (d) => d.mg_tasks ?? [] },
+  given: { title: 'Given by you', empty: 'Nothing given yet.', staff: true, items: (d) => d.given_tasks ?? [] },
   staff: { title: 'Given to staff', empty: 'Say “Ramesh ko bolo…” to give work to someone in the team.', staff: true, items: (d) => d.delegated },
 };
 
