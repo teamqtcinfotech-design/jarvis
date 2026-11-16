@@ -81,6 +81,11 @@ export function runningUpdateDate(): Date | null {
   return Updates.isEnabled && !Updates.isEmbeddedLaunch ? Updates.createdAt : null;
 }
 
+/** Short code of the update running now (what `manage.py app_update devices` shows), or '' for the APK's own code. */
+export function runningUpdateCode(): string {
+  return Updates.isEnabled && !Updates.isEmbeddedLaunch && Updates.updateId ? Updates.updateId.slice(0, 8) : '';
+}
+
 async function ensureDeviceId(): Promise<string> {
   let id = await SecureStore.getItemAsync(K_DEVICE).catch(() => null);
   if (!id) {

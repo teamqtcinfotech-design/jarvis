@@ -9,7 +9,8 @@ import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui'
 import { useAlertEngine } from '@/lib/alertEngine';
 import { api, currentServer, deviceTokens } from '@/lib/api';
 import {
-  checkForUpdate, installApk, onUpdates, restartIntoUpdate, runningUpdateDate, updatesSnapshot, type UpdatesSnapshot,
+  checkForUpdate, installApk, onUpdates, restartIntoUpdate, runningUpdateCode, runningUpdateDate, updatesSnapshot,
+  type UpdatesSnapshot,
 } from '@/lib/appUpdates';
 import { timeLabel } from '@/lib/format';
 import { addressHiOf, addressOf, mdWord } from '@/lib/names';
@@ -201,7 +202,7 @@ function UpdatesCard() {
     <Card style={{ marginTop: 16 }}>
       <Row
         title={`JARVIS ${Constants.expoConfig?.version ?? ''}`}
-        detail={since ? `Updated ${shortDate(since)}` : 'As installed'}
+        detail={since ? `Updated ${shortDate(since)} · ${runningUpdateCode()}` : 'As installed'}
         right={u.tester ? <Tag label="Test phone" color={colors.gold} bg={colors.goldSoft} /> : null}
       />
       <Txt variant="small">{status[u.state]}</Txt>
