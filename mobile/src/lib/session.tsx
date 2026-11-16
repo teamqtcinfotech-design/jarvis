@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import { AppState } from 'react-native';
 
 import * as apiClient from './api';
+import { DEFAULT_SERVER } from './config';
 import { setReplyLang } from './lang';
 import type { SessionUser } from './types';
 import { pushForget, pushToken, wakeStop } from './wake';
@@ -26,6 +27,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       // No fingerprint or face lock anywhere: the app opens straight to JARVIS.
       const stored = await apiClient.loadStoredSession();
+      if (stored.user && apiClient.normalizeServer(stored.server) !== apiClient.normalizeServer(DEFAULT_SERVER)) {
+        // A login made on another server (a test build was installed before this one, or the other way round):
+        // this build talks only to its own server, so the old login is dropped and he signs in once more.
+        await wakeStop().catch(() => undefined);
+        await apiClient.logout();
+        setServer(DEFAULT_SERVER);
+        setUser(null);
+        setReady(true);
+        return;
+      }
       setServer(stored.server);
       setUser(stored.user);
       setReplyLang(stored.user?.language);

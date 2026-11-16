@@ -115,7 +115,9 @@ def payload_for(alert: Alert) -> dict[str, str]:
 
     from . import services
 
-    spoken = alert.spoken_text_hi if lang.current(alert.recipient) == "hi" and alert.spoken_text_hi else alert.spoken_text
+    hindi = lang.current(alert.recipient) == "hi"  # the person's own choice in Settings, or how they speak (Hindi if new)
+    spoken = alert.spoken_text_hi if hindi and alert.spoken_text_hi else alert.spoken_text
+    title = services.alert_title_hi(alert) if hindi else alert.title
     question = services.alert_question(alert)
     # A long message (minutes of speaking) does not fit in one push: the push carries as much as fits (Hindi letters
     # take three bytes each) and the phone reads the whole message from the alert list when it is opened.
@@ -124,8 +126,8 @@ def payload_for(alert: Alert) -> dict[str, str]:
         "id": str(alert.id),
         "kind": alert.kind,
         "priority": alert.priority,
-        "title": alert.title[:200],
-        "body": _fit(alert.body or "", 1100),
+        "title": title[:200],
+        "body": _fit((alert.spoken_text_hi if hindi and alert.spoken_text_hi else alert.body) or "", 1100),
         "spoken": _fit(spoken or "", 1300),
         "long": "1" if len(alert.body or "") > 1000 else "",
         "ref_type": alert.ref_type,

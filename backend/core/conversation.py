@@ -16,7 +16,7 @@ from . import actions, ai_brain, assistant, services
 from . import lang as lang_mod
 from . import timeutils as tu
 from .assistant import TASK_ACTIONS
-from .models import Alert, ConversationState, IntegrationCommand, PrivateTask, ReminderAck, SharedTask, StaffMember, Status, User
+from .models import Alert, ConversationState, IntegrationCommand, PrivateTask, ReminderAck, SharedTask, Status, User
 from .reminders import reminders_for
 from .services import ServiceError
 
@@ -430,7 +430,7 @@ def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
             actions.remember_done(user, r["undo"], p.get("title") or "")
             spoken, hi = r["en"], r["hi"]
         elif a == "delegation":
-            staff = StaffMember.objects.get(id=(p.get("staff") or {})["id"])
+            staff = services.staff_qs().get(id=(p.get("staff") or {})["id"])
             task, command = services.delegate_to_staff(user, data, staff, category_key=p.get("category_key") or "",
                                                        description=p.get("transcript", ""))
             if command.state == IntegrationCommand.State.REJECTED:

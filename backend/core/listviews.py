@@ -16,7 +16,7 @@ from datetime import date, datetime, time, timedelta
 
 from . import datacards, services
 from . import timeutils as tu
-from .models import SharedTask, StaffMember, Status, TaskPanelLink, User
+from .models import SharedTask, Status, TaskPanelLink, User
 
 _ME = {"", "me", "my", "mine", "myself", "i", "self", "own", "mera", "mere", "meri", "main", "apna", "apne", "apni", "khud"}
 _PA = {"pa", "p.a.", "assistant", "my pa", "meri pa", "personal assistant", "secretary"}
@@ -107,7 +107,7 @@ def has_request(p: dict) -> bool:
 
 
 def _departments() -> dict[str, str]:
-    names = StaffMember.objects.filter(active=True).exclude(department="").values_list("department", flat=True).distinct()
+    names = services.staff_qs().exclude(department="").values_list("department", flat=True).distinct()
     return {n.lower(): n for n in names}
 
 
@@ -182,7 +182,7 @@ def _closest_staff(key: str):
     if len(key) < 4:
         return None
     scored = []
-    for s in StaffMember.objects.filter(active=True):
+    for s in services.staff_qs():
         full = services.norm_person(s.name)
         if not full:
             continue
@@ -431,7 +431,7 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
     about the people ("list of my staff", "who is in Accounts", "who is on leave")."""
     # Everyone in the staff app except Sir's own entry (he is not his own staff). Mansi is staff too, so she is listed.
     links = dict(TaskPanelLink.objects.filter(active=True).values_list("actor_key", "user__role"))
-    everyone = [s for s in StaffMember.objects.filter(active=True).order_by("department", "name")
+    everyone = [s for s in services.staff_qs().order_by("department", "name")
                 if links.get(s.external_id) != User.Role.MD]
     wanted = _match_department(p["group"]) if p["group"] else ""
     group_missed = bool(p["group"] and not wanted)

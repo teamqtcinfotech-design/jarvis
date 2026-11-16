@@ -92,7 +92,9 @@ def current(user) -> Lang:
         return pinned
     recent = [clean(x) for x in str(prefs.get("langRecent") or "").split(",") if clean(x)]
     if not recent:
-        return "en"
+        # Nothing known yet (a new person): the team's usual language (Hindi unless the server says otherwise).
+        from django.conf import settings
+        return clean(getattr(settings, "JARVIS_DEFAULT_LANGUAGE", "hi")) or "hi"
     return "hi" if recent.count("hi") * 2 >= len(recent) else "en"
 
 

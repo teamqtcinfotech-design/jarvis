@@ -163,6 +163,12 @@ FIELD_ENCRYPTION_KEY = _fek
 # AI brain (Claude). Key stays on the server only.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 JARVIS_AI_ENABLED = env_bool("JARVIS_AI_ENABLED", bool(ANTHROPIC_API_KEY))
+# The TaskPanel staff directory (Ramesh, Neha …) is shown and used only when this is on. Off until the real TaskPanel
+# is connected: the directory then holds only test people, and the team is everyone with a JARVIS account.
+JARVIS_TASKPANEL_STAFF = env_bool("JARVIS_TASKPANEL_STAFF", False)
+# The language JARVIS speaks and writes to a person it knows nothing about yet ("hi" / "en"). Anyone can change their
+# own in Settings; after that their own choice (or the language they speak) decides.
+JARVIS_DEFAULT_LANGUAGE = os.environ.get("JARVIS_DEFAULT_LANGUAGE", "hi")
 JARVIS_AI_COMMAND_MODEL = os.environ.get("JARVIS_AI_COMMAND_MODEL", "claude-haiku-5-5")
 JARVIS_AI_BRIEFING_MODEL = os.environ.get("JARVIS_AI_BRIEFING_MODEL", "claude-sonnet-5-5")
 JARVIS_AI_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_TIMEOUT_SECONDS", "20"))

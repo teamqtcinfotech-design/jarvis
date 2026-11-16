@@ -588,15 +588,62 @@ def alert_question(alert: Alert) -> dict | None:
     return None
 
 
+_TITLE_HI = (
+    # (words in the English title, the Hindi title; {who} = whoever it is from or about)
+    ("has seen it", "{who} ने देख लिया"),
+    ("completed a task", "{who} ने काम पूरा किया"),
+    ("put a task on hold", "{who} ने काम होल्ड पर रखा"),
+    ("started a task", "{who} ने काम शुरू किया"),
+    ("reopened a task", "{who} ने काम फिर से खोला"),
+    ("cancelled a task", "{who} ने काम कैंसल किया"),
+    ("moved a task", "{who} ने काम का समय बदला"),
+    ("took that back", "{who} ने वापस ले लिया"),
+    ("delegated a task", "{who} ने स्टाफ़ को काम दिया"),
+    ("Request accepted", "रिक्वेस्ट मंज़ूर"),
+    ("Request declined", "रिक्वेस्ट नामंज़ूर"),
+    ("Request conflict", "रिक्वेस्ट लागू नहीं हुई"),
+    ("Your name", "आपका नाम"),
+    ("A name has changed", "नाम बदला गया"),
+    ("Good morning", "सुप्रभात, आज का दिन"),
+    ("slipped today", "आज के बाकी काम"),
+    ("without a date", "बिना तारीख़ के काम"),
+    ("Not started yet", "अभी शुरू नहीं हुआ"),
+    ("came in during your meeting", "मीटिंग के दौरान आए काम"),
+    ("Request waiting", "रिक्वेस्ट इंतज़ार में"),
+)
+
+
+def alert_title_hi(alert: Alert) -> str:
+    """The alert's title in Hindi, for someone JARVIS speaks Hindi with (the notification shows it). Built from the
+    kind of alert and who it is from; anything not known keeps the English title."""
+    sender = alert.sender
+    who_hi = (md_address_hi() if sender.is_md else sender.spoken_name) if sender is not None else ""
+    title = alert.title or ""
+    if alert.kind == Alert.Kind.TASK_ASSIGNED and who_hi:
+        return f"{who_hi} के साथ मीटिंग" if title.startswith("Meeting with") else f"{who_hi} से नया टास्क"
+    if alert.kind == Alert.Kind.NEW_REQUEST and who_hi:
+        return f"{who_hi} की रिक्वेस्ट" if title.startswith("New task") else f"{who_hi} का बदलाव का सुझाव"
+    if alert.ref_type == "message" and who_hi:
+        return f"{who_hi} का संदेश"
+    for words, hindi in _TITLE_HI:
+        if words.lower() in title.lower():
+            if "{who}" in hindi:
+                name = who_hi or title.split(" ")[0]
+                return hindi.format(who=name)
+            return hindi
+    return title
+
+
 def alert_item(alert: Alert, lang: str = "en") -> dict:
-    """lang = the recipient's current language: the spoken line comes in Hindi when it has a Hindi twin."""
+    """lang = the recipient's current language: the spoken line (and the title) come in Hindi when it is Hindi."""
     now = timezone.now()
     snoozed = alert.snoozed_until if alert.snoozed_until and alert.snoozed_until > now else None
     return {
         "id": str(alert.id),
         "kind": alert.kind,
         "priority": alert.priority,
-        "title": alert.title,
+        "title": alert_title_hi(alert) if lang == "hi" else alert.title,
+        "title_en": alert.title,
         "body": alert.body,
         "spoken_text": alert.spoken_text_hi if lang == "hi" and alert.spoken_text_hi else alert.spoken_text,
         "spoken_text_hi": alert.spoken_text_hi,
@@ -1399,6 +1446,18 @@ def sync_staff(user: User | None = None) -> int:
     return tp_sync.sync_directory(user, force=True)
 
 
+def staff_qs():
+    """The TaskPanel staff directory, only while it is switched on (settings.JARVIS_TASKPANEL_STAFF). Off by default:
+    until the real TaskPanel is connected it holds only test people, and the team is everyone with a JARVIS account."""
+    if not settings.JARVIS_TASKPANEL_STAFF:
+        return StaffMember.objects.none()
+    return StaffMember.objects.filter(active=True)
+
+
+def categories_qs():
+    return TaskCategory.objects.filter(active=True) if settings.JARVIS_TASKPANEL_STAFF else TaskCategory.objects.none()
+
+
 def resolve_staff(name: str) -> tuple[list[StaffMember], list[StaffMember]]:
     """Return (matches, suggestions) from the live directory.
 
@@ -1408,7 +1467,7 @@ def resolve_staff(name: str) -> tuple[list[StaffMember], list[StaffMember]]:
     norm = " ".join((name or "").lower().split())
     if not norm:
         return [], []
-    active = list(StaffMember.objects.filter(active=True))
+    active = list(staff_qs())
     exact = [s for s in active if " ".join(s.name.lower().split()) == norm]
     if exact:
         return exact, []
@@ -1480,7 +1539,7 @@ def own_actor_keys() -> set[str]:
 def team_members(team_name: str) -> tuple[list[StaffMember], list[StaffMember], str]:
     """Resolve 'all' or a department name to (members, skipped_on_leave, label)."""
     name = " ".join((team_name or "").lower().split())
-    active = [s for s in StaffMember.objects.filter(active=True) if s.external_id not in own_actor_keys()]
+    active = [s for s in staff_qs() if s.external_id not in own_actor_keys()]
     if name in ALL_TEAM_WORDS:
         chosen, label = active, "the whole team"
     else:
@@ -1499,7 +1558,7 @@ def delegate_to_team(user: User, data: dict, staff_ids: list[int], *, category_k
     if len(staff_ids) > MAX_TEAM_SIZE:
         raise ServiceError("team_too_large", f"A team task can go to at most {MAX_TEAM_SIZE} people at once.", 422)
     results = {"assigned": [], "pending": [], "not_assigned": []}
-    for person in StaffMember.objects.filter(id__in=staff_ids, active=True).order_by("name"):
+    for person in staff_qs().filter(id__in=staff_ids).order_by("name"):
         try:
             task, command = delegate_to_staff(user, data, person, category_key=category_key, description=description)
         except ServiceError as err:
@@ -1624,9 +1683,9 @@ def ai_context(user: User, include_private: bool = True) -> dict:
     now = tu.now_local()
     tp_sync.ensure_directory(user)
     staff = [{"id": s.external_id, "name": s.name, "department": s.department, "on_leave": s.on_leave}
-             for s in StaffMember.objects.filter(active=True)[:80]]
+             for s in staff_qs()[:80]]
     categories = [{"key": c.key, "name": c.name, "department": c.department}
-                  for c in TaskCategory.objects.filter(active=True)[:100]]
+                  for c in categories_qs()[:100]]
     ctx = {
         "now_india": now.isoformat(),
         "weekday": now.strftime("%A"),
@@ -2435,7 +2494,7 @@ def resolve_person(user: User, name: str) -> dict:
         return {**known, "who": "seen in your tasks"}
     # Unknown: offer the nearest names we do know.
     pool: dict[str, str] = {}
-    for s in StaffMember.objects.filter(active=True)[:200]:
+    for s in staff_qs()[:200]:
         label = f"{s.name} from {s.department}" if s.department else s.name
         pool[norm_person(s.name)] = label
         first = norm_person(s.name).split()[:1]

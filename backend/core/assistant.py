@@ -15,7 +15,7 @@ from django.utils import timezone
 from . import ai_brain, datacards, hinglish_parser, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
-from .models import Alert, Kind, Priority, PrivateTask, SharedTask, TaskCategory, TaskRequest, User
+from .models import Alert, Kind, Priority, PrivateTask, SharedTask, TaskRequest, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
@@ -487,7 +487,7 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str, addres
     """Resolve the person against the live TaskPanel directory, pick a category, pre-check with TaskPanel."""
     name = (cmd.get("staff_name") or "").strip()
     draft["categories"] = [{"key": c.key, "name": c.name, "department": c.department}
-                           for c in TaskCategory.objects.filter(active=True)]
+                           for c in services.categories_qs()]
     valid_keys = {c["key"] for c in draft["categories"]}
     suggested = (cmd.get("category_key") or "").strip()
     default = settings.TASKPANEL_DEFAULT_CATEGORY

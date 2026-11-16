@@ -22,7 +22,7 @@ from core.taskpanel.client import MockTaskPanel, TaskPanelError
 SECRET = "SECRET-Mehta-Divorce-Lawyer"
 
 
-@override_settings(JARVIS_AI_ENABLED=False, LARAVEL_MODE="mock")
+@override_settings(JARVIS_AI_ENABLED=False, LARAVEL_MODE="mock", JARVIS_TASKPANEL_STAFF=True, JARVIS_DEFAULT_LANGUAGE="en")
 class BaseCase(TestCase):
     def setUp(self):
         self.md = User.objects.create_user("md", password="md-pass-12345", role=User.Role.MD, display_name="Sir")
@@ -3380,6 +3380,47 @@ class CommandSchemaSizeTests(TestCase):
         self.assertLessEqual(len(ai_brain.COMMAND_SCHEMA["required"]), 52)
         enums = [k for k, v in ai_brain.COMMAND_SCHEMA["properties"].items() if "enum" in v]
         self.assertLessEqual(len(enums), 4, enums)
+
+
+class LiveDefaultsTests(BaseCase):
+    """As on the live server: the TaskPanel test staff are hidden (only the team shows), and someone JARVIS knows
+    nothing about yet is spoken to, and notified, in Hindi; their own language choice wins after that."""
+
+    def test_only_the_team_is_shown_when_the_staff_directory_is_off(self):
+        nikki = services.team_add(self.md, {"name": "Nikki", "title": "Accountant", "department": "Accounts",
+                                            "username": "accounts", "password": "accounts"})
+        with override_settings(JARVIS_TASKPANEL_STAFF=False):
+            ctx = services.ai_context(self.md)
+            self.assertEqual((ctx["staff"], ctx["task_categories"]), ([], []))
+            self.assertIn("Nikki", [p["name"] for p in ctx["team"]])
+            view = self.md_client.get("/api/v1/views/people/").json()
+            names = [r["title"] for r in view["rows"]]
+            self.assertIn("Nikki", names)
+            self.assertNotIn("Ramesh Kumar", names)                       # test staff gone
+            self.assertEqual(self.md_client.get("/api/v1/staff/").json()["results"], [])
+            self.assertEqual(services.resolve_staff("Ramesh Kumar"), ([], []))
+            self.assertEqual(services.resolve_person(self.md, "Ramesh")["status"], "unknown")
+            self.assertEqual(services.find_people("accountant")["people"], [nikki])
+
+    def test_a_new_person_is_notified_in_hindi_and_their_choice_wins(self):
+        from core import push
+
+        nikki = services.team_add(self.md, {"name": "Nikki", "title": "Accountant", "username": "accounts", "password": "accounts"})
+        with override_settings(JARVIS_DEFAULT_LANGUAGE="hi"):
+            task = services.create_person_task(self.md, nikki, {"title": "GST Return Bhejna", "kind": Kind.TASK,
+                                                                "priority": Priority.NORMAL}, compose_note=False)
+            alert = Alert.objects.get(recipient=nikki, ref_id=str(task.id))
+            data = push.payload_for(alert)
+            self.assertEqual(data["title"], "सर से नया टास्क")
+            self.assertIn("ने आपको एक नया टास्क दिया है", data["spoken"])
+            self.assertIn("नया टास्क", data["body"])
+            item = services.alert_item(alert, "hi")
+            self.assertEqual(item["title"], "सर से नया टास्क")
+            # She picks English in Settings: notifications follow her choice.
+            services.set_prefs(nikki, {"replyLanguage": "en"})
+            data = push.payload_for(alert)
+            self.assertEqual(data["title"], "New task from Sir")
+            self.assertIn("has given you a new task", data["spoken"])
 
 
 class TeamTests(BaseCase):

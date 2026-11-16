@@ -18,7 +18,7 @@ from . import ai_brain, ai_usage, assistant, conversation, datacards, lang, push
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
-    Alert, IntegrationCommand, PrivateTask, ReminderAck, StaffMember, Status, TaskCategory, TaskRequest,
+    Alert, IntegrationCommand, PrivateTask, ReminderAck, Status, TaskRequest,
 )
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .permissions import IsMD, IsMDOrPA, IsPA
@@ -330,8 +330,8 @@ class StaffListView(APIView):
         from .taskpanel import sync as tp_sync
 
         tp_sync.ensure_directory(request.user)
-        staff = StaffMember.objects.filter(active=True)
-        categories = TaskCategory.objects.filter(active=True)
+        staff = services.staff_qs()
+        categories = services.categories_qs()
         return Response({
             "results": [{"id": s.id, "name": s.name, "department": s.department, "designation": s.designation,
                          "on_leave": s.on_leave, "leave_until": s.leave_until.isoformat() if s.leave_until else None}
@@ -362,7 +362,7 @@ class DelegationListView(APIView):
     def post(self, request):
         s = DelegationInputSerializer(data=request.data)
         s.is_valid(raise_exception=True)
-        staff = StaffMember.objects.get(id=s.validated_data["staff_id"])
+        staff = services.staff_qs().get(id=s.validated_data["staff_id"])
         task, command = services.delegate_to_staff(
             request.user, s.validated_data, staff,
             category_key=s.validated_data["category_key"], description=s.validated_data["description"],
