@@ -8,8 +8,9 @@ set -euo pipefail
 BEFORE="${1:-}"
 AFTER="${2:?usage: app-update-plan.sh <before-sha> <after-sha>}"
 
-# Anything that ends up in the APK itself rather than in the app's code.
-NATIVE=(mobile/package.json mobile/package-lock.json mobile/app.json mobile/app.config.js mobile/plugins mobile/certs
+# Anything that ends up in the APK itself rather than in the app's code. (The public certificates in mobile/certs
+# are built into the APK too, but they never change what code a phone can run, so they do not block an update.)
+NATIVE=(mobile/package.json mobile/package-lock.json mobile/.npmrc mobile/app.json mobile/app.config.js mobile/plugins
         mobile/google-services.json 'mobile/modules/*/android' 'mobile/modules/*/expo-module.config.json')
 
 if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
