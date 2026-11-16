@@ -139,6 +139,32 @@ GitHub → repo **jarvis** → Settings → Secrets and variables → **Actions*
 
 From now on: **push to `main` → GitHub runs the tests → if green, deploys JARVIS**. Watch it under the repo's **Actions** tab.
 
+## 10. App updates over the air (once)
+After the push that brings this feature, **as root**, one line at a time:
+```bash
+cd /srv/jarvis/backend && .venv/bin/python manage.py app_update keygen --group jarvis
+grep -q '^JARVIS_PUBLIC_URL=' .env || echo 'JARVIS_PUBLIC_URL=http://201.18.193.128:8088' >> .env
+pm2 reload /srv/jarvis/deploy/ecosystem.config.js --update-env
+cd /srv/jarvis/backend && .venv/bin/python manage.py app_update status
+```
+- `keygen` makes the **signing key** (`/srv/jarvis/keys/updates-private.pem`, root + group jarvis only). It never
+  leaves the server. It prints a **fingerprint**: send that line to the JARVIS developer, who builds it into the app.
+  **Never run keygen again** (or with `--force`): a new key makes every installed app refuse updates until a new APK.
+- The **certificate** (public) is at `http://201.18.193.128:8088/api/v1/updates/certificate.pem`.
+- No new GitHub secret and no SSH change: GitHub's key still runs only `deploy.sh`, which accepts
+  `app-update publish|status|promote|rollback`.
+
+Every push that changes the app now goes, signed, to the **test phones** only. Then:
+```bash
+cd /srv/jarvis/backend && .venv/bin/python manage.py app_update status     # what everyone / test phones get
+cd /srv/jarvis/backend && .venv/bin/python manage.py app_update promote    # test version -> everyone
+cd /srv/jarvis/backend && .venv/bin/python manage.py app_update rollback   # take the newest version back
+cd /srv/jarvis/backend && .venv/bin/python manage.py app_update devices    # phones, whose they are, what they run
+cd /srv/jarvis/backend && .venv/bin/python manage.py app_update tester 1a2b3c4d   # make a phone a test phone
+```
+The same three (status / promote / rollback) are buttons on GitHub: **Actions → App update → Run workflow**.
+The phone id is in the app: **Settings → bottom card → "Phone ID"**.
+
 ## Everyday commands (JARVIS only)
 ```bash
 pm2 logs jarvis-api --lines 50       # server log

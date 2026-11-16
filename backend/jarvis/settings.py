@@ -193,6 +193,13 @@ JARVIS_GROK_VOICE = env_bool("JARVIS_GROK_VOICE", True)
 JARVIS_TTS_DAILY_CHAR_LIMIT = int(os.environ.get("JARVIS_TTS_DAILY_CHAR_LIMIT", "60000"))
 JARVIS_TTS_MAX_CHARS = int(os.environ.get("JARVIS_TTS_MAX_CHARS", "700"))  # one spoken reply, cut at a sentence end
 
+# App updates over the air (the Expo Updates protocol, served by JARVIS itself; see core/appupdates.py).
+# The store holds the published app code; the private key signs every update (phones accept only signed ones) and
+# never leaves this server. JARVIS_PUBLIC_URL is how phones reach this server (nginx may hide the port from Django).
+JARVIS_UPDATES_DIR = Path(os.environ.get("JARVIS_UPDATES_DIR", str(BASE_DIR.parent / "updates-store")))
+JARVIS_UPDATES_KEY_FILE = Path(os.environ.get("JARVIS_UPDATES_KEY_FILE", str(BASE_DIR.parent / "keys" / "updates-private.pem")))
+JARVIS_PUBLIC_URL = os.environ.get("JARVIS_PUBLIC_URL", "").rstrip("/")
+
 # Live push to the phones (Firebase Cloud Messaging). Either a path to the service-account key or its JSON.
 # Without one, push is off and the phones fall back to their half-minute check.
 FIREBASE_SERVICE_ACCOUNT_FILE = os.environ.get("FIREBASE_SERVICE_ACCOUNT_FILE", "")

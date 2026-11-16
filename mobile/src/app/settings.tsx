@@ -8,6 +8,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui';
 import { useAlertEngine } from '@/lib/alertEngine';
 import { api, currentServer, deviceTokens } from '@/lib/api';
+import {
+  checkForUpdate, installApk, onUpdates, restartIntoUpdate, runningUpdateDate, updatesSnapshot, type UpdatesSnapshot,
+} from '@/lib/appUpdates';
 import { timeLabel } from '@/lib/format';
 import { addressHiOf, addressOf, mdWord } from '@/lib/names';
 import { usePrefs } from '@/lib/prefs';
@@ -168,10 +171,60 @@ function Menu() {
         ))}
       </Card>
 
+      <UpdatesCard />
       {!isMD ? <Txt variant="small" style={s.note}>Personal items are private: yours only you see, and {mdWord(dash)}’s are never shown here.</Txt> : null}
       <Button title="Sign out" kind="danger" icon="log-out-outline" onPress={signOut} style={{ marginTop: 18 }} />
-      <Txt variant="caption" style={{ textAlign: 'center', marginTop: 14 }}>JARVIS {Constants.expoConfig?.version ?? ''}</Txt>
     </ScrollView>
+  );
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const shortDate = (d: Date) => `${d.getDate()} ${MONTHS[d.getMonth()]}, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+/** Which version runs, whether a newer one is on its way, and a new APK when one is offered. */
+function UpdatesCard() {
+  const [u, setU] = useState<UpdatesSnapshot>(updatesSnapshot());
+  const [restarting, setRestarting] = useState(false);
+  useEffect(() => onUpdates(setU), []);
+  const since = runningUpdateDate();
+  const status: Record<UpdatesSnapshot['state'], string> = {
+    off: 'Automatic updates are off in this build.',
+    idle: 'New versions arrive by themselves.',
+    checking: 'Checking for a new version…',
+    downloading: 'Downloading a new version…',
+    ready: 'A new version is ready. It switches on by itself the next time JARVIS is in the background.',
+    current: 'Up to date.',
+    error: 'Could not check just now. It tries again by itself.',
+  };
+  const canCheck = u.state !== 'off' && u.state !== 'checking' && u.state !== 'downloading';
+  return (
+    <Card style={{ marginTop: 16 }}>
+      <Row
+        title={`JARVIS ${Constants.expoConfig?.version ?? ''}`}
+        detail={since ? `Updated ${shortDate(since)}` : 'As installed'}
+        right={u.tester ? <Tag label="Test phone" color={colors.gold} bg={colors.goldSoft} /> : null}
+      />
+      <Txt variant="small">{status[u.state]}</Txt>
+      <View style={[s.chips, { marginTop: 8 }]}>
+        {u.ready ? (
+          <Button title="Restart now" compact icon="refresh-outline" loading={restarting}
+            onPress={() => { setRestarting(true); restartIntoUpdate().catch(() => setRestarting(false)); }} style={{ marginRight: 8 }} />
+        ) : null}
+        {canCheck && !u.ready ? <Chip label="Check now" icon="cloud-download-outline" onPress={() => void checkForUpdate(true)} /> : null}
+      </View>
+      {u.apk ? (
+        <View style={[s.itemLine, { marginTop: 12, paddingTop: 10 }]}>
+          <Row title={`New version ${u.apk.version}`} detail={u.apk.notes || 'A new APK: download it, then tap Install.'} />
+          {u.apkProgress !== null ? (
+            <Txt variant="small">Downloading… {Math.round(u.apkProgress * 100)}%</Txt>
+          ) : (
+            <Button title="Download and install" compact icon="download-outline" onPress={() => void installApk()} style={{ alignSelf: 'flex-start' }} />
+          )}
+          {u.apkError ? <Txt variant="small" style={{ color: colors.danger, marginTop: 6 }}>{u.apkError}</Txt> : null}
+        </View>
+      ) : null}
+      {u.deviceId ? <Txt variant="caption" style={{ marginTop: 10 }}>Phone ID {u.deviceId.slice(0, 8)}</Txt> : null}
+    </Card>
   );
 }
 

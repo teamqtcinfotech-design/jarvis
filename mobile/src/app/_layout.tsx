@@ -7,7 +7,9 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AlertBanner } from '@/components/AlertBanner';
 import { HeldSheet } from '@/components/HeldSheet';
+import { UpdateKeeper } from '@/components/UpdateKeeper';
 import { AlertEngineProvider } from '@/lib/alertEngine';
+import { startUpdates } from '@/lib/appUpdates';
 import { ConversationProvider } from '@/lib/conversation';
 import * as diag from '@/lib/diag';
 import { PrefsProvider } from '@/lib/prefs';
@@ -17,6 +19,8 @@ import { DashboardProvider } from '@/lib/useDashboard';
 
 // Errors and crashes are kept on the phone (short lines) and sent with "Send diagnostics", or after a crash.
 diag.install();
+// App updates over the air: checked at start and whenever JARVIS comes back to the front (signed in or not).
+void startUpdates();
 
 function Shell() {
   const { user } = useSession();
@@ -33,6 +37,7 @@ function Shell() {
             {stack}
             <AlertBanner />
             <HeldSheet />
+            <UpdateKeeper />
           </View>
         </ConversationProvider>
       </AlertEngineProvider>

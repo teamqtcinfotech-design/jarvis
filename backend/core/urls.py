@@ -1,9 +1,15 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from . import views
+from . import updateviews, views
 
 urlpatterns = [
+    # App updates over the air (the phone's update library calls these itself; see appupdates.py)
+    path("updates/manifest", updateviews.manifest),
+    path("updates/assets/<str:name>", updateviews.asset),
+    path("updates/certificate.pem", updateviews.certificate),
+    path("updates/apk/<str:name>", updateviews.apk),
+    path("updates/hello/", updateviews.UpdateHelloView.as_view()),
     path("auth/login/", views.LoginView.as_view()),
     path("auth/refresh/", TokenRefreshView.as_view()),
     path("auth/logout/", views.LogoutView.as_view()),

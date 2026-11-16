@@ -29,6 +29,8 @@ yarn-error.*
 # macOS
 .DS_Store
 *.pem
+# …except the PUBLIC certificates that check app updates (their private keys live only on the servers)
+!/certs/updates-*.pem
 
 # local env files
 .env*.local

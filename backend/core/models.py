@@ -561,3 +561,67 @@ class AiUsage(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "day", "kind"], name="unique_ai_usage_day")]
+
+
+class Channel(models.TextChoices):
+    """Who gets a new app version: the test phones first, everyone after "promote"."""
+    PREVIEW = "preview", "Test phones only"
+    PRODUCTION = "production", "Everyone"
+
+
+class AppUpdate(models.Model):
+    """One published version of the app's code (over the air, no APK). The files live in the update store,
+    named by their content hash; this row is the manifest the phones receive (signed when they ask)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)  # the manifest id
+    runtime_version = models.CharField(max_length=40)  # the native build it runs on (the APK's version)
+    platform = models.CharField(max_length=10, default="android")
+    channel = models.CharField(max_length=12, choices=Channel.choices, default=Channel.PREVIEW)
+    created_at = models.DateTimeField()  # the manifest's createdAt: phones take only newer ones
+    launch_asset = models.JSONField()  # {file, hash, key, contentType}
+    assets = models.JSONField(default=list)  # [{file, hash, key, contentType, fileExtension}]
+    expo_client = models.JSONField(default=dict)  # the app's public config (Constants.expoConfig on the phone)
+    fingerprint = models.CharField(max_length=64)  # of the code and files: an identical publish is skipped
+    commit = models.CharField(max_length=40, blank=True, default="")
+    message = models.CharField(max_length=200, blank=True, default="")
+    withdrawn = models.BooleanField(default=False)  # rolled back: never served again
+    republished_from = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    promoted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["runtime_version", "platform", "withdrawn", "-created_at"], name="core_appupd_serve_idx")]
+
+
+class AppApk(models.Model):
+    """A new APK (needed only when native parts change). Phones on an older version are offered it: one tap."""
+
+    version = models.CharField(max_length=40)
+    file = models.CharField(max_length=120)  # its name in the update store's apk folder
+    size = models.PositiveBigIntegerField(default=0)
+    sha256 = models.CharField(max_length=64)
+    channel = models.CharField(max_length=12, choices=Channel.choices, default=Channel.PREVIEW)
+    notes = models.CharField(max_length=200, blank=True, default="")
+    withdrawn = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class AppDevice(models.Model):
+    """A phone that asks for app updates. The id is random and made by the app; a test phone gets new versions
+    before everyone else. Linked to whoever is signed in on it, so the list says whose phone is whose."""
+
+    device_id = models.CharField(max_length=64, unique=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="app_devices")
+    model = models.CharField(max_length=80, blank=True, default="")
+    runtime_version = models.CharField(max_length=40, blank=True, default="")
+    update_id = models.CharField(max_length=40, blank=True, default="")  # the app code it runs now ("" = the APK's own)
+    app_version = models.CharField(max_length=40, blank=True, default="")
+    tester = models.BooleanField(default=False)
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_seen"]

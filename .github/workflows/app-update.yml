@@ -1,0 +1,40 @@
+name: App update (status / send to everyone / roll back)
+
+# Buttons for the over-the-air app updates, from GitHub (also works from a phone's browser):
+# Actions -> "App update" -> Run workflow -> pick what to do. The answer is in the run's log.
+#   status   - what everyone and the test phones get now
+#   promote  - the version on the test phones goes to everyone
+#   rollback - take the newest version back (test phones only if it was not sent to everyone yet)
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        options: [status, promote, rollback]
+        default: status
+
+concurrency:
+  group: jarvis-production
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      # GitHub's key may only run deploy.sh on the VPS (a forced command); deploy.sh accepts exactly these actions.
+      - name: Ask the VPS
+        env:
+          ACTION: ${{ inputs.action }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || 22 }}
+        run: |
+          case "$ACTION" in status|promote|rollback) ;; *) echo "Unknown action: $ACTION"; exit 1 ;; esac
+          key="$RUNNER_TEMP/jarvis_key"
+          (umask 077 && printf '%s\n' "$VPS_SSH_KEY" > "$key")
+          ssh -i "$key" -p "$VPS_PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes "$VPS_USER@$VPS_HOST" \
+            "bash /srv/jarvis/deploy/deploy.sh app-update $ACTION" < /dev/null
+          rm -f "$key"

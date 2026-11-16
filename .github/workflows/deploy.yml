@@ -59,3 +59,48 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
           script: bash /srv/jarvis/deploy/deploy.sh
+
+  # The app's code over the air (no APK): built here, signed and served by the VPS, test phones first.
+  # Only when this push changed the app, and never across a native change without a new version (see the script).
+  app-update:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does this push change the app?
+        id: plan
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: bash deploy/app-update-plan.sh "$BEFORE" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Build the app's code for the live server
+        if: steps.plan.outputs.publish == 'true'
+        working-directory: mobile
+        run: |
+          npm ci --no-audit --no-fund
+          npx expo export --platform android --output-dir dist
+          npx expo config --type public --json > dist/expoConfig.json
+          tar -czf "../app-update-${GITHUB_SHA}.tgz" -C dist .
+      # GitHub's key may only run deploy.sh on the VPS (a forced command), so the archive goes in on stdin and
+      # deploy.sh's "app-update publish" stores and publishes it.
+      - name: Send it to the VPS (test phones first)
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || 22 }}
+        run: |
+          key="$RUNNER_TEMP/jarvis_key"
+          (umask 077 && printf '%s\n' "$VPS_SSH_KEY" > "$key")
+          ssh -i "$key" -p "$VPS_PORT" -o StrictHostKeyChecking=accept-new -o BatchMode=yes "$VPS_USER@$VPS_HOST" \
+            "bash /srv/jarvis/deploy/deploy.sh app-update publish $GITHUB_SHA" < "app-update-$GITHUB_SHA.tgz"
+          rm -f "$key"
