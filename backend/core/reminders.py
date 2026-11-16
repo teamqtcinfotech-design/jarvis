@@ -13,11 +13,11 @@ from django.utils import timezone
 from . import lang as lang_mod
 from . import scheduling
 from . import timeutils as tu
-from .models import Kind, Priority, PrivateTask, ReminderAck, ReminderSnooze, ReminderTold, SharedTask, Status, User
+from .models import Kind, Priority, ReminderAck, ReminderSnooze, ReminderTold, SharedTask, Status, User
 from .services import (
-    OWN_ORIGINS, address_hi_of, address_of, assistant_tasks_qs, busy_windows, day_reminder_time, default_remind_before,
-    delegated_qs, get_pa, get_prefs, giver_words, md_address, md_address_hi, md_private_qs, meeting_override_until,
-    pa_tasks_qs, shared_md_tasks_qs,
+    GIVEN_ORIGINS, MEET_ORIGINS, OWN_ORIGINS, address_hi_of, address_of, busy_windows, day_reminder_time,
+    default_remind_before, delegated_qs, get_prefs, giver_words, meeting_override_until, person_tasks_qs, private_qs,
+    shared_md_tasks_qs,
 )
 
 LOOKBACK = timedelta(hours=12)
@@ -142,50 +142,52 @@ def reminders_for(user: User, hours: int = 48) -> dict:
     open_filter = {"status__in": [Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED]}
     prefs = get_prefs(user)  # the reader's own lead times and day-reminder hour
 
+    name, name_hi = address_of(user), address_hi_of(user)
+    # The person's personal items (theirs alone).
+    for task in private_qs(user).filter(**open_filter):
+        items += _task_reminders(task, "private", True, name, prefs, address_hi=name_hi)
     if user.is_md:
-        sir, sir_hi = address_of(user), address_hi_of(user)
-        for task in md_private_qs(user).filter(**open_filter):
-            items += _task_reminders(task, "private", True, sir, prefs, address_hi=sir_hi)
         for task in shared_md_tasks_qs().filter(**open_filter):
-            items += _task_reminders(task, "shared", False, sir, prefs, address_hi=sir_hi)
-        # Anything involving the PA is for both: the MD is reminded too.
-        pa = get_pa()
-        pa_name = pa.spoken_name if pa else "your PA"
-        for task in pa_tasks_qs().filter(**open_filter).exclude(origin=SharedTask.Origin.PA_SELF):
-            meeting = task.origin == SharedTask.Origin.MD_MEET_PA
-            # The check-in on the PA's tasks is the PA's, not the MD's (told once that it is due, and in the evening).
-            for item in _task_reminders(task, "shared", False, sir, prefs, checkin=meeting, address_hi=sir_hi):
-                lead, lead_hi = _lead_phrase(lead_for(task, prefs)), _lead_phrase_hi(lead_for(task, prefs))
-                label = item["label"]
-                if meeting:
-                    item["title"] = f"Meeting with {pa_name}: {task.title}"
-                    if label == "before":
-                        item["spoken"] = f"{sir}, your meeting with {pa_name} starts {lead}: {task.title}."
-                        item["spoken_hi"] = f"{sir_hi}, {pa_name} के साथ आपकी मीटिंग {lead_hi} शुरू होगी: {task.title}।"
-                    elif label == "due":
-                        item["spoken"] = f"{sir}, your meeting with {pa_name} is starting now: {task.title}."
-                        item["spoken_hi"] = f"{sir_hi}, {pa_name} के साथ आपकी मीटिंग अभी शुरू हो रही है: {task.title}।"
+            items += _task_reminders(task, "shared", False, name, prefs, address_hi=name_hi)
+    # Work and meetings that involve someone else are for both: whoever GAVE the work (or set the meeting) is reminded
+    # too ("Sunil's task is due now. Please check with Sunil."); the check-in on given work is the doer's own.
+    given = SharedTask.objects.filter(created_by=user, origin__in=GIVEN_ORIGINS + MEET_ORIGINS,
+                                      assignee_type=SharedTask.Assignee.USER, **open_filter) \
+        .exclude(assignee_user=user).select_related("assignee_user")
+    for task in given:
+        meeting = task.origin in MEET_ORIGINS
+        other = task.assignee_user.spoken_name if task.assignee_user_id else "your colleague"
+        for item in _task_reminders(task, "shared", False, name, prefs, checkin=meeting, address_hi=name_hi):
+            lead, lead_hi = _lead_phrase(lead_for(task, prefs)), _lead_phrase_hi(lead_for(task, prefs))
+            label = item["label"]
+            if meeting:
+                item["title"] = f"Meeting with {other}: {task.title}"
+                if label == "before":
+                    item["spoken"] = f"{name}, your meeting with {other} starts {lead}: {task.title}."
+                    item["spoken_hi"] = f"{name_hi}, {other} के साथ आपकी मीटिंग {lead_hi} शुरू होगी: {task.title}।"
+                elif label == "due":
+                    item["spoken"] = f"{name}, your meeting with {other} is starting now: {task.title}."
+                    item["spoken_hi"] = f"{name_hi}, {other} के साथ आपकी मीटिंग अभी शुरू हो रही है: {task.title}।"
+            else:
+                item["title"] = f"{other}: {task.title}"
+                if label == "before":
+                    item["spoken"] = f"{name}, {other}'s task {task.title} is due {lead}."
+                    item["spoken_hi"] = f"{name_hi}, {other} का टास्क {task.title} {lead_hi} ड्यू है।"
+                elif label == "day":
+                    item["spoken"] = f"{name}, {other}'s task is due today: {task.title}."
+                    item["spoken_hi"] = f"{name_hi}, {other} का टास्क आज ड्यू है: {task.title}।"
                 else:
-                    item["title"] = f"{pa_name}: {task.title}"
-                    if label == "before":
-                        item["spoken"] = f"{sir}, {pa_name}'s task {task.title} is due {lead}."
-                        item["spoken_hi"] = f"{sir_hi}, {pa_name} का टास्क {task.title} {lead_hi} ड्यू है।"
-                    elif label == "day":
-                        item["spoken"] = f"{sir}, {pa_name}'s task is due today: {task.title}."
-                        item["spoken_hi"] = f"{sir_hi}, {pa_name} का टास्क आज ड्यू है: {task.title}।"
-                    else:
-                        item["spoken"] = f"{sir}, {pa_name}'s task is due now: {task.title}. Please check with {pa_name}."
-                        item["spoken_hi"] = f"{sir_hi}, {pa_name} का टास्क अभी ड्यू है: {task.title}। {pa_name} से पूछ लीजिए।"
-                items.append(item)
-    else:
-        name = user.spoken_name
-        # Their own list (the PA's or the manager's): their own tasks, and the ones given to them (by the MD, or by
-        # the other one); a task given to them is called by its giver ("Sir's task", "Mansi's task").
-        for task in assistant_tasks_qs(user).filter(**open_filter):
-            meeting = task.origin == SharedTask.Origin.MD_MEET_PA
+                    item["spoken"] = f"{name}, {other}'s task is due now: {task.title}. Please check with {other}."
+                    item["spoken_hi"] = f"{name_hi}, {other} का टास्क अभी ड्यू है: {task.title}। {other} से पूछ लीजिए।"
+            items.append(item)
+    if not user.is_md:
+        # Their own list: their own work, and what others gave them or set with them; a task given to them is called
+        # by its giver ("Sir's task", "Mansi's task").
+        for task in person_tasks_qs(user).filter(**open_filter):
+            meeting = task.origin in MEET_ORIGINS
             from_sir = task.origin not in OWN_ORIGINS
-            sir, sir_hi = giver_words(task.created_by) if not meeting else (md_address(), md_address_hi())
-            for item in _task_reminders(task, "shared", False, name, prefs, address_hi=name):
+            sir, sir_hi = giver_words(task.created_by)
+            for item in _task_reminders(task, "shared", False, name, prefs, address_hi=name_hi):
                 label = item["label"]
                 lead, lead_hi = _lead_phrase(lead_for(task, prefs)), _lead_phrase_hi(lead_for(task, prefs))
                 if meeting and label == "before" and not task.announcement:
@@ -204,11 +206,16 @@ def reminders_for(user: User, hours: int = 48) -> dict:
                     item["spoken"] = f"{name}, {sir}'s task is due today: {task.title}."
                     item["spoken_hi"] = f"{name}, {sir_hi} का टास्क आज ड्यू है: {task.title}।"
                 items.append(item)
-        # A meeting or call she arranged for the MD (her request, accepted): she is told when it is coming and when
-        # it starts, so she can have things ready. It is the MD's to answer, so nothing is asked of her.
-        for task in shared_md_tasks_qs().filter(kind__in=[Kind.MEETING, Kind.CALL], **open_filter):
+        # A meeting or call they arranged for the MD (their request, accepted): they are told when it is coming and
+        # when it starts, so they can have things ready. The PA and the manager run his diary, so they hear of all of
+        # his. It is the MD's to answer, so nothing is asked of them.
+        sir, sir_hi = giver_words(None)
+        md_meetings = shared_md_tasks_qs().filter(kind__in=[Kind.MEETING, Kind.CALL], **open_filter)
+        if not user.sees_md_diary:
+            md_meetings = md_meetings.filter(created_by=user)
+        for task in md_meetings:
             lead, lead_hi = _lead_phrase(lead_for(task, prefs)), _lead_phrase_hi(lead_for(task, prefs))
-            for item in _task_reminders(task, "shared", False, name, prefs, checkin=False, address_hi=name):
+            for item in _task_reminders(task, "shared", False, name, prefs, checkin=False, address_hi=name_hi):
                 if item["label"] == "before":
                     item["spoken"] = f"{name}, {sir}'s meeting {task.title} starts {lead}."
                     item["spoken_hi"] = f"{name}, {sir_hi} की मीटिंग {task.title} {lead_hi} शुरू होगी।"
@@ -272,12 +279,11 @@ def reminders_for(user: User, hours: int = 48) -> dict:
 
     today = tu.today_local()
     meetings = []
-    if user.is_md:
-        # His own diary meetings, for the phone's "in a meeting" sense. A meeting he switched meeting mode off
-        # during no longer counts (the override is kept on the server, so closing the app does not bring it back).
-        override = meeting_override_until(prefs)
-        for w in busy_windows(today):
-            if override and datetime.fromisoformat(w["end"]) <= override:
-                continue
-            meetings.append({"start": w["start"], "end": w["end"]})
+    # The person's own diary meetings, for the phone's "in a meeting" sense. A meeting they switched meeting mode
+    # off during no longer counts (the override is kept on the server, so closing the app does not bring it back).
+    override = meeting_override_until(prefs)
+    for w in busy_windows(today, person=user):
+        if override and datetime.fromisoformat(w["end"]) <= override:
+            continue
+        meetings.append({"start": w["start"], "end": w["end"]})
     return {"server_time": now.isoformat(), "reminders": result, "busy_windows": meetings}

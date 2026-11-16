@@ -83,7 +83,7 @@ class Command(BaseCommand):
 
         if not PrivateTask.objects.exists():
             self._private(md)
-        if not SharedTask.objects.filter(assignee_type=SharedTask.Assignee.PA).exists():
+        if not SharedTask.objects.filter(assignee_type=SharedTask.Assignee.USER).exists():
             self._pa_work(md, pa)
         if not TaskRequest.objects.exists():
             self._requests(md, pa)

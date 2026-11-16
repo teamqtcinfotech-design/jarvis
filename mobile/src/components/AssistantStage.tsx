@@ -232,6 +232,12 @@ export function AssistantStage() {
               ))}
             </View>
           ) : null}
+          {m.undo ? (
+            <Pressable onPress={conv.undo} style={[s.undo, { alignSelf: 'flex-start' }]} accessibilityRole="button" accessibilityLabel="Undo">
+              <Icon name="arrow-undo-outline" size={14} color={colors.accentDeep} />
+              <Txt variant="caption" style={s.undoText}>Undo</Txt>
+            </Pressable>
+          ) : null}
         </View>
       </View>
     );
@@ -318,6 +324,12 @@ export function AssistantStage() {
                       </Pressable>
                     ))}
                   </View>
+                ) : null}
+                {lastJarvis?.undo ? (
+                  <Pressable onPress={conv.undo} style={s.undo} accessibilityRole="button" accessibilityLabel="Undo">
+                    <Icon name="arrow-undo-outline" size={14} color={colors.accentDeep} />
+                    <Txt variant="caption" style={s.undoText}>Undo</Txt>
+                  </Pressable>
                 ) : null}
               </ScrollView>
             )}
@@ -445,6 +457,9 @@ const s = StyleSheet.create({
   reply: { marginTop: 8, fontSize: 19, lineHeight: 28, color: colors.ink, fontFamily: fonts.medium, textAlign: 'center' },
   sources: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', marginTop: 10, columnGap: 8, rowGap: 6 },
   source: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.7)', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  undo: { flexDirection: 'row', alignItems: 'center', alignSelf: 'center', marginTop: 10, paddingHorizontal: 14, paddingVertical: 7,
+    borderRadius: 999, backgroundColor: colors.accentSoft, borderWidth: 1, borderColor: colors.accent, columnGap: 6 },
+  undoText: { color: colors.accentDeep, fontFamily: fonts.semibold, fontSize: 13 },
   content: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, paddingHorizontal: 14 },
   fill: { flex: 1, minHeight: 0 },
   said: { marginBottom: 8, paddingHorizontal: 8 },

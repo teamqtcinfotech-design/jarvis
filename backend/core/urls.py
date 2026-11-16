@@ -45,7 +45,12 @@ urlpatterns = [
     path("requests/<uuid:request_id>/decline/", views.RequestDeclineView.as_view()),
     path("requests/<uuid:request_id>/withdraw/", views.RequestWithdrawView.as_view()),
     # Assistant
+    # The team (everyone sees who is on it; the MD adds and manages people)
+    path("team/", views.TeamView.as_view()),
+    path("team/<int:user_id>/", views.TeamMemberView.as_view()),
     path("assistant/interpret/", views.InterpretView.as_view()),
+    path("assistant/execute/", views.ExecuteView.as_view()),
+    path("assistant/undo/", views.UndoView.as_view()),
     path("assistant/ask/", views.AskView.as_view()),
     path("assistant/turn/", views.ConversationTurnView.as_view()),
     path("assistant/briefing/", views.BriefingView.as_view()),

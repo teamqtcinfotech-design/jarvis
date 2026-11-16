@@ -124,11 +124,13 @@ def _match_department(text: str) -> str:
     return close[0] if len(close) == 1 else ""
 
 
+_TEAM = {"team", "my team", "the team", "meri team", "whole team", "poori team", "puri team", "team members"}
+
+
 def resolve_subject(user, who: str) -> dict:
-    """Whose tasks: {"type": me | pa | md | staff_one | department | staff_all | all | ambiguous | unknown, "label", ...}."""
+    """Whose tasks: {"type": me | pa (one person on the team) | md | team | staff_one | department | staff_all | all |
+    ambiguous | unknown, "label", ...}. "pa" is any one team member (the PA was the first): "user" holds who."""
     raw = " ".join((who or "").lower().split())
-    pa = services.get_pa()
-    pa_name = pa.spoken_name if pa else "your PA"
     if raw in _ME:
         return {"type": "me", "label": "you"}
     key = services.norm_person(raw)
@@ -137,13 +139,20 @@ def resolve_subject(user, who: str) -> dict:
     md_names.add(services.norm_person(services.md_address()))
     if raw in _MD or (key and key in md_names):  # "Sir", "Ma'am", or the MD's own name
         return {"type": "me", "label": "you"} if user.is_md else {"type": "md", "label": services.md_address()}
-    pa_names = {services.norm_person(n) for n in (pa.display_name, pa.first_name, pa.username, pa.get_full_name()) if n} if pa else set()
-    if raw in _PA or (key and key in pa_names):
-        return {"type": "me", "label": "you"} if user.is_pa else {"type": "pa", "label": pa_name}
-    mg = services.get_manager()
-    mg_names = {services.norm_person(n) for n in (mg.display_name, mg.first_name, mg.get_full_name()) if n} if mg else set()
-    if raw in {"manager", "the manager"} or (key and key in mg_names):
-        return {"type": "me", "label": "you"} if user.is_mg else {"type": "mg", "label": mg.spoken_name if mg else "the manager"}
+    if raw in _TEAM:
+        return {"type": "team", "label": "the team"}
+    # Someone on the team, by name or by job ("Sunil", "accountant", "PA", "manager"); a name heard a little wrong
+    # that is clearly one person is taken (for looking things up only).
+    found = services.find_people(raw)
+    if found["status"] in ("known", "close"):
+        person = found["people"][0]
+        if person.id == user.id:
+            return {"type": "me", "label": "you"}
+        if person.is_md:
+            return {"type": "me", "label": "you"} if user.is_md else {"type": "md", "label": services.md_address()}
+        return {"type": "pa", "label": person.spoken_name, "user": person}
+    if found["status"] == "ambiguous":
+        return {"type": "ambiguous", "label": who, "options": found["options"]}
     if raw in _STAFF:
         return {"type": "staff_all", "label": "the staff"}
     if raw in _ALL:
@@ -199,29 +208,27 @@ def _collect(user, subject: dict, include_private: bool) -> list[dict]:
     kind = subject["type"]
     items: list[dict] = []
     if kind in ("me", "all"):
-        if user.is_md:
-            if include_private:  # his personal items: for him alone, and not on a locked phone
-                items += [services.private_item(t) for t in
-                          services.md_private_qs(user).exclude(status=Status.CANCELLED).order_by("-created_at")[:_LIMIT]]
-            items += _shared(services.shared_md_tasks_qs())
-            items += _shared(services.pa_tasks_qs().filter(origin=SharedTask.Origin.MD_MEET_PA))
-        else:
-            items += _shared(services.assistant_tasks_qs(user))
+        if include_private:  # their own personal items: for them alone, and not on a locked phone
+            items += [services.private_item(t) for t in
+                      services.private_qs(user).exclude(status=Status.CANCELLED).order_by("-created_at")[:_LIMIT]]
+        items += _shared(services.diary_qs(user))
     if kind == "pa":
-        items += _shared(services.pa_tasks_qs())
-    if kind == "mg":
-        items += _shared(services.mg_tasks_qs())
-    if kind == "all" and user.is_md:
-        items += _shared(services.pa_tasks_qs().exclude(origin=SharedTask.Origin.MD_MEET_PA))
-        items += _shared(services.mg_tasks_qs())
+        # One team member's work: all of it for the MD (who sees all work); for anyone else only what they gave
+        # that person. Nobody's personal items are ever read here.
+        theirs = services.person_tasks_qs(subject["user"])
+        items += _shared(theirs if user.is_md else theirs.filter(created_by=user))
+    if kind in ("team", "all"):
+        items += _shared(services.team_work_qs() if user.is_md else services.given_qs(user))
+    md_work = services.shared_md_tasks_qs() if (user.is_md or user.sees_md_diary) else services.shared_md_tasks_qs().filter(created_by=user)
     if kind == "md" or (kind == "all" and user.is_assistant):
-        items += _shared(services.shared_md_tasks_qs())  # official only: his personal items are never read here
+        items += _shared(md_work)  # official only: his personal items are never read here
+    staff_work = services.delegated_visible_qs(user)
     if kind == "staff_one":
-        items += _shared(services.delegated_qs().filter(staff=subject["staff"]))
+        items += _shared(staff_work.filter(staff=subject["staff"]))
     if kind == "department":
-        items += _shared(services.delegated_qs().filter(staff__department__iexact=subject["label"]))
+        items += _shared(staff_work.filter(staff__department__iexact=subject["label"]))
     if kind in ("staff_all", "all"):
-        items += _shared(services.delegated_qs())
+        items += _shared(staff_work)
     seen, unique = set(), []
     for item in items:
         mark = (item["scope"], item["id"])
@@ -287,18 +294,20 @@ def _from_whom(item: dict, whom: str, user) -> bool:
     """Who the item came from, as the speaker sees it: Sir's gifts to Mansi, her own, what the PA sent Sir, staff work."""
     origin = item.get("origin")
     assignee = item.get("assignee", {}).get("type")
+    giver = item.get("created_by_id")
+    md, pa = services.get_md(), services.get_pa()
     if whom == "staff":
         return assignee == "STAFF"
     if user.is_assistant:
         if whom == "sir":
-            return origin in (SharedTask.Origin.MD_TO_PA, SharedTask.Origin.MD_MEET_PA, SharedTask.Origin.MD_TO_MG) or assignee == "MD"
-        if whom == "pa" and user.is_mg:
-            return origin == SharedTask.Origin.PA_TO_MG  # what the PA gave the manager
-        return origin in services.OWN_ORIGINS  # "me": their own
+            return (md is not None and giver == md.id and origin != SharedTask.Origin.PA_REQUEST) or assignee == "MD"
+        if whom == "pa":
+            return pa is not None and giver == pa.id and pa.id != user.id  # what the PA gave them
+        return item.get("scope") == "private" or origin in services.OWN_ORIGINS  # "me": their own
     if whom == "pa":
-        return origin in (SharedTask.Origin.PA_REQUEST, SharedTask.Origin.PA_SELF)
-    # "me" / "sir" for Sir: his own, personal or official, not what the PA sent him
-    return item.get("scope") == "private" or (assignee in ("MD", "PA") and origin not in (SharedTask.Origin.PA_REQUEST, SharedTask.Origin.PA_SELF))
+        return pa is not None and giver == pa.id  # what the PA sent him (accepted) or keeps herself
+    # "me" / "sir" for Sir: his own, personal or official, not what someone sent him
+    return item.get("scope") == "private" or (giver == user.id and origin != SharedTask.Origin.PA_REQUEST)
 
 
 _WANT_PRIORITY = {"urgent": {"URGENT"}, "high": {"HIGH"}, "important": {"URGENT", "HIGH"}}
@@ -356,10 +365,10 @@ def _owner(item: dict, user) -> str:
     who = item.get("assignee", {})
     if who.get("type") == "STAFF":
         return who.get("staff_name") or "Staff"
-    if who.get("type") == "PA":
-        return "You" if user.is_pa else (who.get("staff_name") or "PA")
-    if who.get("type") == "MG":
-        return "You" if user.is_mg else (who.get("staff_name") or "Manager")
+    if who.get("user_id") == user.id or item.get("scope") == "private":
+        return "You"
+    if who.get("type") == "USER":
+        return who.get("staff_name") or "Team member"
     return "You" if user.is_md else services.md_address()
 
 
@@ -447,6 +456,24 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
         late_n[mansi.id] = sum(1 for t in hers if services.is_overdue(t))
 
     rows = []
+    # The people with a JARVIS account come first (the MD is not his own staff). Their open work is counted for the
+    # MD, who sees all work; anyone else sees only what they themselves gave each person.
+    staff_names = {services.norm_person(s.name) for s in staff}
+    mates = [u for u in services.team() if not u.is_md and u.id != user.id
+             and services.norm_person(u.spoken_name) not in staff_names
+             and (not wanted or (u.department or "").lower() == wanted.lower())]
+    if on_leave_only:
+        mates = []
+    for u in mates:
+        work = services.person_tasks_qs(u).exclude(status__in=[Status.COMPLETED, Status.CANCELLED])
+        if not user.is_md:
+            work = work.filter(created_by=user)
+        rows.append({
+            "id": f"user-{u.id}", "scope": "", "title": u.spoken_name, "who": u.department or "Team", "kind": u.title_label,
+            "status": "", "when": "", "day": "", "priority": "NORMAL", "progress": 0, "private": False,
+            "overdue": any(services.is_overdue(t) for t in work), "version": None, "hold_reason": "",
+            "assigned": work.count(), "late": sum(1 for t in work if services.is_overdue(t)), "on_leave": False,
+        })
     for s in staff:
         leave = (f"On leave until {tu.fmt_day(s.leave_until)}" if s.leave_until else "On leave") if s.on_leave else ""
         rows.append({
@@ -456,11 +483,16 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
             "assigned": open_n.get(s.id, 0), "late": late_n.get(s.id, 0), "on_leave": s.on_leave,
         })
     depts: dict[str, int] = {}
+    for u in mates:
+        depts[u.department or "Team"] = depts.get(u.department or "Team", 0) + 1
     for s in staff:
         depts[s.department or "Other"] = depts.get(s.department or "Other", 0) + 1
     away = [s for s in staff if s.on_leave]
-    busy = sum(1 for s in staff if open_n.get(s.id))
-    late_total = sum(late_n.get(s.id, 0) for s in staff)
+    team_rows = rows[:len(mates)]
+    busy = sum(1 for s in staff if open_n.get(s.id)) + sum(1 for r in team_rows if r["assigned"])
+    late_total = sum(late_n.get(s.id, 0) for s in staff) + sum(r["late"] for r in team_rows)
+    head_count = len(staff) + len(mates)
+    all_names = [u.spoken_name for u in mates] + [s.name for s in staff]
 
     title = "On leave" if on_leave_only else f"{wanted} team" if wanted else "Your staff" if user.is_md else "Staff"
     view = datacards._table(
@@ -469,14 +501,14 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
         subtitle="Name, team, role and leave, as in the staff app", layout="people")
     if wanted or on_leave_only:
         view["stats"] = [
-            {"label": "People", "value": len(staff), "tone": "accent", "icon": "people-outline"},
+            {"label": "People", "value": head_count, "tone": "accent", "icon": "people-outline"},
             {"label": "On leave", "value": len(away), "tone": "warn" if away else "muted", "icon": "airplane-outline"},
-            {"label": "Open tasks", "value": sum(open_n.get(s.id, 0) for s in staff), "tone": "info", "icon": "briefcase-outline"},
+            {"label": "Open tasks", "value": sum(open_n.get(s.id, 0) for s in staff) + sum(r["assigned"] for r in team_rows), "tone": "info", "icon": "briefcase-outline"},
             {"label": "Late", "value": late_total, "tone": "danger" if late_total else "muted", "icon": "alert-circle-outline"},
         ]
     else:
         view["stats"] = [
-            {"label": "People", "value": len(staff), "tone": "accent", "icon": "people-outline"},
+            {"label": "People", "value": head_count, "tone": "accent", "icon": "people-outline"},
             {"label": "Teams", "value": len(depts), "tone": "info", "icon": "git-network-outline"},
             {"label": "On leave", "value": len(away), "tone": "warn" if away else "muted", "icon": "airplane-outline"},
             {"label": "With work", "value": busy, "tone": "success", "icon": "briefcase-outline"},
@@ -487,9 +519,9 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
     # The sentence that is spoken (and its Hindi twin), from the real numbers.
     address = services.address_of(user)
     address_hi = services.address_hi_of(user)
-    n, people = len(staff), "person" if len(staff) == 1 else "people"
-    names = _names([s.name for s in staff])
-    names_hi = _names([s.name for s in staff], hindi=True)
+    n, people = head_count, "person" if head_count == 1 else "people"
+    names = _names(all_names)
+    names_hi = _names(all_names, hindi=True)
     if on_leave_only:
         en = "nobody is on leave right now." if not n else f"{n} {people} on leave: {names}."
         hi = "अभी कोई छुट्टी पर नहीं है।" if not n else f"{n} {'व्यक्ति' if n == 1 else 'लोग'} छुट्टी पर: {names_hi}।"
@@ -498,8 +530,8 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
         hi = f"{wanted} में {n} {'व्यक्ति है' if n == 1 else 'लोग हैं'}: {names_hi}।"
     else:
         own_word, own_hi = ("you have", "आपके") if user.is_md else ("there are", "कुल")
-        en = f"{own_word} {n} staff in {len(depts)} teams" + (f"; {len(away)} on leave" if away else "") + "."
-        hi = f"{own_hi} {len(depts)} टीम में {n} स्टाफ़ हैं" + (f"; {len(away)} छुट्टी पर" if away else "") + "।"
+        en = f"{own_word} {n} people in {len(depts)} teams" + (f"; {len(away)} on leave" if away else "") + "."
+        hi = f"{own_hi} {len(depts)} टीम में {n} लोग हैं" + (f"; {len(away)} छुट्टी पर" if away else "") + "।"
     lead_en = lead_hi = ""
     if missing:
         lead_en = f"the staff list has no {missing} detail, so here is everyone: "
@@ -521,10 +553,9 @@ def _profile(subject: dict) -> dict | None:
     """Who one person is, from the staff app: team, role, leave. None for anyone who is not a single person."""
     staff = subject.get("staff")
     if subject["type"] == "pa":
-        pa_keys = TaskPanelLink.objects.filter(active=True, user__role=User.Role.PA).values_list("actor_key", flat=True)
-        staff = StaffMember.objects.filter(active=True, external_id__in=list(pa_keys)).first()
-        if staff is None:
-            return {"name": subject["label"], "department": "", "designation": "Personal Assistant", "on_leave": False, "leave": ""}
+        person = subject.get("user")
+        return {"name": subject["label"], "department": getattr(person, "department", "") or "",
+                "designation": person.title_label if person else "", "on_leave": False, "leave": ""}
     if staff is None:
         return None
     leave = (f"On leave until {tu.fmt_day(staff.leave_until)}" if staff.leave_until else "On leave") if staff.on_leave else ""
@@ -674,7 +705,7 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
     if p["words"]:
         items = _by_words(items, p["words"])
     items = _ordered(items)
-    many = kind in ("staff_all", "all", "department")
+    many = kind in ("staff_all", "all", "department", "team")
     pa = services.get_pa()
     pa_name = pa.spoken_name if pa else "your PA"
     ph = _phrases(p, user, pa_name)
@@ -697,7 +728,8 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
     mine = f"My {ph['many']}" if p["types"] else "My tasks"
     who_title = {"me": mine, "pa": f"{subject['label']}'s tasks", "md": f"{sir}'s official tasks",
                  "staff_one": subject["label"], "department": f"{subject['label']} team",
-                 "staff_all": "Work with staff", "all": "Everyone's tasks"}[kind]
+                 "staff_all": "Work with staff", "all": "Everyone's tasks",
+                 "team": "The team's work" if user.is_md else "Given by you"}[kind]
     period = _period_title(start, end)
     title = _join(who_title, f"· {period}" if period else "")
     basis = {"given": "Given in this period", "done": "Finished in this period", "due": "Due in this period",
@@ -762,13 +794,13 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
     has = {"me": "you had" if past else "you have", "pa": f"{name} {'had' if past else 'has'}",
            "md": f"{sir} {'had' if past else 'has'}", "staff_one": f"{name} {'had' if past else 'has'}",
            "department": f"the {name} team {'had' if past else 'has'}", "staff_all": f"the staff {'had' if past else 'have'}",
-           "all": "there were" if past else "there are"}[kind]
+           "all": "there were" if past else "there are", "team": f"the team {'had' if past else 'has'}"}[kind]
     whose_hi = {"me": "आपके", "pa": f"{name} के", "md": f"{sir_hi} के", "staff_one": f"{name} के", "department": f"{name} टीम के",
-                "staff_all": "स्टाफ़ के", "all": "सबके"}[kind]
+                "staff_all": "स्टाफ़ के", "all": "सबके", "team": "टीम के"}[kind]
     to_hi = {"me": "आपको", "pa": f"{name} को", "md": f"{sir_hi} को", "staff_one": f"{name} को", "department": f"{name} टीम को",
-             "staff_all": "स्टाफ़ को", "all": "कुल"}[kind]
+             "staff_all": "स्टाफ़ को", "all": "कुल", "team": "टीम को"}[kind]
     by_hi = {"me": "आपने", "pa": f"{name} ने", "md": f"{sir_hi} ने", "staff_one": f"{name} ने", "department": f"{name} टीम ने",
-             "staff_all": "स्टाफ़ ने", "all": "सबने"}[kind]
+             "staff_all": "स्टाफ़ ने", "all": "सबने", "team": "टीम ने"}[kind]
     if not total:
         target = "on your list" if kind == "me" else "for everyone" if kind == "all" else f"for {name}"
         en = _join(f"I found no {adj}{ph['many']}", tail_en, target, period_en) + "."

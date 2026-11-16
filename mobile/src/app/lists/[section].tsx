@@ -32,11 +32,12 @@ const SECTIONS: Record<string, Section> = {
   late: { title: 'Late', empty: 'Nothing is late. Well done.', items: (d) => d.overdue },
   upcoming: { title: 'Coming up', empty: 'Nothing coming up this week.', items: (d) => d.upcoming },
   nodate: { title: 'No date yet', empty: 'No undated tasks.', items: (d) => d.anytime },
-  private: { title: 'Private reminders', empty: 'No private reminders.', items: (d) => all(d).filter((t) => t.scope === 'private') },
+  private: { title: 'Personal', empty: 'No personal items. Only you would see them.', items: (d) => all(d).filter((t) => t.scope === 'private') },
   pa: { title: 'Given to your PA', empty: 'Say “PA ko bolo…” to give your PA a task.', staff: true, items: (d) => d.pa_tasks ?? [] },
   md_tasks: { title: 'Tasks from your requests', empty: 'None yet.', items: (d) => d.md_tasks ?? [] },
   mg: { title: 'Given to the manager', empty: 'Say “Mansi ko bolo…” to give the manager a task.', staff: true, items: (d) => d.mg_tasks ?? [] },
-  given: { title: 'Given by you', empty: 'Nothing given yet.', staff: true, items: (d) => d.given_tasks ?? [] },
+  given: { title: 'Given by you', empty: 'Nothing given yet. Say “Sunil ko bolo…” to give someone work.', staff: true, items: (d) => d.given_tasks ?? [] },
+  team: { title: 'Team’s work', empty: 'Nobody on the team has open work.', staff: true, items: (d) => d.team_tasks ?? [] },
   staff: { title: 'Given to staff', empty: 'Say “Ramesh ko bolo…” to give work to someone in the team.', staff: true, items: (d) => d.delegated },
 };
 
@@ -134,7 +135,7 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
   const md = mdWord(data);
   let title = SECTIONS[section]?.title ?? 'Tasks';
   if (section === 'requests') title = isMD ? 'Need your OK' : `Waiting for ${md}`;
-  if (section === 'md_tasks') title = `${md}’s tasks from your requests`;
+  if (section === 'md_tasks') title = user.role === 'PA' || user.role === 'MG' ? `${md}’s official tasks` : `${md}’s tasks from your requests`;
   if (section === 'busy') title = `When ${md} is busy today`;
   if (section === 'updates') title = 'Updates';
   if (section === 'cancelled') title = 'Cancelled';

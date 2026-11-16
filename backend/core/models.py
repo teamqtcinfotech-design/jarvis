@@ -19,9 +19,17 @@ class User(AbstractUser):
         MD = "MD", "Managing Director"
         PA = "PA", "Personal Assistant"
         MG = "MG", "Manager"
+        TM = "TM", "Team member"  # everyone else on the team (accounts, farm manager, director, ...)
 
     role = models.CharField(max_length=2, choices=Role.choices, default=Role.PA)
     display_name = models.CharField(max_length=80, blank=True)
+    # What the person does ("Accountant", "Farm Manager", "Director"): JARVIS finds people by it ("accountant ko
+    # bolo") and says it. The department groups people for messages and work to a team ("accounts team ko bolo").
+    job_title = models.CharField(max_length=80, blank=True, default="")
+    department = models.CharField(max_length=80, blank=True, default="")
+    # "male" / "female" / "" (not said): set by the MD on the Team page, never guessed from a name. Only used for
+    # "he / she" and the Hindi verb forms when JARVIS speaks ABOUT the person.
+    gender = models.CharField(max_length=6, blank=True, default="")
 
     class Meta:
         constraints = [
@@ -43,8 +51,22 @@ class User(AbstractUser):
 
     @property
     def is_assistant(self) -> bool:
-        """The PA or the manager: the people who work with the MD (never see the MD's private items)."""
+        """Everyone who is not the MD: the PA, the manager and every other team member. None of them ever sees the
+        MD's personal items (or anybody else's)."""
+        return self.role != self.Role.MD
+
+    @property
+    def sees_md_diary(self) -> bool:
+        """The PA and the manager run the MD's diary: they see his OFFICIAL items (never his personal ones) and when
+        he is busy. Other team members see only what they gave him or asked him for."""
         return self.role in (self.Role.PA, self.Role.MG)
+
+    @property
+    def title_label(self) -> str:
+        """The person's job as said aloud: their job title, else the role ("PA", "Manager")."""
+        if self.job_title:
+            return self.job_title
+        return {"MD": "Managing Director", "PA": "PA", "MG": "Manager"}.get(self.role, "Team member")
 
     @property
     def spoken_name(self) -> str:
@@ -172,16 +194,30 @@ class TaskCategory(models.Model):
 
 
 class SharedTask(TaskFields):
-    """Tasks MD and PA can both see: MD tasks that came from PA, and work delegated to staff."""
+    """Work items (never personal ones): the MD's official tasks, work one team member gives another, a team
+    member's own work, meetings between two people, and work delegated to TaskPanel staff.
+
+    Who it is for: assignee_user (any JARVIS account) with assignee_type MD (the MD's own official list) or USER
+    (anyone else), or a TaskPanel staff member (assignee_type STAFF). Who gave it: created_by. Visibility: the
+    giver, the person it is for, and the MD (who sees all work); see services.visible_shared_qs."""
 
     class Assignee(models.TextChoices):
         MD = "MD", "MD"
+        USER = "USER", "Team member"
+        STAFF = "STAFF", "Staff"
+        # Before the team (Nov 2026): the PA's and the manager's lists. Migration 0018 turned them into USER.
         PA = "PA", "PA"
         MG = "MG", "Manager"
-        STAFF = "STAFF", "Staff"
 
     class Origin(models.TextChoices):
-        PA_REQUEST = "PA_REQUEST", "Requested by PA"
+        PA_REQUEST = "PA_REQUEST", "Requested of the MD (accepted)"
+        GIVEN = "GIVEN", "Given by one person to another"
+        SELF = "SELF", "The person's own work"
+        MEET = "MEET", "Meeting between the giver and this person"
+        MD_DELEGATION = "MD_DELEGATION", "Delegated by MD"
+        PA_DELEGATION = "PA_DELEGATION", "Delegated by PA"
+        TASKPANEL_WEB = "TASKPANEL_WEB", "Assigned in TaskPanel"
+        # Before the team (Nov 2026); migration 0018 turned these into GIVEN / SELF / MEET.
         MD_TO_PA = "MD_TO_PA", "Assigned by MD to PA"
         MD_MEET_PA = "MD_MEET_PA", "Meeting between MD and PA"
         PA_SELF = "PA_SELF", "PA's own task"
@@ -189,9 +225,6 @@ class SharedTask(TaskFields):
         MD_TO_MG = "MD_TO_MG", "Assigned by MD to the manager"
         MG_TO_PA = "MG_TO_PA", "Assigned by the manager to the PA"
         PA_TO_MG = "PA_TO_MG", "Assigned by the PA to the manager"
-        MD_DELEGATION = "MD_DELEGATION", "Delegated by MD"
-        PA_DELEGATION = "PA_DELEGATION", "Delegated by PA"
-        TASKPANEL_WEB = "TASKPANEL_WEB", "Assigned in TaskPanel"
 
     class Sync(models.TextChoices):
         NOT_REQUIRED = "NOT_REQUIRED", "Not required"
@@ -205,6 +238,9 @@ class SharedTask(TaskFields):
     description = models.TextField(blank=True, default="")  # full spoken instruction, kept as-is for TaskPanel
     announcement = models.TextField(blank=True, default="")
     assignee_type = models.CharField(max_length=5, choices=Assignee.choices)
+    # The JARVIS account this is for (assignee_type MD or USER); empty for TaskPanel staff work.
+    assignee_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT,
+                                      related_name="assigned_tasks")
     staff = models.ForeignKey(StaffMember, null=True, blank=True, on_delete=models.PROTECT, related_name="tasks")
     category_key = models.CharField(max_length=64, blank=True, default="")
     origin = models.CharField(max_length=13, choices=Origin.choices)
@@ -222,7 +258,8 @@ class SharedTask(TaskFields):
     last_synced_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=["assignee_type", "status"]), models.Index(fields=["due_at"])]
+        indexes = [models.Index(fields=["assignee_type", "status"]), models.Index(fields=["due_at"]),
+                   models.Index(fields=["assignee_user", "status"], name="core_shared_assigne_team_idx")]
 
 
 class TaskPanelLink(models.Model):
@@ -338,6 +375,8 @@ class Alert(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="alerts")
+    # Who it is from, when a person sent it (a message, a task given): they are told when it is seen.
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     kind = models.CharField(max_length=16, choices=Kind.choices)
     priority = models.CharField(max_length=6, choices=Priority.choices, default=Priority.NORMAL)
     title = models.CharField(max_length=200)

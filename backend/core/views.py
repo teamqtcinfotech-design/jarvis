@@ -18,7 +18,7 @@ from . import ai_brain, ai_usage, assistant, conversation, datacards, lang, push
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
-    Alert, IntegrationCommand, PrivateTask, ReminderAck, SharedTask, StaffMember, Status, TaskCategory, TaskRequest,
+    Alert, IntegrationCommand, PrivateTask, ReminderAck, StaffMember, Status, TaskCategory, TaskRequest,
 )
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .permissions import IsMD, IsMDOrPA, IsPA
@@ -89,6 +89,8 @@ class MeView(APIView):
             "username": u.username,
             "role": u.role,
             "name": u.spoken_name,
+            "title": u.title_label,
+            "department": u.department,
             "address": services.address_of(u),
             "address_hi": services.address_hi_of(u),
             "language": lang.current(u),  # the language JARVIS is speaking to this person right now ("hi" / "en")
@@ -154,12 +156,12 @@ class BusyView(APIView):
         return Response({"date": day.isoformat(), "busy": services.busy_windows(day)})
 
 
-# ------------------------------------------------------------------ private tasks (MD only)
+# ------------------------------------------------------------------ personal items (each person's own, theirs alone)
 class PrivateTaskListView(APIView):
-    permission_classes = [IsMD]
+    permission_classes = [IsMDOrPA]
 
     def get(self, request):
-        qs = services.md_private_qs(request.user).order_by("-created_at")
+        qs = services.private_qs(request.user).order_by("-created_at")
         if request.query_params.get("include_closed") != "1":
             qs = qs.exclude(status__in=[Status.COMPLETED, Status.CANCELLED])
         return Response({"results": [services.private_item(t) for t in qs[:200]]})
@@ -174,10 +176,10 @@ class PrivateTaskListView(APIView):
 
 
 class PrivateTaskDetailView(APIView):
-    permission_classes = [IsMD]
+    permission_classes = [IsMDOrPA]  # someone else's personal item is simply not found
 
     def get(self, request, task_id):
-        return Response(services.private_item(services.md_private_qs(request.user).get(id=task_id)))
+        return Response(services.private_item(services.private_qs(request.user).get(id=task_id)))
 
     def patch(self, request, task_id):
         s = TaskPatchSerializer(data=request.data)
@@ -187,7 +189,7 @@ class PrivateTaskDetailView(APIView):
 
 
 class PrivateTaskCompleteView(APIView):
-    permission_classes = [IsMD]
+    permission_classes = [IsMDOrPA]
 
     def post(self, request, task_id):
         s = VersionSerializer(data=request.data)
@@ -199,32 +201,23 @@ class PrivateTaskCompleteView(APIView):
 
 # ------------------------------------------------------------------ shared MD tasks
 class SharedTaskDetailView(APIView):
-    """MD edits directly. A PA edit becomes a change request for the MD (202)."""
+    """A work item. The MD changes anything; the giver changes what they gave; anyone changes their own; the person
+    it is for only moves its status; a change to the MD's own work becomes a request for him (202). Someone else's
+    work is not even found."""
 
     permission_classes = [IsMDOrPA]
 
     def get(self, request, task_id):
-        return Response(services.shared_item(SharedTask.objects.select_related("staff", "created_by").get(id=task_id)))
+        return Response(services.shared_item(services.visible_shared_qs(request.user).get(id=task_id)))
 
     def patch(self, request, task_id):
         s = TaskPatchSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         version = s.validated_data["expected_version"]
-        if request.user.is_md:
-            task = services.update_shared_md_task(request.user, task_id, s.changes(), version)
-            return Response(services.shared_item(task))
-        if SharedTask.objects.filter(id=task_id, origin__in=services.OWN_ORIGINS, created_by=request.user).exists():
-            task = services.update_pa_self_task(request.user, task_id, s.changes(), version)  # their own task
-            return Response(services.shared_item(task))
-        if SharedTask.objects.filter(id=task_id, origin__in=services.GIVEN_ORIGINS, created_by=request.user).exists():
-            task = services.update_given_task(request.user, task_id, s.changes(), version)  # one they gave the other
-            return Response(services.shared_item(task))
-        mine = SharedTask.objects.filter(id=task_id, assignee_type=services.bucket_of(request.user)).select_related("created_by").first()
-        if mine is not None:
-            giver = services.giver_words(mine.created_by)[0]
-            return error("forbidden", f"Only {giver} can change this task. You can update its status.", 403)
-        req = services.propose_change(request.user, task_id, s.changes(), version, s.validated_data.get("reason", ""))
-        return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
+        task, req = services.change_shared_task(request.user, task_id, s.changes(), version, s.validated_data.get("reason", ""))
+        if req is not None:
+            return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
+        return Response(services.shared_item(task))
 
 
 class SharedTaskCompleteView(APIView):
@@ -233,38 +226,26 @@ class SharedTaskCompleteView(APIView):
     def post(self, request, task_id):
         s = VersionSerializer(data=request.data)
         s.is_valid(raise_exception=True)
-        version = s.validated_data["expected_version"]
-        task = SharedTask.objects.get(id=task_id)
-        if task.assignee_type in (SharedTask.Assignee.PA, SharedTask.Assignee.MG):
-            # A task on the PA's or the manager's list: they complete it themselves; the one who gave it may close it.
-            if request.user.is_assistant and task.assignee_type == services.bucket_of(request.user):
-                done = services.update_pa_task_status(request.user, task_id, Status.COMPLETED, version)
-            elif request.user.is_md:
-                done = services.update_shared_md_task(request.user, task_id, {"status": Status.COMPLETED}, version)
-            elif task.created_by_id == request.user.id:
-                done = services.update_given_task(request.user, task_id, {"status": Status.COMPLETED}, version)
-            else:
-                return error("forbidden", "This task is not yours to close.", 403)
-            return Response(services.shared_item(done))
-        if request.user.is_md:
-            task = services.update_shared_md_task(request.user, task_id, {"status": Status.COMPLETED}, version)
-            return Response(services.shared_item(task))
-        req = services.propose_change(request.user, task_id, {"status": Status.COMPLETED}, version, "Marked done")
-        return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
+        task, req = services.complete_shared_task(request.user, task_id, s.validated_data["expected_version"])
+        if req is not None:
+            return Response({"status": "proposed", "request": services.request_item(req)}, status=202)
+        return Response(services.shared_item(task))
 
 
-# ------------------------------------------------------------------ MD -> PA tasks
+# ------------------------------------------------------------------ work for the PA and the manager (older phones)
 class PaTaskListView(APIView):
     permission_classes = [IsMDOrPA]
 
     def get(self, request):
-        qs = services.pa_tasks_qs().exclude(status=Status.CANCELLED).order_by("-created_at")[:100]
-        return Response({"results": [services.shared_item(t) for t in qs]})
+        qs = services.pa_tasks_qs().exclude(status=Status.CANCELLED).order_by("-created_at")
+        if not request.user.is_md and not request.user.is_pa:
+            qs = qs.filter(created_by=request.user)  # only what they gave the PA
+        return Response({"results": [services.shared_item(t) for t in qs[:100]]})
 
     @idempotent("pa_tasks.create")
     def post(self, request):
-        if not (request.user.is_md or request.user.is_mg):
-            return error("forbidden", f"Only {services.md_address()} or the manager can give the PA a task.", 403)
+        if request.user.is_pa:
+            return error("forbidden", "Your own work goes on your own list.", 403)
         s = PaTaskInputSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         task = services.create_pa_task(request.user, s.validated_data,
@@ -273,18 +254,20 @@ class PaTaskListView(APIView):
 
 
 class MgTaskListView(APIView):
-    """The manager's list; the MD or the PA gives her a task."""
+    """The manager's list; anyone else on the team gives her a task."""
 
     permission_classes = [IsMDOrPA]
 
     def get(self, request):
-        qs = services.mg_tasks_qs().exclude(status=Status.CANCELLED).order_by("-created_at")[:100]
-        return Response({"results": [services.shared_item(t) for t in qs]})
+        qs = services.mg_tasks_qs().exclude(status=Status.CANCELLED).order_by("-created_at")
+        if not request.user.is_md and not request.user.is_mg:
+            qs = qs.filter(created_by=request.user)
+        return Response({"results": [services.shared_item(t) for t in qs[:100]]})
 
     @idempotent("mg_tasks.create")
     def post(self, request):
-        if not (request.user.is_md or request.user.is_pa):
-            return error("forbidden", "Only the MD or the PA can give the manager a task.", 403)
+        if request.user.is_mg:
+            return error("forbidden", "Your own work goes on your own list.", 403)
         s = PaTaskInputSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         task = services.create_mg_task(request.user, s.validated_data)
@@ -372,7 +355,7 @@ class DelegationListView(APIView):
     permission_classes = [IsMDOrPA]
 
     def get(self, request):
-        qs = services.delegated_qs().order_by("-created_at")[:100]
+        qs = services.delegated_visible_qs(request.user).order_by("-created_at")[:100]
         return Response({"results": [services.shared_item(t) for t in qs]})
 
     @idempotent("delegations.create")
@@ -848,6 +831,60 @@ class ToldView(APIView):
         return Response({"reminders": reminders, "alerts": alerts})
 
 
+class TeamView(APIView):
+    """The team: everyone may see who is on it (names and jobs only); the MD adds people."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        people = services.team(active=not request.user.is_md)  # the MD also sees switched-off accounts
+        return Response({"results": [services.person_item(u, request.user) for u in people]})
+
+    def post(self, request):
+        person = services.team_add(request.user, request.data if isinstance(request.data, dict) else {})
+        return Response(services.person_item(person, request.user), status=201)
+
+
+class TeamMemberView(APIView):
+    """The MD changes one person: name, job, department, gender, password, or switches the account off / on."""
+    permission_classes = [IsMD]
+
+    def patch(self, request, user_id):
+        person = services.team_update(request.user, user_id, request.data if isinstance(request.data, dict) else {})
+        return Response(services.person_item(person, request.user))
+
+
+class ExecuteView(APIView):
+    """The phone's "save" for a card of the team's kind (work for a person, a meeting with them, a message, one's
+    own item), and for a card with several such instructions: done on the server by the same path the voice uses.
+    The card is untrusted: every person is looked up again, and the service functions check what the speaker may do."""
+    permission_classes = [IsMDOrPA]
+
+    @idempotent("assistant.execute")
+    def post(self, request):
+        from . import actions
+
+        card = (request.data or {}).get("card") if isinstance(request.data, dict) else None
+        if not isinstance(card, dict) or not card.get("action"):
+            return error("invalid", "Nothing to save.", 422)
+        result = actions.run_card(request.user, card)
+        if not result["saved"] and result["failed"]:
+            return error("not_saved", result["failed"][0][1], 422, failed=[{"title": t, "message": m} for t, m in result["failed"]])
+        return Response({"en": result["en"], "hi": result["hi"], "saved": result["saved"],
+                         "failed": [{"title": t, "message": m} for t, m in result["failed"]], "undo": bool(result["undo"])},
+                        status=201)
+
+
+class UndoView(APIView):
+    """The Undo button (and "undo" said aloud goes the same way): what JARVIS saved a moment ago is taken back."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        from . import actions
+
+        done = actions.undo_last(request.user)
+        return Response(done)
+
+
 class AlertAckView(APIView):
     permission_classes = [IsMDOrPA]
 
@@ -860,6 +897,8 @@ class AlertAckView(APIView):
             alert.save(update_fields=["acknowledged_at"])
         told = None
         if request.data.get("seen") in (True, "true", 1, "1"):
-            # "Shall I tell Sir you've seen it?" — yes: he learns that it was seen (no task goes unseen).
+            # "Shall I tell Sunil you've seen it?" — yes: whoever gave the task or sent the message learns it was seen.
             told = services.tell_sender_seen(request.user, alert)
-        return Response({"acknowledged": str(alert.id), "told": str(told.id) if told else None})
+        told_to = services.giver_words(told.recipient) if told else ("", "")
+        return Response({"acknowledged": str(alert.id), "told": str(told.id) if told else None,
+                         "told_to": told_to[0], "told_to_hi": told_to[1]})

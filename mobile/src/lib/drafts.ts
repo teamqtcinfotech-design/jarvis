@@ -2,10 +2,14 @@ import { dayLabel } from './format';
 import type { Draft, DraftAction } from './types';
 
 export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delegation', 'team_delegation', 'pa_task', 'pa_meeting',
+  'pa_self_task', 'mg_task', 'person_task', 'person_meeting', 'own_task'];
+
+/** Cards of the team's kind, saved on the server by the same path the voice uses (/assistant/execute/). */
+export const SERVER_SAVED: DraftAction[] = ['person_task', 'person_meeting', 'own_task', 'message', 'pa_task', 'pa_meeting',
   'pa_self_task', 'mg_task'];
 
 /** Cards that end with a question ("shall I save it?") and wait for a yes / no / change. */
-export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'accept_request', 'decline_request', 'complete', 'remember',
+export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'message', 'accept_request', 'decline_request', 'complete', 'remember',
   'change_task', 'delete_task'];
 
 const CHANGE_LABEL: Record<string, string> = {
@@ -50,6 +54,18 @@ export function draftHeading(d: Draft, md = 'Sir', him = 'him'): { title: string
       return { title: `Task for ${d.mg_name || 'the manager'}`, detail: `${d.mg_name || 'The manager'} is told at once.`, icon: 'person-outline' };
     case 'pa_self_task':
       return { title: 'Your own task', detail: `On your list. ${md} can see it; it is not sent to ${him}.`, icon: 'person-outline' };
+    case 'person_task':
+      return {
+        title: `Task for ${pa}`,
+        detail: (d.assignees?.length ?? 0) > 1 ? `${d.assignees?.length} people · each gets it and is told at once` : `${pa} is told at once. You hear when it is done.`,
+        icon: (d.assignees?.length ?? 0) > 1 ? 'people-outline' : 'person-outline',
+      };
+    case 'person_meeting':
+      return { title: `Meeting with ${pa}`, detail: `${pa} is told. You both get reminders.`, icon: 'people-outline' };
+    case 'own_task':
+      return { title: 'Your own work', detail: `On your list. ${md} can see your work; your personal items only you can see.`, icon: 'person-outline' };
+    case 'message':
+      return { title: `Message to ${pa}`, detail: 'A message, not a task: nothing to tick off.', icon: 'chatbubble-ellipses-outline' };
     case 'accept_request':
       return { title: 'Accept request', detail: 'It will be added to your list.', icon: 'checkmark-circle-outline' };
     case 'decline_request':
@@ -82,7 +98,8 @@ export function describeDraft(d: Draft, md = 'Sir'): string {
       : x.targets?.length ? x.targets.map((t) => t.title).join(' + ')
       : x.target ? x.target.title : x.title;
     const when = x.due_date ? `, ${dayLabel(x.due_date)}${x.due_time ? ` ${x.due_time}` : ''}` : '';
-    const who = x.action === 'delegation' && x.staff ? `, for ${x.staff.name}` : '';
+    const who = x.action === 'delegation' && x.staff ? `, for ${x.staff.name}`
+      : x.assignees?.length ? `, for ${x.assignees.map((a) => a.name).join(' and ')}` : '';
     return `${draftHeading(x, md).title}: ${what}${when}${who}`;
   };
   // Several things in one breath: the whole list, so "second one 9 baje" or "sab save karo" are read right.

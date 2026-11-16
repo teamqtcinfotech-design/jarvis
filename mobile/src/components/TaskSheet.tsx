@@ -41,12 +41,16 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
 
   const isMD = user?.role === 'MD';
   const isStaff = item.assignee?.type === 'STAFF';
-  // A task on the PA's or the manager's list. The one whose list it is moves it (status); the MD (or whoever gave
-  // it) can change or cancel it.
-  const isPaTask = item.assignee?.type === 'PA' || item.assignee?.type === 'MG';
-  const isMine = !isMD && item.assignee?.type === (user?.role === 'MG' ? 'MG' : 'PA');
-  const ownPaTask = isPaTask && (item.origin === 'PA_SELF' || item.origin === 'MG_SELF'); // their own: no one is told each step
-  const toldSir = ownPaTask ? '' : ` I've told ${md},`;
+  // A task on a team member's list. The one whose list it is moves it (status); the MD, or whoever gave it, can
+  // change or cancel it. Their own personal items are theirs to change as they like.
+  const myId = dash?.team?.find((t) => t.you)?.id;
+  const isPaTask = item.assignee?.type === 'USER' || item.assignee?.type === 'PA' || item.assignee?.type === 'MG';
+  const isMine = !isMD && isPaTask && myId != null && item.assignee?.user_id === myId;
+  const ownPaTask = isPaTask && ['SELF', 'PA_SELF', 'MG_SELF'].includes(item.origin ?? ''); // their own: no one is told each step
+  const gaveIt = myId != null && item.created_by_id === myId;
+  const direct = isMD || gaveIt || item.scope === 'private'; // changes it straight away (anyone else proposes to the MD)
+  const giver = item.created_by || md;
+  const toldSir = ownPaTask ? '' : ` I've told ${giver},`;
   const paStatus = (status: string, note = '') =>
     api(`/pa-tasks/${item.id}/status/`, { method: 'POST', body: { status, expected_version: item.version, note } });
   const base = item.scope === 'private' ? `/private-tasks/${item.id}/` : `/shared-tasks/${item.id}/`;
@@ -79,12 +83,12 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
   // A cancel is undone from the Cancelled list, but it still asks first.
   const confirmCancel = () => {
     Alert.alert(
-      isMD ? 'Cancel this task?' : 'Propose cancelling this task?',
-      isMD ? 'It goes to the Cancelled list, where you can restore it.' : `${md} will be asked to agree.`,
+      direct ? 'Cancel this task?' : 'Propose cancelling this task?',
+      direct ? 'It goes to the Cancelled list, where you can restore it.' : `${md} will be asked to agree.`,
       [
         { text: 'Keep it', style: 'cancel' },
         {
-          text: isMD ? 'Cancel task' : 'Propose',
+          text: direct ? 'Cancel task' : 'Propose',
           style: 'destructive',
           onPress: () => run('cancel', () => api(base, { method: 'PATCH', body: { expected_version: item.version, status: 'CANCELLED' } }),
             `Cancelled, ${address}.`, `कैंसल कर दिया, ${addressHi}।`),
@@ -144,7 +148,8 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
               </Txt>
             ) : (
               <Txt variant="small">
-                Given by {md} to <Txt variant="heading" style={{ fontSize: 13 }}>{item.assignee.staff_name}</Txt> · {item.status_label}
+                {item.origin === 'MEET' || item.origin === 'MD_MEET_PA' ? 'Meeting set by ' : 'Given by '}{gaveIt ? 'you' : giver} to{' '}
+                <Txt variant="heading" style={{ fontSize: 13 }}>{isMine ? 'you' : item.assignee.staff_name}</Txt> · {item.status_label}
               </Txt>
             )}
             {item.hold_reason ? <Txt variant="small" style={{ marginTop: 2 }}>On hold: {item.hold_reason}</Txt> : null}
@@ -155,7 +160,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
         {message ? <Txt variant="small" style={{ marginTop: 12, color: colors.warn }}>{message}</Txt> : null}
 
         <View style={s.actions}>
-          {closed && (item.scope === 'private' || isMD || ownPaTask) ? (
+          {closed && (item.scope === 'private' || direct || ownPaTask) ? (
             <Button
               title={item.status === 'CANCELLED' ? 'Restore' : 'Reopen'}
               icon="refresh-outline"
@@ -219,14 +224,14 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
           ) : (
             <>
               <Button
-                title={isMD ? 'Mark done' : 'Propose: mark done'}
+                title={direct ? 'Mark done' : 'Propose: mark done'}
                 icon="checkmark-done"
                 loading={busy === 'done'}
                 onPress={() => run('done', () => api(`${base}complete/`, { method: 'POST', body: { expected_version: item.version } }), `Marked done, ${address}.`, `पूरा हुआ मार्क कर दिया, ${addressHi}।`)}
               />
               <View style={{ flexDirection: 'row', marginTop: 8 }}>
                 <Button
-                  title={isMD ? 'Move to tomorrow' : 'Propose tomorrow'}
+                  title={direct ? 'Move to tomorrow' : 'Propose tomorrow'}
                   kind="secondary"
                   compact
                   loading={busy === 'move'}
@@ -234,7 +239,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                   style={{ flex: 1, marginRight: 8 }}
                 />
                 <Button
-                  title={isMD ? 'Cancel task' : 'Propose cancel'}
+                  title={direct ? 'Cancel task' : 'Propose cancel'}
                   kind="danger"
                   compact
                   loading={busy === 'cancel'}

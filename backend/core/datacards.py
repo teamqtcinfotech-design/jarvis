@@ -214,9 +214,8 @@ def _stats_view(user, dash: dict, include_private: bool) -> dict:
         {"label": "Done today", "value": dash["completed_today"], "tone": "success"},
         {"label": "Need your OK" if user.is_md else f"Waiting for {services.md_address()}", "value": len(pending), "tone": "warn"},
     ]
-    if user.is_md:
-        open_pa = [t for t in dash.get("pa_tasks", []) if t["status"] not in (Status.COMPLETED, Status.CANCELLED)]
-        stats.append({"label": f"With {dash.get('pa_name') or 'your PA'}", "value": len(open_pa), "tone": "info"})
+    given_open = [t for t in dash.get("given_tasks", []) if t["status"] not in (Status.COMPLETED, Status.CANCELLED)]
+    stats.append({"label": "Given by you", "value": len(given_open), "tone": "info"})
     staff_open = [t for t in dash["delegated"] if t["status"] not in (Status.COMPLETED, Status.CANCELLED)]
     stats.append({"label": "With staff", "value": len(staff_open), "tone": "info"})
     rows = _rows(keep(dash["overdue"]) + keep(dash["today"]), include_private)
@@ -288,12 +287,13 @@ def _performance_view(user) -> dict:
             if due and due < now:
                 p["late"] += 1
 
-    for t in services.delegated_qs().filter(created_at__gte=since).exclude(status=Status.CANCELLED):
+    for t in services.delegated_visible_qs(user).filter(created_at__gte=since).exclude(status=Status.CANCELLED):
         bump(t.staff.name if t.staff else "Staff", t.staff.department if t.staff else "", t)
-    if user.is_md:
-        pa = services.get_pa()
-        for t in services.pa_tasks_qs().exclude(origin=SharedTask.Origin.MD_MEET_PA).filter(created_at__gte=since).exclude(status=Status.CANCELLED):
-            bump(pa.spoken_name if pa else "PA", "PA", t)
+    # Work given to people on the team: all of it for the MD (he sees all work), what they gave for anyone else.
+    given = services.team_work_qs() if user.is_md else services.given_qs(user)
+    for t in given.filter(origin__in=services.GIVEN_ORIGINS, created_at__gte=since).exclude(status=Status.CANCELLED):
+        if t.assignee_user_id:
+            bump(t.assignee_user.spoken_name, t.assignee_user.department or t.assignee_user.title_label, t)
 
     ordered = sorted(people.values(), key=lambda p: (-p["assigned"], p["name"]))
     rows = []
@@ -333,19 +333,19 @@ def _done_view(user, include_private: bool) -> dict:
     now = timezone.now()
     since = now - timedelta(days=14)
     items = []
-    if user.is_md and include_private:
+    if include_private:
         for t in PrivateTask.objects.filter(owner=user, status=Status.COMPLETED, completed_at__gte=since):
             items.append((t.completed_at, t.title, "You", "private", str(t.id), t.version))
-    shared = SharedTask.objects.filter(status=Status.COMPLETED, completed_at__gte=since).select_related("staff")
-    if user.is_pa:
-        shared = shared.exclude(assignee_type=SharedTask.Assignee.MD) | SharedTask.objects.filter(
-            status=Status.COMPLETED, completed_at__gte=since, origin=SharedTask.Origin.PA_REQUEST).select_related("staff")
-    pa = services.get_pa()
-    for t in shared.distinct():
-        mg = services.get_manager()
-        who = (t.staff.name if t.staff else pa.spoken_name if pa and t.assignee_type == SharedTask.Assignee.PA
-               else mg.spoken_name if mg and t.assignee_type == SharedTask.Assignee.MG
-               else "You" if user.is_md else services.md_address())
+    shared = services.visible_shared_qs(user).filter(status=Status.COMPLETED, completed_at__gte=since)
+    for t in shared:
+        if t.staff_id:
+            who = t.staff.name
+        elif t.assignee_user_id == user.id:
+            who = "You"
+        elif t.assignee_type == SharedTask.Assignee.MD:
+            who = services.md_address()
+        else:
+            who = t.assignee_user.spoken_name if t.assignee_user_id else "Team"
         items.append((t.completed_at, t.title, who, "shared", str(t.id), t.version))
     items.sort(key=lambda x: x[0], reverse=True)
     today = tu.today_local()
@@ -367,17 +367,15 @@ def _done_view(user, include_private: bool) -> dict:
 def _closed_items(user, include_private: bool, statuses: tuple, since: datetime | None):
     """(when, item dict) for everything this person may see with one of these statuses, newest first."""
     items = []
-    if user.is_md and include_private:
-        qs = PrivateTask.objects.filter(owner=user, status__in=statuses)
+    if include_private:
+        qs = services.private_qs(user).filter(status__in=statuses)
         if since:
             qs = qs.filter(updated_at__gte=since)
         items += [(t.completed_at or t.updated_at, services.private_item(t)) for t in qs]
-    shared = SharedTask.objects.filter(status__in=statuses).select_related("staff")
+    shared = services.visible_shared_qs(user).filter(status__in=statuses)
     if since:
         shared = shared.filter(updated_at__gte=since)
-    if user.is_pa:
-        shared = shared.exclude(assignee_type=SharedTask.Assignee.MD) | shared.filter(origin=SharedTask.Origin.PA_REQUEST)
-    items += [(t.completed_at or t.updated_at, services.shared_item(t)) for t in shared.distinct()]
+    items += [(t.completed_at or t.updated_at, services.shared_item(t)) for t in shared]
     items.sort(key=lambda x: x[0] or timezone.now(), reverse=True)
     return items
 
@@ -467,19 +465,20 @@ def _pending_view(user, dash: dict, include_private: bool, official_only: bool =
     rows = []
     for item in split["items"][:60]:
         row = _row(item, True)
-        if user.is_md:
+        if user.is_md or row["private"]:
             row["who"] = "Personal" if row["private"] else "Official"
         else:
-            row["who"] = "Your own" if item.get("origin") == SharedTask.Origin.PA_SELF else f"From {sir}"
+            giver = item.get("created_by") or sir
+            row["who"] = "Your own" if item.get("origin") in services.OWN_ORIGINS else f"From {giver}"
         row["day"] = row["day"] or "No date"
         rows.append(row)
     if user.is_md:
         stats = [{"label": "Official", "value": counts["official"], "tone": "accent", "icon": "briefcase-outline"}]
-        if "personal" in counts:
-            stats.append({"label": "Personal", "value": counts["personal"], "tone": "info", "icon": "lock-closed-outline"})
     else:
-        stats = [{"label": f"From {sir}", "value": counts["from_sir"], "tone": "accent", "icon": "briefcase-outline"},
+        stats = [{"label": "Given to you", "value": counts["given_to_me"], "tone": "accent", "icon": "briefcase-outline"},
                  {"label": "Your own", "value": counts["own"], "tone": "info", "icon": "person-outline"}]
+    if "personal" in counts:
+        stats.append({"label": "Personal", "value": counts["personal"], "tone": "info", "icon": "lock-closed-outline"})
     stats.append({"label": "Late", "value": counts["late"], "tone": "danger" if counts["late"] else "muted",
                   "icon": "alert-circle-outline"})
     stats.append({"label": "Due today", "value": counts["due_today"], "tone": "warn" if counts["due_today"] else "muted",
@@ -576,13 +575,9 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
             p["from"], p["to"] = today, today + timedelta(days=6)
         if kind == "today" and not p["from"]:
             p["from"] = p["to"] = today
-        if kind == "private" and not user.is_md:
-            return None
         p["who"] = p["who"] or preset.get("who", "")
         p["filter"] = p["filter"] or preset.get("filter", "")
         return listviews.tasks_view(user, p, include_private, missing=missing)
-    if kind == "private" and not user.is_md:
-        return None
     if kind == "busy" and user.is_md:
         kind = "today"
     dash = services.dashboard(user)
@@ -621,8 +616,11 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
             else:
                 split_en, split_hi = f"{total} official pending", f"{total} ऑफ़िशियल काम बाकी हैं"
         else:
-            split_en = f"{total} pending: {counts['from_sir']} from {sir} and {counts['own']} your own"
-            split_hi = f"{total} काम बाकी हैं: {counts['from_sir']} {sir_hi} के दिए हुए और {counts['own']} आपके अपने"
+            personal = counts.get("personal", 0)
+            split_en = f"{total} pending: {counts['given_to_me']} given to you and {counts['own']} your own" + (
+                f", {personal} personal" if personal else "")
+            split_hi = f"{total} काम बाकी हैं: {counts['given_to_me']} दिए हुए और {counts['own']} आपके अपने" + (
+                f", {personal} पर्सनल" if personal else "")
         extra_en = "; ".join(x for x in (f"{counts['late']} late" if counts["late"] else "", f"{counts['due_today']} due today" if counts["due_today"] else "") if x)
         extra_hi = "; ".join(x for x in (f"{counts['late']} लेट" if counts["late"] else "", f"{counts['due_today']} आज के" if counts["due_today"] else "") if x)
         first = view["rows"][0]["title"] if view["rows"] else ""
@@ -688,10 +686,11 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         name = pa.spoken_name if pa else "your PA"
         view = _progress_table("pa", f"{name}'s tasks" if user.is_md else "My tasks", items, include_private,
                                "Nothing given yet" if user.is_md else "Nothing on your list yet")
-        own_ids = {i["id"] for i in items if i.get("origin") == SharedTask.Origin.PA_SELF}
-        for row in view["rows"]:  # say which ones the MD gave and which are the PA's own
+        own_ids = {i["id"] for i in items if i.get("origin") in services.OWN_ORIGINS}
+        givers = {i["id"]: i.get("created_by") or sir for i in items}
+        for row in view["rows"]:  # say which ones were given (and by whom) and which are the person's own
             row["who"] = (f"{name}'s own" if user.is_md else "Your own") if row["id"] in own_ids else \
-                ("Given by you" if user.is_md else f"From {sir}")
+                ("Given by you" if user.is_md else f"From {givers.get(row['id'], sir)}")
         open_rows = [r for r in view["rows"] if r["progress"] < 100]
         if not open_rows:
             return _summ(view, address, address_hi, f"{name} has nothing open." if user.is_md else "nothing is open on your list.",

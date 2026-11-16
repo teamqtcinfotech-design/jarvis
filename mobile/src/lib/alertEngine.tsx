@@ -1036,11 +1036,17 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         }
         return;
       }
-      // 'seen': yes = the MD is told the PA has seen it; no = it simply leaves the screen.
+      // 'seen': yes = whoever gave the task (or sent the message) is told it was seen; no = it simply leaves the screen.
       clearKey(item);
       try {
-        if (item.alertId) await api(`/alerts/${item.alertId}/ack/`, { method: 'POST', body: { seen: yes } });
-        if (yes) sayTwin(`Told ${md.en}, ${address}.`, `${md.hi} को बता दिया, ${addressHi}।`, { interrupt: true });
+        let to = md.en;
+        let toHi = md.hi;
+        if (item.alertId) {
+          const res = await api<{ told_to?: string; told_to_hi?: string }>(`/alerts/${item.alertId}/ack/`, { method: 'POST', body: { seen: yes } });
+          to = res.data?.told_to || to;
+          toHi = res.data?.told_to_hi || toHi;
+        }
+        if (yes) sayTwin(`Told ${to}, ${address}.`, `${toHi} को बता दिया, ${addressHi}।`, { interrupt: true });
       } catch {
         sayTwin(`Sorry ${address}, I couldn't reach the server.`, `माफ़ कीजिए ${addressHi}, सर्वर से संपर्क नहीं हो पाया।`, { interrupt: true });
       }

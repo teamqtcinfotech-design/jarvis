@@ -1,4 +1,5 @@
-export type Role = 'MD' | 'PA' | 'MG';
+/** MD; the PA; the manager; TM = every other team member (accountant, farm manager, director ...). */
+export type Role = 'MD' | 'PA' | 'MG' | 'TM';
 export type Priority = 'URGENT' | 'HIGH' | 'NORMAL' | 'LOW';
 export type Kind = 'TASK' | 'MEETING' | 'CALL' | 'PAYMENT' | 'FOLLOW_UP';
 export type Status = 'OPEN' | 'IN_PROGRESS' | 'BLOCKED' | 'COMPLETED' | 'CANCELLED';
@@ -7,6 +8,9 @@ export interface SessionUser {
   username: string;
   role: Role;
   name: string;
+  /** The person's job as said aloud ("Accountant", "PA", "Managing Director") and their department. */
+  title?: string;
+  department?: string;
   /** How JARVIS addresses this person ("Sir", "Ma'am", a name), and the same in Devanagari. Set on the server. */
   address?: string;
   address_hi?: string;
@@ -33,9 +37,20 @@ export interface TaskItem {
   due_label: string;
   overdue: boolean;
   version: number;
-  assignee: { type: 'MD' | 'PA' | 'MG' | 'STAFF'; staff_id?: number | null; staff_name?: string | null; department?: string | null };
+  /** Who it is for: the MD's own list (MD), a team member (USER: user_id, name in staff_name, job in department),
+   *  or a TaskPanel staff member (STAFF). PA / MG are the lists from before the team. */
+  assignee: {
+    type: 'MD' | 'USER' | 'PA' | 'MG' | 'STAFF';
+    staff_id?: number | null;
+    user_id?: number | null;
+    staff_name?: string | null;
+    department?: string | null;
+  };
+  /** GIVEN (one person gave it to another), SELF (the person's own work), MEET (a meeting the giver set with them),
+   *  PA_REQUEST (a request the MD accepted), or a TaskPanel delegation. */
   origin?: string;
   created_by?: string | null;
+  created_by_id?: number | null;
   description?: string;
   category_key?: string;
   sync_state?: 'NOT_REQUIRED' | 'PENDING' | 'SYNCED' | 'FAILED';
@@ -67,6 +82,19 @@ export interface BusyWindow {
   label: string;
 }
 
+/** One person on the team (names and jobs only; everyone may see who is on the team). */
+export interface TeamMember {
+  id: number;
+  name: string;
+  username: string;
+  role: Role;
+  title: string;
+  department: string;
+  gender: '' | 'male' | 'female';
+  active: boolean;
+  you?: boolean;
+}
+
 export interface Dashboard {
   user: SessionUser;
   /** The two names as JARVIS says them (set on the server), so no screen carries a typed-in name. */
@@ -86,11 +114,14 @@ export interface Dashboard {
   delegated: TaskItem[];
   taskpanel: { mode: string; configured: boolean; label: string; linked: boolean };
   md_busy_today?: BusyWindow[];
-  pa_tasks?: TaskItem[]; // MD view: tasks he gave the PA, with progress
-  mg_tasks?: TaskItem[]; // MD view: tasks he gave the manager, with progress
-  given_tasks?: TaskItem[]; // PA / manager view: what they gave the other one, with progress
+  pa_tasks?: TaskItem[]; // MD view: the PA's list (kept for older screens)
+  mg_tasks?: TaskItem[]; // MD view: the manager's list (kept for older screens)
+  given_tasks?: TaskItem[]; // everyone: what they gave others on the team, with progress
+  team_tasks?: TaskItem[]; // MD view: everybody else's work (he sees all work)
   manager_name?: string;
-  md_tasks?: TaskItem[]; // PA view: MD tasks that came from her requests
+  md_tasks?: TaskItem[]; // the MD's official work: all of it (PA, manager) or what came from their own requests
+  /** Everyone on the team (names and jobs). */
+  team?: TeamMember[];
 }
 
 export interface ServerAlert {
@@ -174,6 +205,10 @@ export type DraftAction =
   | 'pa_meeting'
   | 'pa_self_task'
   | 'mg_task'
+  | 'person_task'
+  | 'person_meeting'
+  | 'own_task'
+  | 'message'
   | 'screen'
   | 'choose_destination'
   | 'accept_request'
@@ -263,7 +298,7 @@ export interface DataView {
 export interface ScheduleAdvice {
   /** His own meeting over another one: the card cannot be saved until he picks a way out. */
   hard?: boolean;
-  for: 'self' | 'pa' | 'md';
+  for: 'self' | 'person' | 'pa' | 'md';
   asked: number;
   question: string;
   question_hi: string;
@@ -301,9 +336,16 @@ export interface Draft {
   category_key: string;
   categories: CategoryOption[];
   warnings: string[];
+  /** Who it is for, as the read-back names them ("Sunil", "Sunil and Mansi"). */
   pa_name: string;
   /** mg_task: the manager's name as JARVIS says it. */
   mg_name?: string;
+  /** person_task / person_meeting / message: the people on the team it is for (looked up again on the server). */
+  assignees?: { id: number; name: string; title: string }[];
+  /** A group said by name ("the Accounts team", "everyone"). */
+  group_label?: string;
+  /** message: its own words, kept whole. */
+  message?: string;
   team: { label: string; members: StaffOption[]; skipped: StaffOption[] } | null;
   target: { id: string; title: string; scope?: string; version?: number } | null;
   /** Every item this applies to: "mark both as done", "accept all three". */
@@ -319,8 +361,11 @@ export interface Draft {
   schedule?: ScheduleAdvice | null;
   /** confirm_pending: the day / time to apply to the waiting card before saving ("haan" to the offered slot, or "6 baje"). */
   overrides?: { due_date?: string; due_time?: string; duration_minutes?: number; batch?: Draft[] };
-  /** The server already saved it (a clear meeting booked at once, or a plain reminder): the lists refresh now. */
+  /** The server already saved it (a clear instruction done at once, a meeting booked, a plain reminder): the lists
+   *  refresh now. */
   booked?: boolean;
+  /** What was just saved can be taken back for a minute (the Undo button, or "undo" said aloud). */
+  undo?: boolean;
   reminder_saved?: boolean;
   /** The server saved what the waiting card held (and more): the card closes. */
   card_done?: boolean;

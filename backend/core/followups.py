@@ -16,8 +16,8 @@ from django.utils import timezone
 
 from . import ai_brain, scheduling, services
 from . import timeutils as tu
-from .models import Alert, Priority, SharedTask, Status, TaskRequest, User
-from .services import delegated_qs, get_md, get_pa, get_prefs, md_private_qs, pa_tasks_qs, shared_md_tasks_qs
+from .models import Alert, Priority, Status, TaskRequest, User
+from .services import delegated_qs, get_md, get_pa, get_prefs, md_private_qs, person_tasks_qs, private_qs, shared_md_tasks_qs
 
 log = logging.getLogger("jarvis.followups")
 
@@ -63,7 +63,7 @@ def morning_briefings(now=None) -> int:
     now = now or timezone.now()
     local = tu.to_local(now)
     raised = 0
-    for user in [u for u in (get_md(), get_pa()) if u]:
+    for user in services.team():
         prefs = get_prefs(user)
         if not prefs.get("briefingEnabled", True):
             continue
@@ -103,14 +103,12 @@ def piled_up(now=None) -> int:
     during it, that person is told once, in a sensible order (urgent first, then the nearest deadline, then first
     come first served), and asked whether the order is right. One or two items are not worth the question."""
     from . import scheduling
-    from .models import Kind, SharedTask
+    from .models import Kind
 
     now = now or timezone.now()
     raised = 0
     rank = {Priority.URGENT: 0, Priority.HIGH: 1, Priority.NORMAL: 2, Priority.LOW: 3}
-    for person in (get_md(), get_pa(), services.get_manager()):
-        if not person:
-            continue
+    for person in services.team():
 
         def arrived(start, end) -> list[tuple]:
             """(priority, due or None, when it came, title) for everything that reached this person in that time."""
@@ -120,8 +118,8 @@ def piled_up(now=None) -> int:
                                                   created_at__gte=start, created_at__lte=end)
                 return [(str((r.payload or {}).get("priority") or Priority.NORMAL), None, r.created_at,
                          str((r.payload or {}).get("title") or "Request")) for r in rows]
-            rows = SharedTask.objects.filter(assignee_type=services.bucket_of(person), status__in=OPEN,
-                                             created_at__gte=start, created_at__lte=end).exclude(origin__in=services.OWN_ORIGINS)
+            rows = person_tasks_qs(person).filter(status__in=OPEN, created_at__gte=start, created_at__lte=end) \
+                .exclude(origin__in=services.OWN_ORIGINS)
             return [(t.priority, t.due_at, t.created_at, t.title) for t in rows]
 
         for c in scheduling.commitments(person, tu.to_local(now).date()):
@@ -205,22 +203,41 @@ def run(now=None) -> int:
                          spoken_hi=f"{sir_hi}, {req.requested_by.spoken_name} की रिक्वेस्ट '{title}' {hours} घंटे से इंतज़ार में है। "
                                    f"आप कह सकते हैं: मंज़ूर करो, या मना करो।")
 
-    # 3) Tasks Sir gave Mansi, not started after a day
-    if pa:
-        for task in pa_tasks_qs().filter(status=Status.OPEN, created_at__lte=now - PA_NOT_STARTED).exclude(origin=SharedTask.Origin.MD_MEET_PA):
-            raised += _raise(pa, f"notstarted:{task.id}", "Not started yet", task.title,
-                             f"{pa_name}, {sir}'s task '{task.title}' is not started yet. You can say: start it, or put it on hold with a reason.",
-                             spoken_hi=f"{pa_name}, {sir_hi} का टास्क '{task.title}' अभी शुरू नहीं हुआ। "
+    # 3) Work someone gave a team member, not started after a day: the team member is nudged, in the giver's name
+    members = [u for u in services.team() if not u.is_md]
+    for person in members:
+        for task in person_tasks_qs(person).filter(status=Status.OPEN, created_at__lte=now - PA_NOT_STARTED,
+                                                   origin__in=services.GIVEN_ORIGINS):
+            giver, giver_hi = services.giver_words(task.created_by)
+            name = person.spoken_name
+            raised += _raise(person, f"notstarted:{task.id}", "Not started yet", task.title,
+                             f"{name}, {giver}'s task '{task.title}' is not started yet. You can say: start it, or put it on hold with a reason.",
+                             spoken_hi=f"{name}, {giver_hi} का टास्क '{task.title}' अभी शुरू नहीं हुआ। "
                                        f"आप कह सकते हैं: शुरू करो, या कारण के साथ होल्ड पर रखो।")
 
-    # 4) End of day: what slipped, for each of them about their own list, at each one's own summary time
-    if digest_due(md_prefs) or (pa and digest_due(get_prefs(pa))):
-        today = local.date()
+    # 4) End of day: what slipped, for each person about their own list, at each one's own summary time
+    today = local.date()
 
-        def due_day(t):
-            return tu.to_local(t.due_at).date() if t.due_at else t.due_date
+    def due_day(t):
+        return tu.to_local(t.due_at).date() if t.due_at else t.due_date
 
-        key = f"digest:{today.isoformat()}"
+    key = f"digest:{today.isoformat()}"
+    for person in members:
+        if not digest_due(get_prefs(person)) or _already(key + f"@{person.id}"):
+            continue
+        theirs = [t.title for t in person_tasks_qs(person).filter(status__in=OPEN).exclude(origin__in=services.MEET_ORIGINS)
+                  if (d := due_day(t)) and d <= today]
+        own_private = sum(1 for t in private_qs(person).filter(status__in=OPEN) if (d := due_day(t)) and d <= today)
+        if theirs or own_private:
+            name = person.spoken_name
+            n = len(theirs) + own_private
+            listed = "; ".join(theirs[:3]) or f"{own_private} personal"
+            spoken = (f"{name}, {n} thing{'s' if n > 1 else ''} slipped today: " + listed +
+                      ". Tell me if you want them moved, or put on hold with a reason.")
+            spoken_hi = (f"{name}, आज {n} काम रह गए: " + ("; ".join(theirs[:3]) or f"{own_private} पर्सनल") +
+                         "। बताइए अगर आगे बढ़ाऊँ, या कारण के साथ होल्ड पर रखूँ।")
+            raised += _raise(person, key, f"{n} slipped today", listed, spoken, spoken_hi=spoken_hi)
+    if digest_due(md_prefs):
         if digest_due(md_prefs) and not _already(key + f"@{md.id}"):
             # Oldest first, and how long it has been waiting: a thing three days late is said as such.
             def late_label(t, hindi=False):
@@ -249,15 +266,6 @@ def run(now=None) -> int:
                 spoken = head + " and ".join(parts) + ". Tell me if you want them moved to tomorrow."
                 spoken_hi = head_hi + " और ".join(parts_hi) + "। बताइए अगर कल पर ले जाऊँ।"
                 raised += _raise(md, key, f"{total} slipped today", " · ".join(parts), spoken, spoken_hi=spoken_hi)
-        if pa and digest_due(get_prefs(pa)) and not _already(key + f"@{pa.id}"):
-            hers = [t.title for t in pa_tasks_qs().filter(status__in=OPEN).exclude(origin=SharedTask.Origin.MD_MEET_PA)
-                    if (d := due_day(t)) and d <= today]
-            if hers:
-                spoken = (f"{pa_name}, {len(hers)} task{'s' if len(hers) > 1 else ''} slipped today: " + "; ".join(hers[:3]) +
-                          ". Tell me if you want them moved, or put on hold with a reason.")
-                spoken_hi = (f"{pa_name}, आज {len(hers)} टास्क रह गए: " + "; ".join(hers[:3]) +
-                             "। बताइए अगर आगे बढ़ाऊँ, या कारण के साथ होल्ड पर रखूँ।")
-                raised += _raise(pa, key, f"{len(hers)} slipped today", "; ".join(hers[:3]), spoken, spoken_hi=spoken_hi)
 
     # 5) Once a week (Monday from 10:00): tasks that still have no date, so they are not forgotten
     if local.weekday() == 0 and local.hour >= 10:
@@ -275,15 +283,18 @@ def run(now=None) -> int:
                              + "। जब चाहें, किसी के लिए भी दिन बता दीजिए।")
                 raised += _raise(md, key, f"{total} without a date", "; ".join(undated[:3]) or f"{private_undated} private", spoken,
                                  Priority.LOW, spoken_hi=spoken_hi)
-        if pa and not _already(key + f"@{pa.id}"):
-            undated = [t.title for t in pa_tasks_qs().filter(status__in=OPEN, due_at__isnull=True, due_date__isnull=True)
-                       .exclude(origin=SharedTask.Origin.MD_MEET_PA)]
+        for person in members:
+            if _already(key + f"@{person.id}"):
+                continue
+            undated = [t.title for t in person_tasks_qs(person).filter(status__in=OPEN, due_at__isnull=True, due_date__isnull=True)
+                       .exclude(origin__in=services.MEET_ORIGINS)]
             if undated:
-                spoken = (f"{pa_name}, {len(undated)} task{'s' if len(undated) > 1 else ''} still {'have' if len(undated) > 1 else 'has'} "
+                name = person.spoken_name
+                spoken = (f"{name}, {len(undated)} task{'s' if len(undated) > 1 else ''} still {'have' if len(undated) > 1 else 'has'} "
                           f"no date: " + "; ".join(undated[:3]) + ". Say a day for any of them whenever you like.")
-                spoken_hi = (f"{pa_name}, {len(undated)} टास्क की अभी भी कोई तारीख़ नहीं है: " + "; ".join(undated[:3])
+                spoken_hi = (f"{name}, {len(undated)} टास्क की अभी भी कोई तारीख़ नहीं है: " + "; ".join(undated[:3])
                              + "। जब चाहें, किसी के लिए भी दिन बता दीजिए।")
-                raised += _raise(pa, key, f"{len(undated)} without a date", "; ".join(undated[:3]), spoken, Priority.LOW,
+                raised += _raise(person, key, f"{len(undated)} without a date", "; ".join(undated[:3]), spoken, Priority.LOW,
                                  spoken_hi=spoken_hi)
     if raised:
         log.info("raised %d follow-up(s)", raised)

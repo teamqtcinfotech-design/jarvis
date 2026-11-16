@@ -23,7 +23,7 @@ class Command(BaseCommand):
         if not name or len(name) > 80:
             raise CommandError("Name must be 1–80 characters.")
         user.display_name = name
-        if user.is_pa:
+        if not user.is_md:
             user.first_name = name
         user.save(update_fields=["display_name", "first_name"])
         self.stdout.write(self.style.SUCCESS(f"{user.username} will now be called “{name}”."))

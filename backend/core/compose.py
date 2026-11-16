@@ -22,7 +22,7 @@ Rules:
 - Start with the recipient's name. Say what, and when if a date or time is given. Use only the facts given: never invent a day ("today"), a time, a reason or a place.
 - Mention urgency only when the priority is URGENT or HIGH ("urgent", "high priority"). Never mention a normal or low priority.
 - No filler: no "kindly requests", "at your earliest convenience", "please be informed", "as it is marked".
-- The MD speaks to the assistant politely but briefly ("please"); the assistant addresses the MD respectfully by the exact word given as md_address in the facts ("Sir, ..." / "Ma'am, ..."). In the examples below "Sir" stands for md_address and "Mansi" for the assistant's real name (recipient / sender).
+- The sender and the recipient can be anyone on the team (the MD, the PA, the manager, the accountant, a director ...). The MD speaks to others politely but briefly ("please"); everyone addresses the MD respectfully by the exact word given as md_address in the facts ("Sir, ..." / "Ma'am, ..."); colleagues speak to each other by name, courteously. In the examples below "Sir" stands for md_address and "Mansi" for a team member's real name (recipient / sender).
 - Do not sign off, do not add greetings like "hope you are well", do not mention JARVIS.
 - Write the message twice: "text" in the sender's own style in Roman letters (English, or Hinglish if the instruction was Hinglish; never Devanagari), and "text_hi" the same message in natural spoken Hindi in Devanagari (names stay as they are; numbers and times the way they are said).
 

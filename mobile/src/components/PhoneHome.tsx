@@ -104,7 +104,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const lateCount = data?.overdue.length ?? 0;
   // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
   const voiceItem = conv.itemToOpen && data
-    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
+    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.team_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
         .find((t) => t.id === conv.itemToOpen) ?? null
     : null;
 
@@ -135,8 +135,8 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     ? [
         { kind: 'today', label: "Today's plan", icon: 'today-outline' },
         { kind: 'week', label: 'This week', icon: 'bar-chart-outline' },
-        { kind: 'performance', label: 'Staff performance', icon: 'podium-outline' },
-        { kind: 'people', label: 'My staff', icon: 'people-outline' },
+        { kind: 'performance', label: 'Team performance', icon: 'podium-outline' },
+        { kind: 'people', label: 'My team', icon: 'people-outline' },
         { kind: 'done', label: 'Completed', icon: 'checkmark-done-outline' },
         { kind: 'late', label: 'Late items', icon: 'alert-circle-outline' },
         { kind: 'pa', label: `With ${paName}`, icon: 'person-outline' },

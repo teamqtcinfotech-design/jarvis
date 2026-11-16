@@ -23,10 +23,11 @@ import { type WakeStatus, wakeSetListening, wakeSetVoice, wakeSettings, wakeStar
  * (`/settings?section=voice`), so nothing needs a long scroll. Nothing technical (server, sync, usage) is shown.
  */
 
-type SectionKey = 'names' | 'voice' | 'alerts' | 'routine' | 'background' | 'memory';
+type SectionKey = 'team' | 'names' | 'voice' | 'alerts' | 'routine' | 'background' | 'memory';
 
 const SECTIONS: { key: SectionKey; title: string; detail: string; icon: string; mdOnly?: boolean }[] = [
-  { key: 'names', title: 'Names', detail: 'You, your PA and your manager', icon: 'people-outline', mdOnly: true },
+  { key: 'team', title: 'Team', detail: 'Add people, their jobs and logins', icon: 'people-outline', mdOnly: true },
+  { key: 'names', title: 'Your name', detail: 'And how JARVIS addresses you', icon: 'person-circle-outline', mdOnly: true },
   { key: 'voice', title: 'Voice & language', detail: 'Hindi or English, JARVIS’s voice', icon: 'mic-outline' },
   { key: 'alerts', title: 'Reminders & alerts', detail: 'Snooze, sound, quiet hours', icon: 'notifications-outline' },
   { key: 'routine', title: 'Work routine', detail: 'Office hours, weekly off, briefing', icon: 'calendar-outline' },
@@ -110,7 +111,8 @@ function SettingsScreen() {
         <Txt variant="title" numberOfLines={1} style={{ flex: 1, textAlign: 'center', marginRight: 40 }}>{open ? open.title : 'Settings'}</Txt>
       </View>
       {open ? (
-        <ScrollView contentContainerStyle={s.page}>
+        <ScrollView contentContainerStyle={s.page} keyboardShouldPersistTaps="handled">
+          {open.key === 'team' ? <TeamSection /> : null}
           {open.key === 'names' ? <NamesSection /> : null}
           {open.key === 'voice' ? <VoiceSection /> : null}
           {open.key === 'alerts' ? <AlertsSection /> : null}
@@ -131,7 +133,7 @@ function Menu() {
   const { user, signOut } = useSession();
   const { data: dash } = useDashboard();
   const isMD = user?.role === 'MD';
-  const role = isMD ? 'Managing Director' : user?.role === 'MG' ? 'Manager' : 'PA';
+  const role = user?.title || (isMD ? 'Managing Director' : user?.role === 'MG' ? 'Manager' : user?.role === 'PA' ? 'PA' : 'Team member');
   const name = user?.name || user?.username || '';
 
   return (
@@ -166,7 +168,7 @@ function Menu() {
         ))}
       </Card>
 
-      {!isMD ? <Txt variant="small" style={s.note}>{mdWord(dash)}’s personal tasks are private and never shown in this app.</Txt> : null}
+      {!isMD ? <Txt variant="small" style={s.note}>Personal items are private: yours only you see, and {mdWord(dash)}’s are never shown here.</Txt> : null}
       <Button title="Sign out" kind="danger" icon="log-out-outline" onPress={signOut} style={{ marginTop: 18 }} />
       <Txt variant="caption" style={{ textAlign: 'center', marginTop: 14 }}>JARVIS {Constants.expoConfig?.version ?? ''}</Txt>
     </ScrollView>
@@ -192,20 +194,154 @@ function NamesSection() {
   return (
     <Card>
       <NameField title="Your name" detail="The name JARVIS uses for you." value={user?.name ?? ''} onSave={saveName('myName')} />
-      <Row title="JARVIS calls you" detail="Also how your PA and manager hear you named." />
+      <Row title="JARVIS calls you" detail="Also how everyone on the team hears you named." />
       <View style={s.chips}>
         {['Sir', "Ma'am"].map((a) => (
           <Chip key={a} label={a} selected={prefs.addressAs === a} onPress={() => update({ addressAs: a })} />
         ))}
       </View>
-      <NameField title="Your PA's name" detail="How JARVIS names your PA, on every phone." value={dash?.pa_name ?? ''} onSave={saveName('paName')} />
-      <Row title={`${dash?.pa_name || 'Your PA'} is`} detail="So JARVIS says he or she correctly." />
-      <View style={s.chips}>
-        <Chip label="A man" selected={prefs.paGender === 'male'} onPress={() => update({ paGender: 'male' })} />
-        <Chip label="A woman" selected={prefs.paGender === 'female'} onPress={() => update({ paGender: 'female' })} />
-      </View>
-      <NameField title="Your manager's name" detail="How JARVIS names your manager, on every phone." value={dash?.manager_name ?? ''} onSave={saveName('managerName')} />
+      <Txt variant="caption" style={{ marginTop: 10 }}>Names, jobs and logins of {dash?.pa_name || 'your PA'} and everyone else are on the Team page.</Txt>
     </Card>
+  );
+}
+
+interface TeamPerson {
+  id: number;
+  name: string;
+  username: string;
+  role: string;
+  title: string;
+  department: string;
+  gender: '' | 'male' | 'female';
+  active: boolean;
+  you?: boolean;
+}
+
+const GENDERS: { id: '' | 'male' | 'female'; label: string }[] = [
+  { id: '', label: 'Not said' },
+  { id: 'male', label: 'Man' },
+  { id: 'female', label: 'Woman' },
+];
+
+/** The MD's Team page: everyone with a login, add a person, change a person's job / department / gender, reset a
+ *  password, or switch an account off (nothing they had is deleted; switching on again brings it all back). */
+function TeamSection() {
+  const { reload } = useDashboard();
+  const [people, setPeople] = useState<TeamPerson[] | null>(null);
+  const [error, setError] = useState('');
+  const [openId, setOpenId] = useState<number | 'new' | null>(null);
+  const load = () => api<{ results: TeamPerson[] }>('/team/').then((r) => setPeople(r.data.results)).catch(() => setError('Could not load the team.'));
+  useEffect(() => {
+    const kick = setTimeout(load, 0);
+    return () => clearTimeout(kick);
+  }, []);
+  const changed = async () => {
+    await load();
+    reload().catch(() => undefined);
+  };
+  if (!people) return <Txt variant="small" style={{ textAlign: 'center', marginTop: 30 }}>{error || 'Loading…'}</Txt>;
+  const active = people.filter((p) => p.active);
+  const off = people.filter((p) => !p.active);
+  return (
+    <>
+      <Txt variant="small" style={{ marginBottom: 10 }}>
+        {active.length} {active.length === 1 ? 'person' : 'people'} can sign in. Anyone can give anyone work or a message by voice; personal items stay with their owner.
+      </Txt>
+      {openId === 'new' ? (
+        <PersonForm onDone={async () => { setOpenId(null); await changed(); }} onCancel={() => setOpenId(null)} />
+      ) : (
+        <Button title="Add a person" icon="person-add-outline" onPress={() => setOpenId('new')} style={{ marginBottom: 12 }} />
+      )}
+      <Card style={{ paddingVertical: 4 }}>
+        {[...active, ...off].map((p, i) => (
+          <View key={p.id} style={i > 0 ? s.itemLine : undefined}>
+            <Pressable onPress={() => setOpenId(openId === p.id ? null : p.id)} style={({ pressed }) => [s.item, pressed && { opacity: 0.6 }]}>
+              <View style={[s.avatar, { width: 36, height: 36, borderRadius: 18 }, !p.active && { opacity: 0.4 }]}>
+                <Txt style={[s.avatarText, { fontSize: 15 }]}>{p.name.slice(0, 1).toUpperCase()}</Txt>
+              </View>
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Txt variant="heading" style={[{ fontSize: 15 }, !p.active && { color: colors.muted }]}>{p.name}{p.you ? ' (you)' : ''}</Txt>
+                <Txt variant="small" numberOfLines={1}>{[p.title, p.department, `login: ${p.username}`].filter(Boolean).join(' · ')}</Txt>
+              </View>
+              {!p.active ? <Tag label="Off" color={colors.muted} /> : <Icon name={openId === p.id ? 'chevron-up' : 'chevron-down'} size={18} color={colors.faint} />}
+            </Pressable>
+            {openId === p.id ? <PersonForm person={p} onDone={async () => { setOpenId(null); await changed(); }} onCancel={() => setOpenId(null)} /> : null}
+          </View>
+        ))}
+      </Card>
+    </>
+  );
+}
+
+/** Add a person (no `person`), or change one. */
+function PersonForm({ person, onDone, onCancel }: { person?: TeamPerson; onDone: () => void; onCancel: () => void }) {
+  const isNew = !person;
+  const [name, setName] = useState(person?.name ?? '');
+  const [title, setTitle] = useState(person?.title ?? '');
+  const [department, setDepartment] = useState(person?.department ?? '');
+  const [gender, setGender] = useState<'' | 'male' | 'female'>(person?.gender ?? '');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState('');
+  const [note, setNote] = useState('');
+  const save = async (extra: Record<string, unknown> = {}, label = 'save') => {
+    setBusy(label);
+    setNote('');
+    try {
+      if (isNew) {
+        await api('/team/', { method: 'POST', body: { name, title, department, gender, username: username.trim().toLowerCase(), password } });
+      } else {
+        const body: Record<string, unknown> = { name, title, department, gender, ...extra };
+        if (password) body.password = password;
+        await api(`/team/${person.id}/`, { method: 'PATCH', body });
+      }
+      onDone();
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : 'Could not save.');
+    } finally {
+      setBusy('');
+    }
+  };
+  const ready = name.trim() && (!isNew || (username.trim().length >= 3 && password.length >= 4));
+  return (
+    <View style={s.personForm}>
+      <Txt variant="label" style={s.formLabel}>Name</Txt>
+      <TextInput value={name} onChangeText={setName} style={s.formInput} autoCapitalize="words" maxLength={40} placeholder="Sunil" placeholderTextColor={colors.faint} />
+      <Txt variant="label" style={s.formLabel}>Job</Txt>
+      <TextInput value={title} onChangeText={setTitle} style={s.formInput} autoCapitalize="words" maxLength={80} placeholder="Accountant, Farm Manager, Director…" placeholderTextColor={colors.faint} />
+      <Txt variant="label" style={s.formLabel}>Department (optional)</Txt>
+      <TextInput value={department} onChangeText={setDepartment} style={s.formInput} autoCapitalize="words" maxLength={80} placeholder="Accounts, Farm, Social Media…" placeholderTextColor={colors.faint} />
+      <Txt variant="label" style={s.formLabel}>So JARVIS says he or she correctly</Txt>
+      <View style={[s.chips, { marginTop: 6 }]}>
+        {GENDERS.map((g) => <Chip key={g.id || 'none'} label={g.label} selected={gender === g.id} onPress={() => setGender(g.id)} />)}
+      </View>
+      {isNew ? (
+        <>
+          <Txt variant="label" style={s.formLabel}>Login username</Txt>
+          <TextInput value={username} onChangeText={setUsername} style={s.formInput} autoCapitalize="none" autoCorrect={false} maxLength={30} placeholder="sunil" placeholderTextColor={colors.faint} />
+        </>
+      ) : null}
+      <Txt variant="label" style={s.formLabel}>{isNew ? 'Password' : 'New password (leave empty to keep it)'}</Txt>
+      <TextInput value={password} onChangeText={setPassword} style={s.formInput} autoCapitalize="none" autoCorrect={false} maxLength={60} placeholder={isNew ? 'At least 4 characters' : ''} placeholderTextColor={colors.faint} />
+      {note ? <Txt variant="small" style={{ color: colors.danger, marginTop: 8 }}>{note}</Txt> : null}
+      <View style={{ flexDirection: 'row', marginTop: 12 }}>
+        <Button title={isNew ? 'Add' : 'Save'} compact disabled={!ready || !!busy} loading={busy === 'save'} onPress={() => save()} style={{ flex: 1, marginRight: 8 }} />
+        <Button title="Close" kind="secondary" compact onPress={onCancel} style={{ flex: 1 }} />
+      </View>
+      {!isNew && person.role !== 'MD' ? (
+        <Button
+          title={person.active ? 'Switch this account off' : 'Switch this account on again'}
+          kind={person.active ? 'danger' : 'secondary'}
+          compact
+          loading={busy === 'active'}
+          onPress={() => save({ active: !person.active }, 'active')}
+          style={{ marginTop: 8 }}
+        />
+      ) : null}
+      {!isNew && person.active && person.role !== 'MD' ? (
+        <Txt variant="caption" style={{ marginTop: 6 }}>Switched off, they cannot sign in; their tasks stay and come back if you switch them on again.</Txt>
+      ) : null}
+    </View>
   );
 }
 
@@ -558,4 +694,8 @@ const s = StyleSheet.create({
   chips: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 2 },
   input: { flex: 1, borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, fontSize: 15, color: colors.text, backgroundColor: colors.surface },
   memory: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  personForm: { paddingHorizontal: 4, paddingBottom: 14 },
+  formLabel: { marginTop: 10, color: colors.inkSoft },
+  formInput: { borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, fontSize: 15,
+    color: colors.text, backgroundColor: colors.surface, marginTop: 4 },
 });

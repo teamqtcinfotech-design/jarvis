@@ -22,7 +22,7 @@ import { useDashboard } from './useDashboard';
 import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
 import { downloadCsv, downloadPdf, shareText } from './download';
-import { CONFIRMABLE, TASK_DRAFTS, describeDraft } from './drafts';
+import { CONFIRMABLE, SERVER_SAVED, TASK_DRAFTS, describeDraft } from './drafts';
 import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
 import { useSession } from './session';
@@ -36,6 +36,8 @@ export interface Msg {
   role: 'user' | 'jarvis';
   text: string;
   tone?: 'error' | 'saved';
+  /** JARVIS just did something by itself: an Undo button sits under this line for a minute. */
+  undo?: boolean;
   sources?: AskAnswer['sources'];
   /** When it was said (so the screen can tell whether an answer card is still the latest thing). */
   at: number;
@@ -88,6 +90,8 @@ interface ConversationValue {
   editDraft: (patch: Partial<Draft>) => void;
   cancelDraft: () => void;
   save: () => void;
+  /** Take back what JARVIS saved or sent a moment ago (the Undo button under its "Done" line). */
+  undo: () => void;
   clear: () => void;
   /** Used when JARVIS is woken by "Hey JARVIS": greets, then listens. */
   greet: () => void;
@@ -98,8 +102,12 @@ const ConversationContext = createContext<ConversationValue | null>(null);
 const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 // AI-written "done" lines are used only where "saved" really means done. A staff task still waiting for
 // the staff app, or a team split, gets an exact status line instead.
-const AI_DONE_OK: DraftAction[] = ['private_task', 'pa_task', 'pa_meeting', 'md_request', 'pa_self_task', 'mg_task', 'remember',
-  'accept_request', 'decline_request', 'complete'];
+const AI_DONE_OK: DraftAction[] = ['private_task', 'md_request', 'own_task', 'remember', 'accept_request', 'decline_request', 'complete'];
+// How long the Undo button stays under a "Done" line (the server allows a little longer).
+const UNDO_FOR_MS = 60_000;
+const nowMs = () => Date.now();
+// "I have a long message": the next listening keeps going across pauses until he says "bas".
+const LONG_CUE = /\b(lamba|lambi|long|bada|badi)\s+(message|msg|note|baat|instruction|instructions|list)\b|\bsunte\s+raho\b|\bsuno\s+pehle\b|\blikhte\s+jao\b|\bnote\s+karte\s+jao\b|\bmain\s+bol(ta|ti)\s+(hoon|hu|hun)\b|\bdictation\b|\blet\s+me\s+finish\b|लंबा\s+मैसेज|लंबी\s+बात|सुनते\s+रहो/i;
 const BASE_HINTS = ['JARVIS', 'Jarvis', 'Hey JARVIS'];
 // Quiet rounds (each about 6 s of the recogniser hearing nothing). While JARVIS is waiting on him (a question, a
 // card, just woken): listen once more, ask "Sir?" once, listen, then rest. After a plain answer: rest after the
@@ -165,6 +173,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const presentedOffer = useRef(0);
   const wokeAtRef = useRef(0);
   const calledRef = useRef(false); // he has just called JARVIS ("Ji Sir?") and has not said anything yet
+  const longNextRef = useRef(false); // he said "lamba message hai": the next listening keeps going until "bas"
   // JARVIS just spoke an alert and asked its question ("Accept it?", "Done, or later?"): the next words answer it.
   const questionRef = useRef<{ item: EngineItem; q: AlertQuestion; spoken: string } | null>(null);
   // What JARVIS was saying when he talked over it (the part not yet said), for "continue".
@@ -235,7 +244,13 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   // ---------------------------------------------------------------- helpers
   const push = (role: Msg['role'], text: string, extra: Partial<Msg> = {}) => {
-    messagesRef.current = [...messagesRef.current, { id: newId(), role, text, at: Date.now(), ...extra }];
+    messagesRef.current = [...messagesRef.current, { id: newId(), role, text, at: nowMs(), ...extra }];
+    setMessages(messagesRef.current);
+    if (extra.undo) setTimeout(clearUndo, UNDO_FOR_MS); // the Undo button goes once the window has passed
+  };
+  const clearUndo = () => {
+    if (!messagesRef.current.some((m) => m.undo)) return;
+    messagesRef.current = messagesRef.current.map((m) => (m.undo ? { ...m, undo: false } : m));
     setMessages(messagesRef.current);
   };
   const setDraft = (d: Draft | null) => {
@@ -292,14 +307,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const listen = () => {
     if (!user) return;
     // A short answer is expected only when JARVIS has just asked one thing (a card, a "which one?", an offer, an
-    // alert's question); otherwise he gets a long moment to start speaking.
-    const quick = !!draftRef.current || !!offerRef.current || !!choicesRef.current || !!questionRef.current;
+    // alert's question); otherwise he gets a long moment to start speaking. After "lamba message hai" JARVIS keeps
+    // listening across pauses until he says "bas".
+    const long = longNextRef.current;
+    longNextRef.current = false;
+    const quick = !long && (!!draftRef.current || !!offerRef.current || !!choicesRef.current || !!questionRef.current);
     if (wakeSupported && prefs.wakeWordEnabled) {
       // One microphone user at a time: the background listener lets go first, then the recogniser starts.
       wakePause();
-      setTimeout(() => startVoice({ quick }), 300);
+      setTimeout(() => startVoice({ quick, long }), 300);
     } else {
-      startVoice({ quick });
+      startVoice({ quick, long });
     }
   };
   /** Show a JARVIS line, speak it, and (unless the conversation is over) listen again. */
@@ -350,6 +368,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return;
     }
     calledRef.current = false;
+    // "Lamba message hai" / "sunte raho" / "long message": he wants to speak for a while. JARVIS says so, and the
+    // next listening keeps going across pauses until "bas"; everything said is then one instruction.
+    if (LONG_CUE.test(text) && text.split(/\s+/).length <= 8 && !waitingCard()) {
+      push('user', text);
+      longNextRef.current = true;
+      const t = twin(`Go ahead, ${address}, I'm listening. Say “bas” when you're done.`, `बोलिए ${addressHi}, मैं सुन रहा हूँ। ख़त्म होने पर “बस” बोलिए।`);
+      reply(t.fallback, t.lang === 'hi' ? t.text : undefined, t.lang, true);
+      return;
+    }
     push('user', text);
     lastQuestion.current = text;
     const pendingOffer = offerRef.current;
@@ -712,8 +739,30 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       reply(d.spoken_reply, speakText, lang, true); // "shall I save it?"
       return;
     }
-    // Anything else (an answer, small talk): say it and keep listening. A waiting card simply stays on screen.
+    // Anything else (an answer, small talk, or JARVIS saying what it just did): say it and keep listening. A waiting
+    // card simply stays on screen. Something JARVIS did by itself carries an Undo button for a minute.
+    if (d.booked && d.undo) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+      reply(d.spoken_reply, speakText, lang, true, { tone: 'saved', undo: true });
+      return;
+    }
     reply(d.spoken_reply, speakText, lang, true);
+  };
+
+  /** "Undo" under JARVIS's "Done" line: what it saved or sent a moment ago is taken back (and anyone already told
+   *  hears that it was withdrawn). */
+  const undo = async () => {
+    cancelVoice();
+    clearUndo();
+    try {
+      const res = await api<{ en: string; hi: string; undone: number }>('/assistant/undo/', { method: 'POST', body: {} });
+      dataChanged.emit();
+      const t = twin(res.data.en, res.data.hi);
+      reply(res.data.en, t.lang === 'hi' ? t.text : undefined, t.lang, false);
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : 'Could not undo.';
+      push('jarvis', msg, { tone: 'error' });
+    }
   };
 
   const ask = async (question: string, lang: string) => {
@@ -765,11 +814,25 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (d.schedule?.hard) return 'Another meeting is at this time. Say which way: keep it short, move the other, or a new time.';
     if (d.action === 'delegation' && !d.staff) return 'Choose who should do this.';
     if (d.action === 'team_delegation' && !d.team?.members.length) return 'No one in that team can take this.';
+    if ((d.action === 'person_task' || d.action === 'person_meeting') && !d.assignees?.length) return 'Say who should get this.';
     return '';
+  };
+
+  /** A card (one item, or several said in one go) of the team's kind: saved on the server by the same path the voice
+   *  uses, so the people it is for are checked there and one Undo takes it all back. */
+  const saveOnServer = async (d: Draft, key: string): Promise<{ spoken: string; spokenHi: string }> => {
+    const res = await api<{ en: string; hi: string; saved: number }>('/assistant/execute/', {
+      method: 'POST',
+      body: { card: { ...d, categories: [], staff_candidates: [], target_candidates: [] } },
+      idempotencyKey: key,
+      timeoutMs: 45000,
+    });
+    return { spoken: res.data.en, spokenHi: res.data.hi };
   };
 
   /** Save one item of a card (the main one, or one of several said in one breath). Resolves to its spoken lines. */
   const saveOne = async (d: Draft, key: string): Promise<{ spoken: string; spokenHi: string } | null> => {
+    if (SERVER_SAVED.includes(d.action)) return saveOnServer({ ...d, batch: [] }, key);
     const body = {
       title: d.title.trim(),
       notes: d.notes,
@@ -936,6 +999,25 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     setBusy('saving');
     setDraftError('');
     const key = idemKey.current;
+    if (items.length > 1 && items.every((it) => SERVER_SAVED.includes(it.action) || it.action === 'private_task' || it.action === 'md_request')) {
+      // Many instructions for many people in one go: saved together on the server (one Undo takes them all back).
+      try {
+        const r = await saveOnServer(d, key);
+        setBusy('');
+        setDraft(null);
+        previousRef.current = '';
+        dataChanged.emit();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+        const t = twin(r.spoken, r.spokenHi);
+        reply(r.spoken, t.lang === 'hi' ? t.text : undefined, t.lang, true, { tone: 'saved', undo: true });
+      } catch (e) {
+        setBusy('');
+        const msg = e instanceof ApiError ? e.message : 'Could not save.';
+        setDraftError(`${msg} Nothing was saved.`);
+        sayOwn(`Sorry ${address}, it was not saved. ${msg}`, `माफ़ कीजिए ${addressHi}, सेव नहीं हुआ। ${msg}`, { interrupt: true });
+      }
+      return;
+    }
     const saved: { spoken: string; spokenHi: string }[] = [];
     const failed: { title: string; msg: string; retryable: boolean }[] = [];
     for (let i = 0; i < items.length; i++) {
@@ -1213,7 +1295,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   }, [user]);
 
   const orb: OrbState = listening ? 'listening' : busy ? 'thinking' : speaking ? 'speaking' : 'idle';
-  const status = listening ? 'Listening…'
+  const status = listening && voice.longMode ? 'Listening… say “bas” when you’re done'
+    : listening ? 'Listening…'
     : busy === 'searching' ? 'Searching the internet…'
     : busy === 'thinking' ? 'Thinking…'
     : busy === 'saving' ? 'Saving…'
@@ -1227,7 +1310,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const value: ConversationValue = {
     messages, draft, draftError, busy, speaking, listening, partial: voice.partial, orb, status, level,
     answers, removeAnswer, clearAnswers, showView, itemToOpen, clearItemToOpen, talkOpen, talkOpenedAt, talkMode, openTalk, closeTalk,
-    micPress, send, editDraft, cancelDraft, save, clear, greet,
+    micPress, send, editDraft, cancelDraft, save, undo, clear, greet,
   };
   return <ConversationContext.Provider value={value}>{children}</ConversationContext.Provider>;
 }

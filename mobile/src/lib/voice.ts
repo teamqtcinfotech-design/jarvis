@@ -20,6 +20,23 @@ const ERROR_TEXT: Record<string, string> = {
 /** Silence (nothing was said) is not a failure: the conversation asks "are you there?" instead. */
 export const SILENCE_CODES = new Set(['no-speech', 'speech-timeout']);
 
+// A long message (a few minutes, said with pauses): every round's words are kept and the recogniser starts again at
+// once, until he says "bas" (or "that's all", "send it"), stays quiet for a whole round, or five minutes pass.
+const LONG_END = /(?:^|[\s,.!?।])(bas|bas itna|bas itna hi|itna hi|bas itna hi tha|that's all|thats all|that is all|send it|send kar do|bhej do|khatam|ho gaya|done|बस|बस इतना|इतना ही|भेज दो|हो गया)\s*[.!?।]*\s*$/i;
+// He stopped on a joining word ("Sunil ko bolo ki …", "… aur"): the sentence is not over, so JARVIS keeps listening.
+const JOINING_END = /(?:^|\s)(aur|and|phir|then|ki|ke|ko|ka|matlab|also|plus|tatha|lekin|but|या|और|फिर|कि|को|के|का)\s*[,.]?\s*$/i;
+const LONG_MAX_MS = 5 * 60_000;
+
+interface LongState {
+  /** Listening across pauses right now. explicit: he asked for it ("lamba message hai"); else a joining word did. */
+  active: boolean;
+  explicit: boolean;
+  buffer: string;
+  startedAt: number;
+}
+const noLong = (): LongState => ({ active: false, explicit: false, buffer: '', startedAt: 0 });
+const joinText = (a: string, b: string) => [a, b].map((x) => x.trim()).filter(Boolean).join(' ');
+
 interface Handlers {
   onFinal?: (text: string) => void;
   onError?: (message: string, code: string) => void;
@@ -30,6 +47,15 @@ interface Handlers {
 interface Probe {
   resolve: (voices: boolean) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface StartOpts {
+  quick?: boolean;
+  retry?: boolean;
+  /** A long message: keep listening across pauses until "bas", a quiet round, or five minutes. */
+  long?: boolean;
+  /** Internal: the next round of a message already being heard (its words so far are kept). */
+  more?: boolean;
 }
 
 /**
@@ -49,7 +75,9 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
   const retries = useRef(0);
   const stoppedOnPurpose = useRef(false);
   const lastQuick = useRef(false);
-  const startRef = useRef<(opts?: { quick?: boolean; retry?: boolean }) => void>(() => undefined);
+  const startRef = useRef<(opts?: StartOpts) => void>(() => undefined);
+  const longRef = useRef<LongState>(noLong());
+  const [longMode, setLongMode] = useState(false);
   // How loud he is speaking right now (0..1), for the orb. Driven by the recogniser's volume events.
   const [level] = useState(() => new Animated.Value(0));
   const setLevel = useCallback(
@@ -98,12 +126,30 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     }
     latest.current = text;
     if (event.isFinal) finalText.current = text;
-    setPartial(text);
+    setPartial(joinText(longRef.current.buffer, text)); // a long message shows everything heard so far
   });
   useSpeechRecognitionEvent('volumechange', (event) => {
     if (probing.current) return;
     setLevel((event.value + 2) / 12); // the recogniser reports -2 (silence) .. 10 (loud)
   });
+  /** The long message is over: everything heard is one instruction ("bas" itself is left out). */
+  const finishLong = () => {
+    const all = longRef.current.buffer.replace(LONG_END, '').trim();
+    longRef.current = noLong();
+    setLongMode(false);
+    errored.current = true; // the round's own "end" must not report again
+    setState('done');
+    if (all) handlersRef.current.onFinal?.(all);
+    else handlersRef.current.onError?.(ERROR_TEXT['no-speech'], 'no-speech');
+  };
+  /** Listen to the next part of the same message, the words so far kept. */
+  const nextRound = () => {
+    errored.current = true;
+    setTimeout(() => {
+      if (!stoppedOnPurpose.current && longRef.current.active) startRef.current({ more: true });
+    }, 150);
+  };
+
   useSpeechRecognitionEvent('end', () => {
     setLevel(0);
     if (probing.current) {
@@ -112,8 +158,23 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     }
     clearWatchdog();
     if (errored.current) return;
-    setState('done');
     const text = (finalText.current || latest.current).trim();
+    const long = longRef.current;
+    if (long.active) {
+      long.buffer = joinText(long.buffer, text);
+      const over = !text || LONG_END.test(long.buffer) || Date.now() - long.startedAt > LONG_MAX_MS
+        || (!long.explicit && !JOINING_END.test(text));
+      if (over || stoppedOnPurpose.current) finishLong();
+      else nextRound();
+      return;
+    }
+    if (text && JOINING_END.test(text) && !lastQuick.current) {
+      // "Sunil ko bolo ki …" and a breath: the sentence is not finished. Keep listening and join the parts.
+      longRef.current = { active: true, explicit: false, buffer: text, startedAt: Date.now() };
+      nextRound();
+      return;
+    }
+    setState('done');
     if (text) handlersRef.current.onFinal?.(text);
     else handlersRef.current.onError?.(ERROR_TEXT['no-speech'], 'no-speech');
   });
@@ -123,6 +184,10 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       return;
     }
     clearWatchdog();
+    if (longRef.current.active && SILENCE_CODES.has(event.error)) {
+      finishLong(); // quiet for a whole round: the message is complete
+      return;
+    }
     const dropped = (event.error === 'aborted' && !stoppedOnPurpose.current) || event.error === 'client' || event.error === 'busy';
     if (dropped && retries.current < 2 && stateRef.current === 'listening') {
       retries.current += 1;
@@ -145,15 +210,20 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
    * quick: JARVIS has just asked something with a short answer (a card's "save?", "which one?"): the round may end
    * soon after a word or two. Otherwise he gets a long moment to start speaking before it counts as silence.
    */
-  const start = useCallback(async (opts: { quick?: boolean; retry?: boolean } = {}) => {
-    const quick = opts?.quick === true;
-    if (opts?.retry !== true) retries.current = 0;
+  const start = useCallback(async (opts: StartOpts = {}) => {
+    const quick = opts?.quick === true && !opts?.long;
+    if (opts?.retry !== true && opts?.more !== true) retries.current = 0;
+    if (opts?.more !== true && opts?.retry !== true) {
+      // A fresh start: a long message only when he asked for one.
+      longRef.current = opts?.long ? { active: true, explicit: true, buffer: '', startedAt: Date.now() } : noLong();
+    }
+    setLongMode(longRef.current.active && longRef.current.explicit);
     lastQuick.current = quick;
     stoppedOnPurpose.current = false;
     if (probing.current) finishProbe(false); // the user comes first
     stoppedOnPurpose.current = false;
     stopSpeaking();
-    setPartial('');
+    setPartial(longRef.current.buffer);
     latest.current = '';
     finalText.current = '';
     errored.current = false;
@@ -180,6 +250,12 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
       } catch {
         // ignore
       }
+      if (longRef.current.active && longRef.current.buffer) {
+        finishLong(); // what was heard of a long message is kept, not lost
+        return;
+      }
+      longRef.current = noLong();
+      setLongMode(false);
       setState('idle');
       handlersRef.current.onError?.(ERROR_TEXT['speech-timeout'], 'speech-timeout');
     }, 30000);
@@ -200,8 +276,9 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
         // A natural pause mid-sentence is not the end of it. The minimum is how long he has to START speaking
         // before the round ends as silence: long when he was just called or is giving an instruction (he may be
         // thinking), short when JARVIS asked a yes / no, so "haan" is not made to wait.
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1400,
-        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 1400,
+        // In a long message the pauses between thoughts are longer, and each round may run longer.
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: longRef.current.active ? 2500 : 1400,
+        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: longRef.current.active ? 2500 : 1400,
         EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: quick ? 3000 : 7000,
         ...(canSwitch
           ? {
@@ -226,6 +303,8 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     clearWatchdog();
     errored.current = true; // suppress the "end" callback after an abort
     stoppedOnPurpose.current = true;
+    longRef.current = noLong();
+    setLongMode(false);
     ExpoSpeechRecognitionModule.abort();
     setState('idle');
   }, []);
@@ -255,5 +334,5 @@ export function useVoiceCapture(lang: string, handlers: Handlers = {}) {
     [],
   );
 
-  return { state, partial, start, stop, cancel, probe, level };
+  return { state, partial, start, stop, cancel, probe, level, longMode };
 }

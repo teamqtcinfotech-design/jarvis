@@ -17,17 +17,17 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
     { key: 'late', label: 'Late', icon: 'alert-circle-outline', count: data?.overdue.length, tone: colors.danger },
     { key: 'upcoming', label: 'Coming up', icon: 'calendar-outline', count: data?.upcoming.length },
     { key: 'nodate', label: 'No date yet', icon: 'infinite-outline', count: data?.anytime.length },
+    // Everyone has personal items now (theirs alone), and everyone can give work to anyone on the team.
+    { key: 'private', label: 'Personal', icon: 'lock-closed-outline', count: privateCount, detail: 'Only you can see these' },
+    { key: 'given', label: 'Given by you', icon: 'people-outline', count: open(data?.given_tasks), detail: 'Work you gave people, with progress' },
     ...(isMD
       ? [
-          { key: 'private', label: 'Private reminders', icon: 'lock-closed-outline', count: privateCount, detail: 'Only you can see these' },
           { key: 'requests', label: 'Need your OK', icon: 'hand-left-outline', count: pending, tone: colors.gold },
-          { key: 'pa', label: 'Given to your PA', icon: 'person-outline', count: open(data?.pa_tasks) },
-          { key: 'mg', label: `Given to ${data?.manager_name || 'the manager'}`, icon: 'people-outline', count: open(data?.mg_tasks) },
+          { key: 'team', label: 'Team’s work', icon: 'git-network-outline', count: open(data?.team_tasks), detail: 'Everyone’s work, their own and given to each other' },
         ]
       : [
           { key: 'requests', label: `Waiting for ${md}`, icon: 'hand-left-outline', count: pending, tone: colors.gold },
           { key: 'md_tasks', label: `${md}’s tasks from you`, icon: 'person-outline', count: open(data?.md_tasks) },
-          { key: 'given', label: `Given to ${user.role === 'MG' ? data?.pa_name || 'the PA' : data?.manager_name || 'the manager'}`, icon: 'people-outline', count: open(data?.given_tasks) },
           { key: 'busy', label: `When ${md} is busy`, icon: 'time-outline' },
         ]),
     { key: 'staff', label: 'Given to staff', icon: 'briefcase-outline', count: open(data?.delegated) },
@@ -42,5 +42,5 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
 /** Which server data view a list key maps to (for the tablet workspace). */
 export const VIEW_FOR_KEY: Record<string, string> = {
   today: 'today', late: 'late', upcoming: 'upcoming', nodate: 'nodate', private: 'private', requests: 'requests',
-  pa: 'pa', mg: 'pa', given: 'pa', md_tasks: 'pa', busy: 'busy', staff: 'staff', cancelled: 'cancelled',
+  pa: 'pa', mg: 'pa', given: 'pa', md_tasks: 'pa', team: 'pa', busy: 'busy', staff: 'staff', cancelled: 'cancelled',
 };

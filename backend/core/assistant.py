@@ -1,7 +1,8 @@
-"""Turns one instruction into a draft the user confirms on screen.
+"""Turns one instruction into a draft: what JARVIS will do, and (when anything is unclear) the one question to ask.
 
-Nothing here writes business data. The draft says what WOULD happen; the phone
-then calls the normal, permission-checked endpoint with an Idempotency-Key.
+When the instruction is complete and clear (who, what and, where it matters, when), JARVIS does it at once through
+actions.py and says what it did, with an undo for a minute; otherwise the draft goes back to the phone as a card the
+user confirms, and the phone (or the background voice) then saves it through the normal permission-checked paths.
 """
 import difflib
 import re
@@ -14,17 +15,24 @@ from django.utils import timezone
 from . import ai_brain, datacards, hinglish_parser, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
-from .models import Kind, Priority, PrivateTask, SharedTask, TaskCategory, User
+from .models import Alert, Kind, Priority, PrivateTask, SharedTask, TaskCategory, TaskRequest, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
-TASK_ACTIONS = {"private_task", "md_request", "delegation", "pa_task", "pa_meeting", "team_delegation", "pa_self_task", "mg_task"}
+TASK_ACTIONS = {"private_task", "md_request", "delegation", "team_delegation", "person_task", "person_meeting", "own_task",
+                # the names cards had before the team (a card saved then, or an older phone, may still carry them)
+                "pa_task", "pa_meeting", "pa_self_task", "mg_task"}
+# Everything a card can save (a message is not a task, but it rides on the same card and the same yes).
+SAVE_ACTIONS = TASK_ACTIONS | {"message"}
+# What JARVIS saves by itself when the instruction was complete and clear (see _auto_save).
+AUTO_ACTIONS = {"private_task", "own_task", "person_task", "person_meeting", "md_request", "message"}
 EDIT_ACTIONS = {"change_task", "delete_task"}
 _CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind", "duration_minutes"}
-# Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the PA's
-# (Sir giving Mansi work) or the MD's (Mansi asking for Sir's time; she only ever hears "busy", never why).
-_SLOT_ACTIONS = {"private_task": "self", "pa_meeting": "self", "pa_task": "pa", "md_request": "md", "change_task": "self",
-                 "pa_self_task": "self"}
+# Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the person's they give it to,
+# or the MD's (someone asking for Sir's time: they only ever hear "busy", never why).
+_SLOT_ACTIONS = {"private_task": "self", "person_meeting": "self", "person_task": "person", "md_request": "md",
+                 "change_task": "self", "own_task": "self",
+                 "pa_meeting": "self", "pa_task": "person", "pa_self_task": "self"}
 MAX_SCHEDULE_QUESTIONS = 2  # ask about a clash at most twice, then take his word
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -223,10 +231,12 @@ def _mentions_pa(text: str) -> bool:
 
 
 _FOR_SIR = re.compile(r"\b(sir|md|boss|sahab|saab|ma'?am|mam|madam|maidam|mem)\b|सर|मैम|मैडम|मेम|साहब|बॉस", re.IGNORECASE)
-# Mansi speaking about herself ("mera reminder", "I have to", "mujhe yaad dilana").
+# A team member speaking about themselves ("mera reminder", "I have to", "mujhe yaad dilana").
 _PA_OWN = re.compile(
     r"\b(mera|meri|mere|mujhe|mujhko|maine|khud|apna|apni|apne|personal|my|mine|myself|for me|remind me|"
     r"i have to|i need to|i will|i'll|i must)\b|मेरा|मेरी|मेरे|मुझे|मुझको|मैंने|अपना|अपनी|अपने|खुद", re.IGNORECASE)
+_GROUP_WORDS = re.compile(r"\b(everyone|everybody|sab|sabhi|sabko|whole team|poori team|puri team|all staff|team|"
+                          r"department|dept|waalon|walon|waale|wale)\b", re.IGNORECASE)
 
 
 def _last_cue(pattern: re.Pattern, text: str) -> int:
@@ -235,72 +245,152 @@ def _last_cue(pattern: re.Pattern, text: str) -> int:
     return found[-1] if found else -1
 
 
+_NAME_SPLIT = re.compile(r"\s*(?:,|&|/|;|\band\b|\baur\b|\bevam\b|\btatha\b|और)\s*", re.IGNORECASE)
+
+
+def _recipients_of(cmd: dict) -> list[str]:
+    """The names (or jobs, or groups) the work or message is FOR, as said: the model's list, else the name(s) in
+    staff_name ("Sunil", or several: "Sunil, Mansi" / "Sunil aur Mansi")."""
+    out = []
+    raw = list(cmd.get("recipients") or [])
+    if not raw:
+        raw = [p for p in _NAME_SPLIT.split(str(cmd.get("staff_name") or "")) if p]
+    for n in raw:
+        n = " ".join(str(n or "").split())
+        if n and n.lower() not in {x.lower() for x in out}:
+            out.append(n)
+    return out[:20]
+
+
+def _team_in_text(user: User, text: str) -> list:
+    """People on the team named in the words themselves: by name, or the PA by "PA" / "meri PA" / "assistant". Other
+    jobs are not read from free words ("bank manager" is not the manager)."""
+    low = f" {services.norm_person(text)} "
+    found = []
+    for u in services.team():
+        if u.id == user.id or u.is_md:
+            continue
+        names = {services.norm_person(n) for n in (u.display_name, u.first_name, u.get_full_name()) if n}
+        if any(n and f" {n} " in low for n in names) or (u.is_pa and _mentions_pa(text)):
+            found.append(u)
+    return found
+
+
+def _team_person(user: User, name: str):
+    """(person, status) for one name on the JARVIS team: known / close / ambiguous / unknown."""
+    found = services.find_people(name)
+    if found["status"] in ("known", "close"):
+        return found["people"][0], found["status"]
+    return None, found["status"]
+
+
 def _route_intent(user: User, cmd: dict, text: str) -> str:
-    """Final say on where a task goes. The AI proposes; these rules keep the routing safe and predictable."""
+    """Final say on where a task goes. The AI proposes; these rules keep the routing safe and predictable.
+
+    Returns one of: create_task (the MD's own), pa_own (a team member's own), assign_to_person (work for someone on
+    the team), meet_with_person (a meeting between the speaker and a team member), request_for_md, assign_to_staff
+    (TaskPanel staff), assign_to_team, needs_destination, send_alert, or the model's other intents unchanged."""
     intent = cmd.get("intent", "unknown")
+    # The words cards and the offline parser used before the team.
+    if intent in {"assign_to_pa", "assign_to_manager"}:
+        if not _recipients_of(cmd):
+            who = services.get_pa() if intent == "assign_to_pa" else services.get_manager()
+            cmd["staff_name"] = who.spoken_name if who else ("PA" if intent == "assign_to_pa" else "manager")
+        intent = "assign_to_person"
+    elif intent == "meet_with_pa":
+        # The model's "meeting with the PA" counts only when the PA is really named (in this item, or in the sentence
+        # when it holds only this item): a meeting with someone else is never with the PA, whatever the model said.
+        one = not (cmd.get("more_items") or cmd.get("_sub"))
+        pa_here = _mentions_pa(cmd.get("title") or "") or any(_is_pa_name(str(p)) for p in (cmd.get("people") or [])) \
+            or (one and _mentions_pa(text))
+        if _recipients_of(cmd) and not pa_here:
+            intent = "meet_with_person"
+        elif pa_here:
+            pa = services.get_pa()
+            cmd["staff_name"], cmd["recipients"] = (pa.spoken_name if pa else "PA"), []
+            intent = "meet_with_person"
+        else:
+            intent = "create_task"
+    names = _recipients_of(cmd)
     staff_name = (cmd.get("staff_name") or "").strip()
     # A plain reminder ("2 minute baad yaad dilana") is the speaker's own: never "whose is it?".
     if cmd.get("kind") == "REMINDER" and intent in {"create_task", "needs_destination", "request_for_md"}:
         return "create_task" if user.is_md else "pa_own"
-    # "All staff / Accounts team" said as a person's name -> a team assignment.
-    if intent == "assign_to_staff" and (staff_name.lower() in ALL_STAFF_WORDS or _TEAM_SUFFIX.search(staff_name)):
-        cmd["team_name"] = "all" if staff_name.lower() in ALL_STAFF_WORDS else _TEAM_SUFFIX.sub("", staff_name).strip()
-        intent = "assign_to_team"
-    # Is the PA named in THIS item? In a sentence with several items the whole sentence proves nothing about one of them.
-    one_of_many = bool(cmd.get("more_items")) or bool(cmd.get("_sub"))
-    pa_here = _mentions_pa(cmd.get("title") or "") or any(_is_pa_name(str(p)) for p in (cmd.get("people") or [])) \
-        or (not one_of_many and _mentions_pa(text))
-    # A meeting WITH the PA is the MD's meeting (PA is told), never a task for the PA to do.
-    if user.is_md and cmd.get("kind") in {Kind.MEETING, Kind.CALL} and _WITH.search(text) and pa_here \
-            and intent in {"assign_to_pa", "assign_to_staff", "create_task", "needs_destination"}:
-        intent = "meet_with_pa"
-    # And a meeting with someone else is never "with the PA", whatever the model said.
-    if user.is_md and intent == "meet_with_pa" and not pa_here:
+    if intent == "send_alert":
+        return intent
+    # "All staff / Accounts team" said as a person's name -> work for a group.
+    if intent in {"assign_to_staff", "assign_to_person"} and len(names) <= 1 and \
+            (staff_name.lower() in ALL_STAFF_WORDS or _TEAM_SUFFIX.search(staff_name) or staff_name.lower() in services.EVERYONE_WORDS):
+        if services.STAFF_GROUP.search(staff_name):
+            cmd["team_name"] = "staff"      # "sab staff": the TaskPanel staff list
+        elif staff_name.lower() in ALL_STAFF_WORDS | services.EVERYONE_WORDS:
+            cmd["team_name"] = "all"        # "sab ko", "everyone": the team
+        else:
+            cmd["team_name"] = _TEAM_SUFFIX.sub("", staff_name).strip()
+        return "assign_to_team"
+    # A person named for the work: someone on the JARVIS team comes first, a TaskPanel staff member only when nobody
+    # on the team has that name or job ("Sunil ko bolo" is Sunil's JARVIS list, never TaskPanel).
+    if intent in {"assign_to_staff", "assign_to_person", "needs_destination"} and names:
+        team_hits = [_team_person(user, n) for n in names]
+        if all(p is not None for p, _ in team_hits):
+            people = [p for p, _ in team_hits]
+            if all(p.id == user.id for p in people):
+                return "create_task" if user.is_md else "pa_own"   # "mujhe hi karna hai": their own
+            if all(p.is_md for p in people) and not user.is_md:
+                return "request_for_md"
+            intent = "assign_to_person"
+        elif intent == "assign_to_person" and len(names) == 1 and services.resolve_staff(names[0])[0]:
+            intent = "assign_to_staff"  # not on the team, but a TaskPanel staff member has that name
+        elif intent == "assign_to_staff" and any(st in ("known", "close", "ambiguous") for _, st in team_hits):
+            intent = "assign_to_person"
+    # A meeting or call WITH someone on the team is the speaker's meeting with that person (they are told and both
+    # are reminded); with the MD (from anyone else) it is a request for his time.
+    if cmd.get("kind") in {Kind.MEETING, Kind.CALL} and intent in {"assign_to_person", "create_task", "needs_destination",
+                                                                    "meet_with_person", "assign_to_staff"}:
+        with_whom = [str(p) for p in (cmd.get("people") or [])] + (names if intent == "meet_with_person" else [])
+        one_of_many = bool(cmd.get("more_items")) or bool(cmd.get("_sub"))
+        said_with = bool(_WITH.search(cmd.get("title") or "")) or (not one_of_many and bool(_WITH.search(text)))
+        mates = [p for p in (_team_person(user, n)[0] for n in with_whom) if p is not None and p.id != user.id]
+        if not mates and said_with:
+            # The words name the person even when the reading did not list them ("meri PA ke saath meeting").
+            mates = _team_in_text(user, (cmd.get("title") or "") if one_of_many else text)
+        if mates and (said_with or intent == "meet_with_person"):
+            cmd["staff_name"], cmd["recipients"] = mates[0].spoken_name, [mates[0].spoken_name]
+            if mates[0].is_md and not user.is_md:
+                intent = "request_for_md"
+            else:
+                return "meet_with_person"
+        elif intent == "meet_with_person":
+            intent = "create_task"  # a meeting with someone who is not on the team is the speaker's own meeting
+    if intent == "meet_with_person" and not names:
         intent = "create_task"
-    # "Himanshu ko bolo…" / "PA ko bolo…" = a direct PA task (inside JARVIS), not TaskPanel; "Mansi ko bolo…" /
-    # "manager ko bolo…" = a task for the manager. A staff member with the same name never takes their place.
-    if intent in {"assign_to_staff", "assign_to_pa", "create_task", "needs_destination", "assign_to_manager"}             and not (intent == "create_task" and cmd.get("kind") in {Kind.MEETING, Kind.CALL}):
-        if _is_manager_name(staff_name) and not user.is_mg:
-            intent = "assign_to_manager"
-        elif _is_pa_name(staff_name) and not user.is_pa and intent != "create_task":
-            intent = "assign_to_pa"
-    if intent == "assign_to_manager" and user.is_mg:
-        intent = "create_task"   # the manager giving herself work: her own
-    if intent == "assign_to_pa" and user.is_pa:
-        intent = "create_task"   # the PA giving himself work: his own
     # Offline parser cannot judge ownership: unless it is plainly the MD's own, ask.
     if cmd.get("engine") == "rules" and intent == "create_task" and cmd.get("kind") == Kind.TASK \
             and not _PERSONAL.search(text):
         intent = "needs_destination"
     if user.is_assistant:
-        # Whose is it? For Sir, her own, or the team: it is never assumed. The model judges the meaning
-        # ("Sir ki cab book karni hai" is HER job); the words must back it up, otherwise JARVIS asks.
+        # Whose is it? For Sir, their own, or someone else: it is never assumed to be Sir's. The model judges the
+        # meaning ("Sir ki cab book karni hai" is THEIR job); the words must back it up.
         sir_at, own_at = _last_cue(_FOR_SIR, text), _last_cue(_PA_OWN, text)
         md_user = services.get_md()
         md_name = (md_user.first_name or "").strip().lower() if md_user else ""
         if md_name:
             sir_at = max(sir_at, f" {text.lower()} ".rfind(f" {md_name} "))
         for_sir, own = sir_at >= 0, own_at >= 0
-        if intent == "meet_with_pa":
-            # The model's "a meeting with the PA" is not her saying it is for the MD ("Aman ke saath meeting book
-            # karo" is not): her words decide, as everywhere else, and without them JARVIS asks whose it is.
-            intent = "request_for_md" if for_sir and sir_at > own_at else "pa_own" if own else "needs_destination"
-        elif intent == "needs_destination" and (own or for_sir):
-            # She did say whose it is ("meri Aman ke saath meeting", "Ma'am ki meeting"): no need to ask.
+        if intent == "needs_destination" and (own or for_sir):
             intent = "pa_own" if own_at > sir_at else "request_for_md"
         elif intent == "create_task" and cmd.get("engine") == "rules":
-            # The offline parser cannot judge meaning: her words decide, the last one said wins.
             intent = "needs_destination" if not (own or for_sir) else "pa_own" if own_at > sir_at else "request_for_md"
-        elif intent == "create_task":       # the model says it is her own
-            intent = "pa_own" if own or for_sir else "needs_destination"
-        elif intent == "request_for_md" and not for_sir:
+        elif intent == "create_task":       # the model says it is their own
+            intent = "pa_own"
+        elif intent == "request_for_md" and not for_sir and not any(_team_person(user, n)[0] is not None
+                                                                     and _team_person(user, n)[0].is_md for n in names):
             intent = "pa_own" if own else "needs_destination"
         if intent == "needs_destination":
-            # Not said to be for the MD or for someone in the team: it is her own, and JARVIS does not ask. The
-            # read-back says so ("your own meeting"), and "nahi, Ma'am ke liye" turns it into a request.
+            # Not said to be for the MD or for someone on the team: it is their own, and JARVIS does not ask. The
+            # read-back says so ("your own"), and "nahi, Sir ke liye" turns it into a request.
             intent = "pa_own"
-        if intent in {"accept_request", "decline_request"} or (intent == "assign_to_pa" and not user.is_mg) \
-                or (intent == "assign_to_manager" and not user.is_pa):
+        if intent in {"accept_request", "decline_request"}:
             intent = "unknown"
     elif intent == "request_for_md":
         intent = "create_task"
@@ -338,6 +428,59 @@ def _prepare_team(draft: dict, cmd: dict, address: str, address_hi: str):
 def _staff_option(s) -> dict:
     return {"id": s.id, "name": s.name, "department": s.department, "on_leave": s.on_leave,
             "leave_until": s.leave_until.isoformat() if s.leave_until else None}
+
+
+def _person_option(u) -> dict:
+    return {"id": u.id, "name": u.spoken_name, "title": u.title_label}
+
+
+def _prepare_people(draft: dict, cmd: dict, user: User, address: str, address_hi: str, *, default_to: bool = False,
+                    group: str = "") -> None:
+    """Who on the team the work, meeting or message is FOR: every name or job said ("Sunil", "accountant", "PA"), or a
+    group ("accounts team", "sab ko"). A name heard slightly wrong that is clearly one person is taken and said back by
+    its real name; two people with one name, or nobody with it, is asked once. default_to: a message with nobody named
+    goes to the usual person (the MD's to the PA, anyone else's to the MD)."""
+    names = _recipients_of(cmd)
+    people, label = [], ""
+    if group or (not names and cmd.get("team_name")):
+        people, label = services.find_group(group or cmd.get("team_name") or "", exclude=user)
+        if not people:
+            _ask(draft, f"{address}, I couldn't find that team. Who should get this?", f"{address_hi}, वो टीम नहीं मिली। ये किसे देना है?")
+            return
+    for name in names:
+        found = services.find_people(name)
+        if found["status"] in ("known", "close"):
+            people += [p for p in found["people"] if p.id not in {x.id for x in people}]
+            continue
+        if found["status"] == "ambiguous":
+            options = " or ".join(found["options"])
+            _ask(draft, f"{address}, which {name}: {options}?", f"{address_hi}, कौन से {name}: {' या '.join(found['options'])}?")
+            draft["assignee_candidates"] = [_person_option(p) for p in found["people"]]
+            return
+        members, glabel = services.find_group(name, exclude=user)
+        if members:
+            people += [p for p in members if p.id not in {x.id for x in people}]
+            label = label or glabel
+            continue
+        hint = f" Did you mean {found['options'][0]}?" if found["options"] else ""
+        hint_hi = f" क्या आपका मतलब {found['options'][0]} था?" if found["options"] else ""
+        _ask(draft, f"{address}, I don't know anyone called {name} on the team.{hint} Who should get this?",
+             f"{address_hi}, टीम में {name} नाम का कोई नहीं है।{hint_hi} ये किसे देना है?")
+        return
+    if not people and default_to:
+        try:
+            people = services.message_recipients(user, "")
+        except services.ServiceError:
+            people = []
+    if not people:
+        _ask(draft, f"{address}, who should get this?", f"{address_hi}, ये किसे देना है?")
+        return
+    draft["assignees"] = [_person_option(p) for p in people]
+    draft["group_label"] = label
+    draft["pa_name"] = services.names_phrase(people)  # how the read-back names them (kept under the card's old key)
+    off = [p for p in people if not p.is_active]
+    if off:
+        _ask(draft, f"{address}, {off[0].spoken_name}'s account is switched off.", f"{address_hi}, {off[0].spoken_name} का अकाउंट बंद है।")
 
 
 def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str, address_hi: str):
@@ -424,8 +567,8 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str, addres
 
 
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
-_TASK_INTENTS = {"create_task", "assign_to_staff", "assign_to_team", "assign_to_pa", "meet_with_pa",
-                 "request_for_md", "needs_destination", "assign_to_manager"}
+_TASK_INTENTS = {"create_task", "assign_to_staff", "assign_to_team", "assign_to_person", "meet_with_person",
+                 "request_for_md", "needs_destination", "assign_to_pa", "meet_with_pa", "assign_to_manager"}
 
 
 # ------------------------------------------------------------------ does it fit the diary?
@@ -450,20 +593,34 @@ def _clean_pending(pending) -> dict | None:
     return p
 
 
-_BOOKABLE = {"private_task", "pa_self_task", "pa_meeting"}
+_BOOKABLE = {"private_task", "own_task", "person_meeting", "pa_self_task", "pa_meeting"}
 DUPLICATE_WINDOW = timedelta(minutes=3)
 
 
-def _just_saved(user: User, action: str, title: str, when: datetime | None) -> bool:
+def _just_saved(user: User, action: str, title: str, when: datetime | None, assignees: list | None = None) -> bool:
     """The same thing, saved by this person moments ago (a sentence heard twice, or said again because the answer
     was slow): it is not saved a second time."""
     since = timezone.now() - DUPLICATE_WINDOW
+    action = {"pa_self_task": "own_task", "pa_meeting": "person_meeting", "pa_task": "person_task", "mg_task": "person_task"}.get(action, action)
     if action == "private_task":
         rows = PrivateTask.objects.filter(owner=user, created_at__gte=since)
-    elif action == "pa_self_task":
-        rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.PA_SELF, created_at__gte=since)
-    elif action == "pa_meeting":
-        rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.MD_MEET_PA, created_at__gte=since)
+    elif action == "own_task":
+        rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.SELF, created_at__gte=since)
+    elif action in ("person_meeting", "person_task"):
+        origin = SharedTask.Origin.MEET if action == "person_meeting" else SharedTask.Origin.GIVEN
+        rows = SharedTask.objects.filter(created_by=user, origin=origin, created_at__gte=since)
+        ids = [a.get("id") for a in (assignees or []) if isinstance(a, dict)]
+        if ids:
+            rows = rows.filter(assignee_user_id__in=ids)
+    elif action == "md_request":
+        want = " ".join((title or "").lower().split())
+        return any(" ".join(str((r.payload or {}).get("title") or "").lower().split()) == want
+                   for r in TaskRequest.objects.filter(requested_by=user, created_at__gte=since))
+    elif action == "message":
+        want = " ".join((title or "").split())
+        ids = [a.get("id") for a in (assignees or []) if isinstance(a, dict)]
+        return bool(want) and Alert.objects.filter(sender=user, ref_type="message", body=want, created_at__gte=since,
+                                                   recipient_id__in=ids).exists()
     else:
         return False
     want = " ".join((title or "").lower().split())
@@ -495,15 +652,23 @@ def _book_now(user: User, d: dict, full_text: str) -> dict:
             "duration_minutes": mins, "remind_before_minutes": int(d.get("remind_before_minutes") or 0) or None,
             "announcement": d.get("announcement") or ""}
     action = d.get("action")
+    refs = []
     if action == "private_task":
-        services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
-    elif action == "pa_self_task":
-        services.create_pa_self_task(user, {**data, "description": full_text})
-    elif action == "pa_meeting":
-        services.create_pa_task(user, {**data, "description": full_text}, meeting_with_pa=True)
+        task = services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
+        refs.append({"type": "private", "id": str(task.id)})
+    elif action in ("own_task", "pa_self_task"):
+        task = services.create_own_task(user, {**data, "description": full_text})
+        refs.append({"type": "shared", "id": str(task.id)})
+    elif action in ("person_meeting", "pa_meeting"):
+        from . import actions  # noqa: PLC0415 — actions imports this module
+        for person in actions._people_of(user, d):  # noqa: SLF001
+            task = services.create_person_task(user, person, {**data, "description": full_text}, meeting=True)
+            refs.append({"type": "shared", "id": str(task.id)})
+        if not refs:
+            raise services.ServiceError("no_person", "I don't know who the meeting is with.", 422)
     else:
         raise services.ServiceError("invalid", "this cannot be booked directly.", 422)
-    return {"title": d["title"], "start": start, "minutes": mins, "lead": lead}
+    return {"title": d["title"], "start": start, "minutes": mins, "lead": lead, "refs": refs}
 
 
 def _apply_moves(user: User, moves: list) -> list[str]:
@@ -523,10 +688,7 @@ def _apply_moves(user: User, moves: list) -> list[str]:
                 services.update_private_task(user, m["id"], changes, task.version)
             else:
                 task = SharedTask.objects.get(id=m["id"])
-                if user.is_md:
-                    services.update_shared_md_task(user, m["id"], changes, task.version)
-                else:
-                    services.update_pa_self_task(user, m["id"], changes, task.version)
+                services.change_shared_task(user, m["id"], changes, task.version)
         except (services.ServiceError, ObjectDoesNotExist, ValueError):
             failed.append(str(m.get("title") or "one meeting"))
     return failed
@@ -573,33 +735,24 @@ def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: st
     draft["speak_text"], draft["speak_lang"] = (hi, "hi") if lang == "hi" else (en, "en")
 
 
-def _send_alert(user: User, cmd: dict, draft: dict, exact_at, address: str, address_hi: str) -> None:
-    """"Suraj ko alert bhejo ki client aa gaye" / "Ma'am ko bata do meeting 5 baje hai": a message to the other
-    person (MD -> PA, PA -> MD), now or at the moment said. It is an alert, never a task: nothing to tick off."""
-    draft["action"] = "answer"
-    text = " ".join(str(cmd.get("notes") or cmd.get("title") or "").split())[:500]
+def _prepare_message(user: User, cmd: dict, draft: dict, exact_at, address: str, address_hi: str) -> None:
+    """"Sunil ko bolo client aa gaye", "Mansi aur Himanshu ko bata do meeting 5 baje hai", "sab ko message bhejo ki
+    kal office band hai": a message (never a task: nothing to tick off) to one person, several, or a group, now or at
+    the moment said. A long message (minutes of speaking) is kept whole. JARVIS sends it at once (see _auto_save);
+    with nobody named it goes to the usual person (the MD's to the PA, anyone else's to the MD)."""
+    draft["action"] = "message"
+    text = " ".join(str(cmd.get("notes") or cmd.get("title") or "").split())[:services.MESSAGE_MAX_CHARS]
+    draft["message"] = text
+    draft["title"] = draft["title"] or text[:80]
     if not text:
-        _ask(draft, f"{address}, what should the alert say?", f"{address_hi}, अलर्ट में क्या कहूँ?")
+        _ask(draft, f"{address}, what should the message say?", f"{address_hi}, संदेश में क्या कहूँ?")
         return
-    when = exact_at
-    d, t = _safe_date(cmd.get("due_date") or ""), _safe_time(cmd.get("due_time") or "")
-    if not when and d and t:
-        when = tu.combine_local(date.fromisoformat(d), time.fromisoformat(t))
-    if when and when <= tu.now_local() + timedelta(seconds=30):
-        when = None  # a moment already here: now
-    priority = cmd.get("priority") if cmd.get("priority") in _PRIORITIES else Priority.NORMAL
-    try:
-        to_name = services.send_message(user, text, when=when, priority=priority,
-                                        to=str(cmd.get("staff_name") or (cmd.get("people") or [""])[0] or ""))
-    except services.ServiceError as exc:
-        _say(draft, f"Sorry {address}, {exc.message}", f"माफ़ कीजिए {address_hi}, अलर्ट नहीं भेज पाया।")
-        return
-    draft["booked"] = True
-    if when:
-        _say(draft, f"Okay {address}, I'll alert {to_name} at {tu.fmt_time(when)}.",
-             f"ठीक है {address_hi}, {tu.fmt_time_hi(when)} बजे {to_name} को अलर्ट भेज दूँगा।")
-    else:
-        _say(draft, f"Sent, {address}. {to_name} has the alert.", f"भेज दिया, {address_hi}। {to_name} को अलर्ट मिल गया।")
+    if exact_at is None and draft.get("due_date") and draft.get("due_time"):
+        when = tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
+        if when <= tu.now_local() + timedelta(seconds=30):
+            draft["due_date"], draft["due_time"], draft["due_label"] = "", "", ""  # a moment already here: now
+    _prepare_people(draft, cmd, user, address, address_hi, default_to=True,
+                    group=str(cmd.get("team_name") or "") if not _recipients_of(cmd) else "")
 
 
 def _swap_of(cmd: dict, matches: list[dict]):
@@ -627,10 +780,12 @@ def _target_task(t: dict):
 
 
 def _slot_of(user: User, draft: dict):
-    """(whose diary, kind, due_date, due_time, minutes, ids to leave out) for what the draft adds or moves."""
+    """(whose diary, kind, due_date, due_time, minutes, ids to leave out, that person) for what the draft adds or
+    moves. whose: "self", "person" (someone the speaker gives it to) or "md" (a request for the MD's time)."""
     whose = _SLOT_ACTIONS.get(draft.get("action", ""))
     if not whose:
         return None
+    subject = user
     if draft["action"] == "change_task":
         targets = draft.get("targets") or []
         changes = draft.get("changes") or {}
@@ -642,16 +797,25 @@ def _slot_of(user: User, draft: dict):
         if isinstance(task, SharedTask):
             if task.assignee_type == SharedTask.Assignee.STAFF:
                 return None  # a staff member's diary is not ours to judge
-            if task.assignee_type == SharedTask.Assignee.PA and task.origin != SharedTask.Origin.MD_MEET_PA:
-                whose = "pa" if user.is_md else "self"
+            if task.assignee_user_id and task.assignee_user_id != user.id and task.origin not in services.MEET_ORIGINS:
+                whose, subject = "person", task.assignee_user
         local = tu.to_local(task.due_at) if task.due_at else None
         due_date = _safe_date(changes.get("due_date") or "") or (local.date().isoformat() if local else
                                                                   task.due_date.isoformat() if task.due_date else "")
         due_time = _safe_time(changes.get("due_time") or "") or (local.strftime("%H:%M") if local else "")
         kind = changes.get("kind") if changes.get("kind") in _KINDS else task.kind
-        return whose, kind, due_date, due_time, task.estimated_minutes, [str(task.id)]
+        return whose, kind, due_date, due_time, task.estimated_minutes, [str(task.id)], subject
+    if whose == "md":
+        subject = services.get_md()
+    elif whose == "person":
+        ids = [a.get("id") for a in (draft.get("assignees") or []) if isinstance(a, dict)]
+        if len(ids) != 1:
+            return None  # work for several people: nobody's diary in particular
+        subject = User.objects.filter(id=ids[0]).first()
+        if subject is None:
+            return None
     return whose, draft.get("kind") or Kind.TASK, draft.get("due_date") or "", draft.get("due_time") or "", \
-        draft.get("duration_minutes"), []
+        draft.get("duration_minutes"), [], subject
 
 
 def _insert_notes(reply: str, notes: list[str], hindi: bool = False) -> str:
@@ -675,10 +839,9 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     slot = _slot_of(user, draft)
     if not slot:
         return
-    whose, kind, due_date, due_time, minutes, exclude = slot
+    whose, kind, due_date, due_time, minutes, exclude, subject = slot
     if not due_date and kind not in (Kind.MEETING, Kind.CALL):
         return  # a task with no day needs no slot
-    subject = {"pa": services.get_pa(), "md": services.get_md()}.get(whose, user)
     if subject is None:
         return
     prefs = services.get_prefs(subject)
@@ -699,14 +862,13 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
                 review["suggested"] = None
     else:
         review["clashes"], review["suggested"] = [], None
-    anonymous = whose == "md"  # the PA only ever hears that the MD is busy, never with what
-    pa = services.get_pa()
-    pa_name = pa.spoken_name if pa else "your PA"
+    anonymous = whose == "md"  # the team only ever hears that the MD is busy, never with what
+    pa_name = subject.spoken_name  # the person whose diary it is, when it is someone else's
     address_hi = services.address_hi_of(user)
     sir, sir_hi = services.md_address(), services.md_address_hi()
     item = (draft.get("targets") or [{}])[0].get("title", "") if draft["action"] == "change_task" else draft.get("title", "")
     item = item or "this"
-    if whose == "pa" and draft["action"] != "change_task":
+    if whose == "person" and draft["action"] != "change_task":
         item = f"{item} for {pa_name}"
     d = date.fromisoformat(due_date) if due_date else None
     day_en = tu.fmt_day(d) if d else ""
@@ -726,7 +888,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     load = review.get("load") or {}
     if load.get("heavy"):
         n = load["count"]
-        who = {"self": "", "pa": f"{pa_name} ", "md": f"{sir} "}[whose]
+        who = {"self": "", "person": f"{pa_name} ", "md": f"{sir} "}[whose]
         warnings.append(f"{who}{day_en if who else day_cap} already has {n} items")  # shown, not said
     if review.get("off_day"):
         notes_en.append(f"{day_cap} is a weekly off.")
@@ -756,7 +918,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             head_hi = f"{address_hi}, {when_hi} {item}: {sir_hi} उस समय बिज़ी हैं।"
             warnings.append(f"{sir} is busy {span}")
         else:
-            has = {"self": "you already have", "pa": f"{pa_name} already has"}.get(whose, "there is already")
+            has = {"self": "you already have", "person": f"{pa_name} already has"}.get(whose, "there is already")
             head_en = f"{address}, {item} {when_en}: {has} {c['title']} then."
             head_hi = f"{address_hi}, {when_hi} {item}: उस समय {c['title']} पहले से है।"
             warnings.append(f"Overlaps with {c['title']} ({span})")
@@ -796,8 +958,8 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         s_en, e_en = tu.fmt_time(sug["start"]), tu.fmt_time(sug["end"])
         s_hi, e_hi = tu.fmt_time_hi(sug["start"]), tu.fmt_time_hi(sug["end"])
         s_day = tu.to_local(sug["start"]).date()
-        free = {"self": "you're free", "pa": f"{pa_name} is free", "md": f"{sir} is free"}[whose]
-        free_hi = {"self": "आप", "pa": pa_name, "md": sir_hi}[whose]
+        free = {"self": "you're free", "person": f"{pa_name} is free", "md": f"{sir} is free"}[whose]
+        free_hi = {"self": "आप", "person": pa_name, "md": sir_hi}[whose]
         if d:
             head_en = f"{address}, {item} {day_en}: {free} {s_en}–{e_en}. Shall I put it at {s_en}?"
             head_hi = f"{address_hi}, {day_hi} {free_hi} {s_hi} से {e_hi} तक फ्री हैं। {s_hi} रख दूँ?"
@@ -862,12 +1024,15 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
                 saved.append(_person_label(str(c["name"])))
             except services.ServiceError:
                 pass
-    # The person doing the work is resolved by the delegation step (it has its own "which Rahul?" question).
-    doer = services.norm_person(cmd.get("staff_name") or "") if draft["action"] == "delegation" else ""
+    # The person doing the work (or getting the message) is resolved by its own step, which asks its own "which
+    # Rahul?" question; the people it is WITH or ABOUT are checked here.
+    doers = {services.norm_person(n) for n in _recipients_of(cmd)} \
+        if draft["action"] in {"delegation", "person_task", "person_meeting", "message"} else set()
+    doers |= {services.norm_person(a.get("name") or "") for a in (draft.get("assignees") or []) if isinstance(a, dict)}
     names: list[str] = []
     for n in (cmd.get("people") or [])[:4]:
         if isinstance(n, str) and n.strip() and n.strip().lower() not in {x.lower() for x in names} \
-                and not (doer and services.norm_person(n) == doer):
+                and services.norm_person(n) not in doers:
             names.append(n.strip())
     draft["people"] = names
     draft["contacts_saved"] = saved
@@ -902,9 +1067,9 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
         hint_hi = f" या आपका मतलब {found['suggestions'][0]} था?" if found["suggestions"] else ""
         whose = whose_hi = ""
         if draft["action"] == "choose_destination":
-            whose = (" And should this go in your personal tasks, to your PA, or to the team?" if user.is_md
-                     else f" And is this for {sir}, for you, or for someone in the team?")
-            whose_hi = (" और इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम को?" if user.is_md
+            whose = (" And should I keep this for you, or give it to someone on the team?" if user.is_md
+                     else f" And is this for {sir}, for you, or for someone on the team?")
+            whose_hi = (" और इसे आपके लिए रखूँ, या टीम में किसी को दूँ?" if user.is_md
                         else f" और ये {sir_hi} के लिए है, आपके लिए, या टीम में किसी के लिए?")
         draft["needs_clarification"] = True
         draft["question"] = f"{address}, I don't know any {label}. Is {label} on the staff, or an outside contact?{hint}{whose}"
@@ -1049,6 +1214,11 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     last = services.last_view(user, include_private=include_private)
     if last and not (on_screen or {}).get("filters"):
         ctx["last_list"] = last
+    # What JARVIS saved or sent a moment ago (so "undo" / "wapas lo" / "mat bhejo" can take it back).
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    done = actions.last_done(user)
+    if done:
+        ctx["just_saved"] = done.get("label") or "the last instruction"
     model_text = full_text
     if choices and choices.get("items"):
         ctx["choices"] = {"intent": choices["intent"], "items": [{"id": i["id"], "title": i["title"]} for i in choices["items"][:10]]}
@@ -1105,35 +1275,107 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     # More than one thing in one breath ("4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath"): every further
     # item is built by exactly the same rules (where it goes, is the person known, does it clash) and rides along on
     # the same card, so one yes saves them all and nothing is dropped.
-    extras = [it for it in (cmd.get("more_items") or [])[:4] if isinstance(it, dict)]
-    if extras and (draft["action"] in TASK_ACTIONS | {"choose_destination"} or draft.get("reminder_saved")):
+    extras = [it for it in (cmd.get("more_items") or [])[:MAX_ITEMS - 1] if isinstance(it, dict)]
+    if extras and (draft["action"] in SAVE_ACTIONS | {"choose_destination"} or draft.get("reminder_saved")):
         subs = []
         for it in extras:
             sub_cmd = {**_EMPTY_ITEM, **{k: v for k, v in it.items() if k in _ITEM_KEYS}, "_sub": True, "engine": cmd.get("engine", "rules"),
                        "reply_language": reply_language}
             sub_intent = _route_intent(user, sub_cmd, full_text)
-            if sub_intent not in _TASK_INTENTS | {"pa_own"}:  # "pa_own" = the PA's own item (routed, never the model's word)
+            if sub_intent not in _TASK_INTENTS | {"pa_own", "send_alert"}:  # "pa_own" = a team member's own (routed, never the model's word)
                 continue
             sub = _draft_for(user, sub_cmd, sub_intent, full_text, reply_language, ctx, on_screen, None, history, include_private, pending)
-            if sub["action"] in TASK_ACTIONS | {"choose_destination"}:
+            if sub["action"] in SAVE_ACTIONS | {"choose_destination"}:
                 subs.append(sub)
         if subs and draft.get("reminder_saved"):
             # The reminder is already set; the rest becomes the card.
             draft, subs = subs[0], subs[1:]
         slim = [{k: v for k, v in sub.items() if k not in {"categories", "staff_candidates", "target_candidates", "view"}} for sub in subs]
-        if slim and draft["action"] in TASK_ACTIONS | {"choose_destination"}:
+        if slim and draft["action"] in SAVE_ACTIONS | {"choose_destination"}:
             _combine_batch(draft, slim, address, address_hi, reply_language)
+    _auto_save(user, draft, cmd, full_text)
     return draft
+
+
+MAX_ITEMS = 12  # instructions in one go ("Sunil ko ye bolo, Mansi ko ye, aur Himanshu ko ye ...")
+
+
+def _auto_save_ok(draft: dict) -> bool:
+    """Is the card complete and clear enough to do at once, without "shall I save it?"? Every item must be for a
+    known person (or the speaker), have its words, and nothing may be in question (no unknown name, no clash, no
+    time already gone). A rough reading (the AI could not be reached) never saves by itself, except a message
+    (which was always sent at once)."""
+    items = [draft] + [b for b in (draft.get("batch") or []) if isinstance(b, dict)]
+    if draft.get("needs_clarification") or draft.get("card_done") or draft.get("booked"):
+        return False
+    for it in items:
+        if it.get("action") not in AUTO_ACTIONS or it.get("needs_clarification"):
+            return False
+        sched = it.get("schedule") or {}
+        if sched.get("question") or sched.get("hard") or sched.get("clashes"):
+            return False
+        if it["action"] == "message":
+            if not (it.get("message") and it.get("assignees")):
+                return False
+        elif not (it.get("title") or "").strip():
+            return False
+        if it["action"] in {"person_task", "person_meeting"} and not it.get("assignees"):
+            return False
+    if all(it["action"] == "message" for it in items):
+        return True
+    return draft.get("engine") == "ai"
+
+
+def _auto_save(user: User, draft: dict, cmd: dict, full_text: str) -> None:
+    """"Sunil ko bolo kal tak bank ka kaam kar de": who, what and when are all there, so JARVIS does it and says
+    what it did ("Done, Sir: given to Sunil for tomorrow."), with an undo for a minute, instead of asking. The same
+    sentence heard twice is done once."""
+    if cmd.get("_sub") or not _auto_save_ok(draft):
+        return
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    items = [draft] + [b for b in (draft.get("batch") or []) if isinstance(b, dict)]
+    fresh = []
+    for it in items:
+        it = {**it, "transcript": it.get("transcript") or full_text}
+        when = None
+        if it.get("due_date") and it.get("due_time"):
+            when = tu.combine_local(date.fromisoformat(it["due_date"]), time.fromisoformat(it["due_time"]))
+        key = it.get("message") if it["action"] == "message" else it.get("title", "")
+        if _just_saved(user, it["action"], key, when, it.get("assignees")):
+            continue
+        fresh.append(it)
+    address, address_hi = services.address_of(user), services.address_hi_of(user)
+    lang = draft.get("reply_language") if draft.get("reply_language") in {"en", "hi"} else "en"
+    if not fresh:
+        en, hi = f"{address}, that's already done.", f"{address_hi}, ये पहले ही हो चुका है।"
+        result = {"saved": 0, "failed": []}
+    else:
+        card = {**fresh[0], "batch": fresh[1:]}
+        result = actions.run_card(user, card)
+        en, hi = result["en"], result["hi"]
+        # The model's own "done" line reads best for one simple item it fully understood (it names the person as
+        # said); the server's line is used for lists, and whenever the model's line could be stale.
+        done = (cmd.get("done_reply") or "").strip()
+        if len(items) == 1 and result["saved"] == 1 and done and items[0]["action"] in {"private_task", "own_task", "md_request"}:
+            done_hi = (cmd.get("done_reply_hi") or "").strip()
+            en, hi = done, done_hi if _DEVANAGARI.search(done_hi) else hi
+    draft["action"], draft["booked"], draft["batch"] = "answer", True, []
+    draft["needs_clarification"], draft["question"], draft["schedule"] = False, "", None
+    draft["undo"] = bool(result.get("saved"))
+    draft["saved_count"] = result.get("saved", 0)
+    _say(draft, en, hi)
+    draft["speak_text"], draft["speak_lang"] = (hi, "hi") if lang == "hi" and hi else (en, "en")
+    draft["done_reply"] = draft["done_speak"] = ""
 
 
 # The fields one further item may carry (everything else is the main command's business).
 _ITEM_KEYS = {"intent", "title", "notes", "kind", "priority", "due_date", "due_time", "due_in_minutes", "duration_minutes",
-              "remind_before_minutes", "staff_name", "team_name", "people", "reminder_line"}
+              "remind_before_minutes", "staff_name", "team_name", "people", "reminder_line", "recipients", "personal"}
 _EMPTY_ITEM = {"intent": "create_task", "title": "", "notes": "", "kind": "TASK", "priority": "NORMAL", "due_date": "", "due_time": "",
                "due_in_minutes": 0, "duration_minutes": 0, "remind_before_minutes": 0, "staff_name": "", "team_name": "", "people": [],
                "reminder_line": "", "needs_clarification": False, "clarification_question": "", "spoken_reply": "", "spoken_reply_hi": "",
                "done_reply": "", "done_reply_hi": "", "new_contacts": [], "category_key": "", "target_ref": "", "target_refs": [],
-               "changed_fields": [], "keep_original": False}
+               "changed_fields": [], "keep_original": False, "recipients": [], "personal": False}
 
 
 def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
@@ -1145,11 +1387,15 @@ def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
     what = {"private_task": f"personal {kind_en}", "md_request": f"request for {services.md_address()}",
             "delegation": f"{kind_en} for {staff}" if staff else "task for staff", "team_delegation": f"task for {(d.get('team') or {}).get('label') or 'the team'}",
             "pa_task": f"{kind_en} for {pa_name}", "pa_meeting": f"meeting with {pa_name}", "pa_self_task": f"your own {kind_en}",
+            "person_task": f"{kind_en} for {pa_name}", "person_meeting": f"meeting with {pa_name}", "own_task": f"your own {kind_en}",
+            "message": f"message to {pa_name}",
             "mg_task": f"{kind_en} for {d.get('mg_name') or 'the manager'}",
             "choose_destination": kind_en}.get(d.get("action"), kind_en)
     what_hi = {"private_task": f"पर्सनल {kind_hi}", "md_request": f"{sir_hi} के लिए रिक्वेस्ट",
                "delegation": f"{staff} के लिए {kind_hi}" if staff else "स्टाफ़ के लिए टास्क", "team_delegation": "टीम के लिए टास्क",
                "pa_task": f"{pa_name} के लिए {kind_hi}", "pa_meeting": f"{pa_name} के साथ मीटिंग", "pa_self_task": f"आपका अपना {kind_hi}",
+               "person_task": f"{pa_name} के लिए {kind_hi}", "person_meeting": f"{pa_name} के साथ मीटिंग", "own_task": f"आपका अपना {kind_hi}",
+               "message": f"{pa_name} को संदेश",
                "mg_task": f"{d.get('mg_name') or 'मैनेजर'} के लिए {kind_hi}",
                "choose_destination": kind_hi}.get(d.get("action"), kind_hi)
     due_en = d.get("due_label") or ""
@@ -1264,43 +1510,55 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     # A meeting or call with its day and time needs nothing more from him: not "with whom?", not "how long?" (his
     # usual length is used and said). The model's own question is dropped; the server still asks what matters
     # (a name nobody knows, a time already gone, a clash).
-    if intent in {"create_task", "pa_own", "meet_with_pa"} and kind in (Kind.MEETING, Kind.CALL) and due_date and due_time \
+    if intent in {"create_task", "pa_own", "meet_with_person"} and kind in (Kind.MEETING, Kind.CALL) and due_date and due_time \
             and draft["needs_clarification"]:
         draft["needs_clarification"], draft["question"], draft["spoken_reply"] = False, "", ""
         draft["title"] = draft["title"] or ("Call" if kind == Kind.CALL else "Meeting")
 
     summary_hi = ""  # Hindi twin of a server-written answer (lists and charts), for the Hindi voice
+    draft["assignees"] = []      # the people on the team it is for (person_task / person_meeting / message)
+    draft["message"] = ""        # a message's own words, kept whole
 
     if intent == "send_alert":
-        _send_alert(user, cmd, draft, exact_at, address, address_hi)
+        _prepare_message(user, cmd, draft, exact_at, address, address_hi)
     elif intent == "create_task":
         draft["action"] = "private_task"
     elif intent == "request_for_md":
         draft["action"] = "md_request"
     elif intent == "pa_own":
-        draft["action"] = "pa_self_task"  # Mansi's own task: on her list, visible to Sir, no approval needed
+        # A team member's own: their PERSONAL items stay theirs alone; their own WORK goes on their list, where the MD
+        # (who sees all work) can see it. A plain reminder is always theirs alone.
+        draft["action"] = "private_task" if (cmd.get("personal") or is_reminder) else "own_task"
     elif intent == "assign_to_staff":
         draft["action"] = "delegation"
         _prepare_delegation(draft, cmd, user, address, address_hi)
     elif intent == "assign_to_team":
-        draft["action"] = "team_delegation"
-        _prepare_team(draft, cmd, address, address_hi)
-    elif intent == "assign_to_manager":
-        draft["action"] = "mg_task"
-        mg = services.get_manager()
-        draft["mg_name"] = draft["pa_name"] = mg.spoken_name if mg else ""
-        if not mg:
-            _ask(draft, f"{address}, there is no manager account yet.", f"{address_hi}, अभी कोई मैनेजर अकाउंट नहीं है।")
-    elif intent in {"assign_to_pa", "meet_with_pa"}:
-        draft["action"] = "pa_meeting" if intent == "meet_with_pa" else "pa_task"
-        if intent == "meet_with_pa":
+        team_name = str(cmd.get("team_name") or "all")
+        # "Sab staff ko bolo" is the TaskPanel staff list; "sab ko" / "everyone" / a department is the team first.
+        wants_staff = bool(services.STAFF_GROUP.search(team_name) or services.STAFF_GROUP.search(str(cmd.get("staff_name") or ""))
+                           or re.search(r"\b(sab|all|saare|sare|poore|pure|sabhi)\s+staff\b", full_text, re.IGNORECASE))
+        group, _label = ([], "") if wants_staff else services.find_group(team_name, exclude=user)
+        if wants_staff:
+            cmd["team_name"] = "all" if services.STAFF_GROUP.search(team_name) or team_name in ALL_STAFF_WORDS else team_name
+        if not user.is_md:
+            group = [p for p in group if not p.is_md]  # work for "everyone" from a colleague never lands on the MD
+        if group:
+            draft["action"] = "person_task"
+            _prepare_people(draft, {**cmd, "recipients": [], "staff_name": ""}, user, address, address_hi,
+                            group=cmd.get("team_name") or "all")
+            if not user.is_md:
+                draft["assignees"] = [a for a in draft["assignees"] if a["id"] in {p.id for p in group}]
+        else:
+            draft["action"] = "team_delegation"   # nobody on the team: the TaskPanel staff of that department
+            _prepare_team(draft, cmd, address, address_hi)
+    elif intent in {"assign_to_person", "meet_with_person"}:
+        meeting = intent == "meet_with_person"
+        draft["action"] = "person_meeting" if meeting else "person_task"
+        if meeting and draft["kind"] not in (Kind.MEETING, Kind.CALL):
             draft["kind"] = Kind.MEETING
-        pa = services.get_pa()
-        draft["pa_name"] = pa.spoken_name if pa else ""
-        if not pa:
-            _ask(draft, f"{address}, there is no PA account set up yet.", f"{address_hi}, अभी कोई PA अकाउंट बना नहीं है।")
-        elif intent == "meet_with_pa" and not draft["title"].lower().startswith("meeting"):
-            draft["title"] = draft["title"] or f"Meeting with {pa.spoken_name}"
+        _prepare_people(draft, cmd, user, address, address_hi)
+        if meeting and draft["assignees"] and not draft["title"]:
+            draft["title"] = f"Meeting with {draft['assignees'][0]['name']}"
     elif intent == "needs_destination":
         draft["action"] = "choose_destination"
         draft["needs_clarification"] = True
@@ -1308,10 +1566,10 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             draft["question"] = ""  # the model was asking something else; whose it is comes first
         if not draft["question"]:
             if user.is_md:
-                _ask(draft, f"{address}, should I add this to your personal tasks, give it to your PA, or assign it to someone in the team?",
-                     f"{address_hi}, इसे आपके पर्सनल में रखूँ, PA को दूँ, या टीम में किसी को?")
+                _ask(draft, f"{address}, should I keep this for you, or give it to someone on the team?",
+                     f"{address_hi}, इसे आपके लिए रखूँ, या टीम में किसी को दूँ?")
             else:
-                _ask(draft, f"{address}, is this for {sir}, for you, or for someone in the team?",
+                _ask(draft, f"{address}, is this for {sir}, for you, or for someone on the team?",
                      f"{address_hi}, ये {sir_hi} के लिए है, आपके लिए, या टीम में किसी के लिए?")
     elif intent in {"accept_request", "decline_request"}:
         draft["action"] = intent
@@ -1526,6 +1784,16 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             hi = {"export_pdf": f"PDF बना रहा हूँ, {address_hi}।", "export_csv": f"शीट बना रहा हूँ, {address_hi}।",
                   "share": f"शेयर खोल रहा हूँ, {address_hi}।", "open_settings": f"सेटिंग्स खोल रहा हूँ, {address_hi}।"}.get(act, f"ठीक है {address_hi}।")
             _say(draft, en, hi)
+    elif intent == "undo":
+        # "Undo" / "wapas lo" / "galti ho gayi, mat bhejo": what JARVIS saved or sent a moment ago is taken back.
+        from . import actions  # noqa: PLC0415 — actions imports this module
+        draft["action"], draft["needs_clarification"], draft["question"] = "answer", False, ""
+        try:
+            done = actions.undo_last(user)
+            draft["booked"] = bool(done["undone"])  # the lists change: the phone refreshes them
+            _say(draft, done["en"], done["hi"])
+        except services.ServiceError:
+            _say(draft, f"{address}, there is nothing to undo right now.", f"{address_hi}, अभी वापस लेने को कुछ नहीं है।")
     elif intent == "end_conversation":
         draft["action"] = "end"
         draft["needs_clarification"] = False
@@ -1620,8 +1888,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         pa_name = draft.get("pa_name") or "your PA"
         due_hi = (f"{tu.minutes_phrase_hi(due_in)} में ({tu.fmt_time_hi(exact_at)})" if exact_at
                   else _due_label_hi(draft["due_date"], draft["due_time"]))
-        if draft["action"] == "pa_meeting":
-            # Always state clearly that the PA will be informed.
+        if draft["action"] in ("pa_meeting", "person_meeting"):
+            # Always state clearly that the other person will be informed.
             when = f" {draft['due_label']}" if draft["due_label"] else ""
             more_en = more_hi = ""
             if draft["due_date"] and draft["due_time"]:
@@ -1634,7 +1902,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                     more_hi += f"। {tu.minutes_phrase_hi(lead)} पहले याद दिला दूँगा"
             _say(draft, f"{address}, meeting with {pa_name}{when}{more_en}. I'll inform {pa_name} too. Shall I save it?",
                  f"{address_hi}, {pa_name} के साथ मीटिंग" + (f" {due_hi}" if due_hi else "") + f"{more_hi}। {pa_name} को भी बता दूँगा। सेव कर दूँ?")
-        elif draft["kind"] == Kind.MEETING and draft["action"] in {"private_task", "pa_self_task"} and draft["due_date"] \
+        elif draft["kind"] == Kind.MEETING and draft["action"] in {"private_task", "pa_self_task", "own_task"} and draft["due_date"] \
                 and draft["due_time"] and not is_reminder:
             # A meeting: he is told how long it is taken to be and how early he will be reminded, so he can change either.
             prefs = services.get_prefs(user)
@@ -1653,6 +1921,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 "pa_task": f"Task for {pa_name}",
                 "pa_self_task": "Your own task",
                 "mg_task": f"Task for {draft.get('mg_name') or 'the manager'}",
+                "person_task": f"Task for {pa_name}",
+                "own_task": "Your own work",
             }[draft["action"]]
             what_hi = {
                 "private_task": "पर्सनल टास्क",
@@ -1661,6 +1931,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 "pa_task": f"{pa_name} के लिए टास्क",
                 "pa_self_task": "आपका अपना टास्क",
                 "mg_task": f"{draft.get('mg_name') or 'मैनेजर'} के लिए टास्क",
+                "person_task": f"{pa_name} के लिए टास्क",
+                "own_task": "आपका अपना काम",
             }[draft["action"]]
             bits = [b for b in (draft["due_label"], f"{priority.lower()} priority" if priority != "NORMAL" else "") if b]
             bits_hi = [b for b in (due_hi, f"{_PRIORITY_HI[priority]} प्रायोरिटी" if priority != "NORMAL" else "") if b]
@@ -1677,7 +1949,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     if (draft["action"] in _BOOKABLE and draft["kind"] in (Kind.MEETING, Kind.CALL) and draft["due_date"] and draft["due_time"]
             and draft["title"] and not draft["needs_clarification"] and not is_reminder
             and _just_saved(user, draft["action"], draft["title"],
-                            exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"])))):
+                            exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"])),
+                            draft.get("assignees"))):
         draft["action"], draft["booked"], draft["schedule"] = "answer", True, None
         _say(draft, f"{address}, that is already booked: {draft['title']}, {draft['due_label']}.",
              f"{address_hi}, ये पहले से बुक है: {draft['title']}।")
@@ -1685,12 +1958,12 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"] and not is_reminder and not draft.get("swap"):
         _advise_schedule(user, draft, address)
 
-    if is_reminder and draft["action"] in {"private_task", "pa_self_task"} and not draft["needs_clarification"] \
+    if is_reminder and draft["action"] in {"private_task", "pa_self_task", "own_task"} and not draft["needs_clarification"] \
             and _just_saved(user, draft["action"], draft["title"],
                             exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))):
         draft["action"], draft["reminder_saved"] = "answer", True
         _say(draft, f"{address}, that reminder is already set.", f"{address_hi}, ये रिमाइंडर पहले से लगा है।")
-    if is_reminder and draft["action"] in {"private_task", "pa_self_task"} and not draft["needs_clarification"]:
+    if is_reminder and draft["action"] in {"private_task", "pa_self_task", "own_task"} and not draft["needs_clarification"]:
         when = exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
         data = {"title": draft["title"], "notes": draft["notes"], "kind": Kind.TASK, "priority": priority, "due_at": when,
                 "due_date": tu.to_local(when).date(), "due_time": tu.to_local(when).time(), "announcement": "", "reminder": True}
@@ -1698,7 +1971,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             if draft["action"] == "private_task":
                 services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
             else:
-                services.create_pa_self_task(user, {**data, "description": full_text})
+                services.create_own_task(user, {**data, "description": full_text})
             draft["action"], draft["reminder_saved"] = "answer", True
             thing = "" if draft["title"] == "Reminder" else f": {draft['title']}"
             if exact_at:
@@ -1734,10 +2007,12 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         lead = draft["remind_before_minutes"] or services.default_remind_before(draft["kind"], priority, prefs_now)
         try:
             action = draft["action"]
-            _book_now(user, {**draft, "kind": draft["kind"], "priority": priority, "due_at": exact_at.isoformat() if exact_at else "",
-                             "duration_minutes": mins, "due_date": tu.to_local(when).date().isoformat(),
-                             "due_time": tu.to_local(when).strftime("%H:%M")}, full_text)
-            draft["action"], draft["booked"] = "answer", True
+            booked = _book_now(user, {**draft, "kind": draft["kind"], "priority": priority, "due_at": exact_at.isoformat() if exact_at else "",
+                                      "duration_minutes": mins, "due_date": tu.to_local(when).date().isoformat(),
+                                      "due_time": tu.to_local(when).strftime("%H:%M")}, full_text)
+            from . import actions  # noqa: PLC0415 — actions imports this module
+            actions.remember_done(user, booked.get("refs") or [], draft["title"])
+            draft["action"], draft["booked"], draft["undo"] = "answer", True, bool(booked.get("refs"))
             pa_name = draft.get("pa_name") or "your PA"
             when_en = draft["due_label"] or _due_label(draft["due_date"], draft["due_time"])
             when_hi = (f"{tu.minutes_phrase_hi(due_in)} में ({tu.fmt_time_hi(exact_at)})" if exact_at
@@ -1748,7 +2023,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             if told:
                 en += f" I'll remind you {tu.minutes_phrase(lead)} before."
                 hi += f" {tu.minutes_phrase_hi(lead)} पहले याद दिला दूँगा।"
-            if action == "pa_meeting":
+            if action in ("pa_meeting", "person_meeting"):
                 en += f" {pa_name} has been told."
                 hi += f" {pa_name} को बता दिया है।"
             for note in sched_now.get("notes") or []:

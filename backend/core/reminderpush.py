@@ -47,7 +47,7 @@ def run(now: datetime | None = None) -> int:
     STATE["checked_at"] = now
     pushed = STATE["pushed"]
     n = 0
-    for user in User.objects.filter(role__in=[User.Role.MD, User.Role.PA], is_active=True):
+    for user in User.objects.filter(is_active=True):  # everyone on the team
         try:
             items = reminders_for(user, hours=1)["reminders"]
         except Exception:  # noqa: BLE001 — one person's list must not stop the other's

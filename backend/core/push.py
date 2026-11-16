@@ -99,6 +99,15 @@ def forget_device(user, token: str) -> int:
 
 
 # ------------------------------------------------------------------ sending
+def _fit(text: str, max_bytes: int) -> str:
+    """The text cut (at a word) so it takes at most max_bytes in UTF-8."""
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    cut = raw[:max_bytes].decode("utf-8", errors="ignore")
+    return (cut.rsplit(" ", 1)[0] if " " in cut else cut) + " …"
+
+
 def payload_for(alert: Alert) -> dict[str, str]:
     """Everything the phone needs to show and speak the alert without another round trip (FCM allows 4 KB).
     The spoken line is in the recipient's current language."""
@@ -108,14 +117,17 @@ def payload_for(alert: Alert) -> dict[str, str]:
 
     spoken = alert.spoken_text_hi if lang.current(alert.recipient) == "hi" and alert.spoken_text_hi else alert.spoken_text
     question = services.alert_question(alert)
+    # A long message (minutes of speaking) does not fit in one push: the push carries as much as fits (Hindi letters
+    # take three bytes each) and the phone reads the whole message from the alert list when it is opened.
     return {
         "type": "alert",
         "id": str(alert.id),
         "kind": alert.kind,
         "priority": alert.priority,
         "title": alert.title[:200],
-        "body": (alert.body or "")[:1500],
-        "spoken": (spoken or "")[:1500],
+        "body": _fit(alert.body or "", 1100),
+        "spoken": _fit(spoken or "", 1300),
+        "long": "1" if len(alert.body or "") > 1000 else "",
         "ref_type": alert.ref_type,
         "ref_id": alert.ref_id,
         # The question JARVIS asks after it (a contract both parts of the phone read), and the key it is announced

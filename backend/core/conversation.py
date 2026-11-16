@@ -12,7 +12,7 @@ from datetime import date, datetime, time, timedelta
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
-from . import ai_brain, assistant, services
+from . import actions, ai_brain, assistant, services
 from . import lang as lang_mod
 from . import timeutils as tu
 from .assistant import TASK_ACTIONS
@@ -24,11 +24,11 @@ log = logging.getLogger("jarvis.conversation")
 
 STATE_TTL = timedelta(minutes=10)
 MAX_HISTORY = 8
-CONFIRMABLE = TASK_ACTIONS | {"accept_request", "decline_request", "complete", "remember", "change_task", "delete_task"}
-AI_DONE_OK = {"private_task", "pa_task", "pa_meeting", "md_request", "remember", "accept_request", "decline_request",
-              "complete", "pa_self_task"}
+CONFIRMABLE = TASK_ACTIONS | {"message", "accept_request", "decline_request", "complete", "remember", "change_task", "delete_task"}
+AI_DONE_OK = {"private_task", "md_request", "remember", "accept_request", "decline_request", "complete", "own_task"}
 EMPTY = {"history": [], "pending": None, "choices": None, "offer": None,
          "last_view": None,  # the list JARVIS showed last (see services.remember_last_view); kept, not used here
+         "last_done": None,  # what JARVIS saved a moment ago, for "undo" (see actions.remember_done); kept, not used here
          "asked": None}      # the reminder / alert the phone's background part just spoke and asked about
 
 
@@ -45,6 +45,16 @@ def _load(user: User) -> dict:
 
 
 def _save(user: User, state: dict) -> None:
+    # The list answered last and what was just saved are written by other parts during this turn (views, actions):
+    # their newest copy is kept, never the one read at the start of the turn.
+    row = ConversationState.objects.filter(user=user).first()
+    try:
+        current = json.loads(row.state_json or "{}") if row else {}
+    except ValueError:
+        current = {}
+    state = {**state, **{k: current[k] for k in ("last_view", "last_done") if k in current}}
+    if "last_done" not in current:
+        state.pop("last_done", None)
     ConversationState.objects.update_or_create(
         user=user, defaults={"state_json": json.dumps(state, ensure_ascii=False, default=str)})
 
@@ -68,6 +78,8 @@ def _heading(p: dict) -> str:
     pa = p.get("pa_name") or "your PA"
     return {
         "private_task": "Personal task", "pa_task": f"Task for {pa}", "pa_meeting": f"Meeting with {pa}",
+        "person_task": f"Task for {pa}", "person_meeting": f"Meeting with {pa}", "own_task": "Your own work",
+        "message": f"Message to {pa}",
         "delegation": f"Task for {(p.get('staff') or {}).get('name', 'a staff member')}",
         "team_delegation": f"Task for {(p.get('team') or {}).get('label', 'the team')}",
         "md_request": f"Request to {services.md_address()}", "pa_self_task": "Your own task",
@@ -180,7 +192,7 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
                      *_twin(said_in, f"{address_hi}, उसके लिए JARVIS खोलिए। ऐप बंद हो तो मैं सिर्फ़ बात कर सकता हूँ।"),
                      listen=True, action="answer")
     elif action == "ask":
-        reader = "the Managing Director" if user.is_md else f"{user.spoken_name}, the MD's personal assistant,"
+        reader = "the Managing Director" if user.is_md else f"{user.spoken_name}, {services.role_label(user)},"
         ans = ai_brain.answer(draft["ask_text"], state["history"], user=user, address=address, reader=reader, lang=said_in)
         resp = _resp(ans["text"], ans["speak_text"], ans["speak_lang"], listen=True, action="answer")
     elif action == "briefing":
@@ -333,8 +345,9 @@ def _answer_asked(user: User, asked: dict, yes: bool, address: str, address_hi: 
                         {"due_date": q.get("to") or (tu.today_local() + timedelta(days=1)).isoformat()}, "Moved from the morning briefing")
             line = (f"Moved {t.get('title', title)} to tomorrow, {address}.", f"{t.get('title', title)} कल पर ले गया, {address_hi}।")
         elif q.get("kind") == "seen" and yes:
-            services.tell_sender_seen(user, alert)
-            line = (f"Told {sir}, {address}.", f"{sir_hi} को बता दिया, {address_hi}।")
+            told = services.tell_sender_seen(user, alert)
+            to, to_hi = services.giver_words(told.recipient) if told else (sir, sir_hi)
+            line = (f"Told {to}, {address}.", f"{to_hi} को बता दिया, {address_hi}।")
         else:
             line = (f"Okay {address}.", f"ठीक है {address_hi}।")
         if not alert.acknowledged_at:
@@ -354,20 +367,8 @@ def _complete_one(user: User, t: dict) -> bool:
     if t.get("scope") == "private":
         services.update_private_task(user, t["id"], {"status": Status.COMPLETED}, version)
         return False
-    task = SharedTask.objects.get(id=t["id"])
-    if task.assignee_type in (SharedTask.Assignee.PA, SharedTask.Assignee.MG):
-        if user.is_assistant and task.assignee_type == services.bucket_of(user):
-            services.update_pa_task_status(user, t["id"], Status.COMPLETED, version)
-        elif user.is_md:
-            services.update_shared_md_task(user, t["id"], {"status": Status.COMPLETED}, version)
-        else:
-            services.update_given_task(user, t["id"], {"status": Status.COMPLETED}, version)
-        return False
-    if user.is_md:
-        services.update_shared_md_task(user, t["id"], {"status": Status.COMPLETED}, version)
-        return False
-    services.propose_change(user, t["id"], {"status": Status.COMPLETED}, version, "Marked done")
-    return True
+    _task, request = services.complete_shared_task(user, t["id"], version)
+    return request is not None
 
 
 def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
@@ -381,22 +382,8 @@ def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
     if t.get("scope") == "private":
         services.update_private_task(user, t["id"], clean, version)
         return False
-    if user.is_md:
-        services.update_shared_md_task(user, t["id"], clean, version)
-        return False
-    own = SharedTask.objects.filter(id=t["id"], origin__in=services.OWN_ORIGINS, created_by=user).exists()
-    if own:  # their own task: they change it themselves
-        services.update_pa_self_task(user, t["id"], clean, version)
-        return False
-    if SharedTask.objects.filter(id=t["id"], origin__in=services.GIVEN_ORIGINS, created_by=user).exists():
-        services.update_given_task(user, t["id"], clean, version)  # one they gave the other
-        return False
-    mine = SharedTask.objects.filter(id=t["id"], assignee_type=services.bucket_of(user)).select_related("created_by").first()
-    if mine is not None:
-        giver = services.giver_words(mine.created_by)[0]
-        raise ServiceError("forbidden", f"only {giver} can change a task given to you. You can update its status.", 403)
-    services.propose_change(user, t["id"], clean, version, reason)
-    return True
+    _task, request = services.change_shared_task(user, t["id"], clean, version, reason)
+    return request is not None
 
 
 def _execute(user: User, p: dict, address: str, lang: str = "en") -> dict:
@@ -406,6 +393,11 @@ def _execute(user: User, p: dict, address: str, lang: str = "en") -> dict:
     batch = [b for b in (p.get("batch") or []) if isinstance(b, dict)]
     if not batch:
         return _execute_one(user, p, address, lang)
+    shared = {"private_task", "md_request", "message"} | actions.PERSON_ACTIONS | set(actions.LEGACY)
+    if all(item.get("action") in shared for item in [p] + batch):
+        # Many instructions to many people in one go: done together, so one "undo" takes all of them back.
+        r = actions.run_card(user, p)
+        return _resp(r["en"], *_twin(lang, r["hi"]), listen=True, action="saved" if r["saved"] else "error")
     saved, failed = [], []
     for item in [p] + batch:
         resp = _execute_one(user, item, address, lang)
@@ -424,45 +416,19 @@ def _execute(user: User, p: dict, address: str, lang: str = "en") -> dict:
 def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
     a = p.get("action")
     targets = p.get("targets") or ([p["target"]] if p.get("target") else [])
-    sir, sir_hi, he = services.md_address(), services.md_address_hi(), services.md_pronouns()[0]
+    sir, sir_hi = services.md_address(), services.md_address_hi()
     address_hi = services.address_hi_of(user)
     hi = ""
     try:
         if a in TASK_ACTIONS and not (p.get("title") or "").strip():
             raise ServiceError("invalid", "the task has no title.", 422)
         data = _task_data(p) if a in TASK_ACTIONS else {}
-        due_hi = assistant._due_label_hi(p.get("due_date") or "", p.get("due_time") or "")  # noqa: SLF001
-        if a == "private_task":
-            services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
-            when = f" I'll remind you {p['due_label']}." if p.get("due_label") else ""
-            spoken = f"Saved, {address}.{when}"
-            hi = f"सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "")
-        elif a in {"pa_task", "pa_meeting"}:
-            data["description"] = p.get("transcript", "")
-            services.create_pa_task(user, data, meeting_with_pa=(a == "pa_meeting"))
-            pa = p.get("pa_name") or "your PA"
-            if a == "pa_meeting":
-                spoken = f"Saved, {address}. I've told {pa}, and I'll remind you both."
-                hi = f"सेव हो गया, {address_hi}। {pa} को बता दिया है, और आप दोनों को याद दिला दूँगा।"
-            else:
-                spoken = f"Given to {pa}, {address}. I'll remind you both and tell you when it's done."
-                hi = f"{pa} को दे दिया, {address_hi}। आप दोनों को याद दिलाऊँगा और पूरा होने पर बताऊँगा।"
-        elif a == "mg_task":
-            data["description"] = p.get("transcript", "")
-            services.create_mg_task(user, data)
-            mg = p.get("mg_name") or "the manager"
-            spoken = f"Given to {mg}, {address}. I'll tell you when it's done."
-            hi = f"{mg} को दे दिया, {address_hi}। पूरा होने पर बताऊँगा।"
-        elif a == "md_request":
-            services.create_md_request(user, data)
-            spoken = f"Sent to {sir}, {address}. I'll tell you when {he} answers."
-            hi = f"{sir_hi} को भेज दिया, {address_hi}। जवाब आते ही बताऊँगा।"
-        elif a == "pa_self_task":
-            data["description"] = p.get("transcript", "")
-            services.create_pa_self_task(user, data)
-            when = f" I'll remind you {p['due_label']}." if p.get("due_label") else ""
-            spoken = f"Saved in your own tasks, {address}.{when}"
-            hi = f"आपके अपने टास्क में सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "")
+        if a in {"private_task", "md_request", "message"} | actions.PERSON_ACTIONS | set(actions.LEGACY):
+            # Everything that goes on somebody's list or to somebody (the team's work, a message, the speaker's own):
+            # done by the one shared path, which the app's save and JARVIS's own saving use as well.
+            r = actions.run_item(user, p)
+            actions.remember_done(user, r["undo"], p.get("title") or "")
+            spoken, hi = r["en"], r["hi"]
         elif a == "delegation":
             staff = StaffMember.objects.get(id=(p.get("staff") or {})["id"])
             task, command = services.delegate_to_staff(user, data, staff, category_key=p.get("category_key") or "",

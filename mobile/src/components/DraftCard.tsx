@@ -29,6 +29,10 @@ const SAVE_LABEL: Partial<Record<DraftAction, string>> = {
   md_request: 'Send to Sir',
   pa_self_task: 'Save',
   mg_task: 'Give',
+  person_task: 'Give',
+  person_meeting: 'Save meeting',
+  own_task: 'Save',
+  message: 'Send',
   accept_request: 'Accept',
   decline_request: 'Decline',
   complete: 'Mark done',
@@ -103,8 +107,12 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
   const saveLabel = draft.batch?.length ? `Save all ${draft.batch.length + 1}`
     : draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}`
     : draft.action === 'md_request' ? `Send to ${md}` : SAVE_LABEL[draft.action] ?? 'Confirm';
-  const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text : !!(draft.target || draft.targets?.length))
-    && (draft.action !== 'delegation' || !!draft.staff);
+  const isMessage = draft.action === 'message';
+  const forPeople = draft.assignees?.length ? draft.assignees.map((a) => a.name).join(', ') : '';
+  const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text
+    : isMessage ? !!draft.message && !!forPeople : !!(draft.target || draft.targets?.length))
+    && (draft.action !== 'delegation' || !!draft.staff)
+    && (!['person_task', 'person_meeting'].includes(draft.action) || !!forPeople);
   const danger = draft.action === 'delete_task' || draft.action === 'decline_request';
 
   // JARVIS found a clash or a free slot and offered a time: one tap takes it (or he can just say "haan").
@@ -133,6 +141,7 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
   }
 
   const titleText = draft.action === 'remember' ? draft.memory_text
+    : isMessage ? draft.message || draft.title
     : isTask || choosing ? draft.title
     : draft.target && !(draft.targets?.length > 1) ? draft.target.title
     : '';
@@ -160,8 +169,13 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
         ) : null}
       </View>
 
-      {titleText ? <Txt variant="title" numberOfLines={4} style={s.main}>{titleText}</Txt>
+      {titleText ? <Txt variant={isMessage ? 'body' : 'title'} numberOfLines={isMessage ? 12 : 4} style={s.main}>{titleText}</Txt>
         : isTask ? <Txt variant="title" style={[s.main, { color: colors.faint }]}>What should the task say?</Txt> : null}
+      {isMessage && forPeople ? (
+        <View style={s.facts}>
+          <Fact icon={(draft.assignees?.length ?? 0) > 1 ? 'people-outline' : 'person-outline'} text={`To ${forPeople}`} strong />
+        </View>
+      ) : null}
 
       {isTask ? (
         <>
@@ -172,6 +186,7 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
               <Fact icon="flag" text={priorityLabel[draft.priority]} color={priorityColor[draft.priority]} bg={prioritySoft[draft.priority]} />
             ) : null}
             {draft.action === 'delegation' && draft.staff ? <Fact icon="person-outline" text={draft.staff.name} /> : null}
+            {forPeople ? <Fact icon={(draft.assignees?.length ?? 0) > 1 ? 'people-outline' : 'person-outline'} text={forPeople} /> : null}
           </View>
           {draft.action === 'team_delegation' && draft.team ? (
             <Txt variant="small" style={{ marginTop: 10 }}>

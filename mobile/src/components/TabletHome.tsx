@@ -57,7 +57,7 @@ export function TabletHome({ user }: { user: SessionUser }) {
         { label: 'Late', value: data.overdue.length, tone: data.overdue.length ? 'danger' : 'muted' },
         { label: 'Done today', value: data.completed_today, tone: 'success' },
         { label: isMD ? 'Need your OK' : `Waiting for ${md}`, value: pending, tone: pending ? 'warn' : 'muted' },
-        ...(isMD ? [{ label: `With ${data.pa_name || 'your PA'}`, value: (data.pa_tasks ?? []).filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED').length, tone: 'info' }] : []),
+        { label: 'Given by you', value: (data.given_tasks ?? []).filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED').length, tone: 'info' },
         { label: 'With staff', value: data.delegated.filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED').length, tone: 'info' },
       ]
     : [];
@@ -77,7 +77,7 @@ export function TabletHome({ user }: { user: SessionUser }) {
   const recent = conv.messages.slice(-6);
   // A task he asked to open by voice ("pehla wala kholo").
   const voiceItem = conv.itemToOpen && data
-    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
+    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.team_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
         .find((t) => t.id === conv.itemToOpen) ?? null
     : null;
   const suggestions = isMD

@@ -12,7 +12,7 @@ from datetime import date, datetime, time, timedelta
 from django.db.models import Q
 
 from . import timeutils as tu
-from .models import Kind, Priority, PrivateTask, SharedTask, Status, User
+from .models import Kind, Priority, PrivateTask, Status, User
 
 OPEN = [Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED]
 DEFAULT_MINUTES = {Kind.MEETING: 60, Kind.CALL: 15, Kind.TASK: 30, Kind.PAYMENT: 10, Kind.FOLLOW_UP: 15}
@@ -64,13 +64,13 @@ def routine_blocks(prefs: dict, day: date) -> list[dict]:
 
 
 def _own_sources(user: User):
-    if user.is_md:
-        return [
-            (PrivateTask.objects.filter(owner=user), "private"),
-            (SharedTask.objects.filter(assignee_type=SharedTask.Assignee.MD), "shared"),
-            (SharedTask.objects.filter(assignee_type=SharedTask.Assignee.PA, origin=SharedTask.Origin.MD_MEET_PA), "shared"),
-        ]
-    return [(SharedTask.objects.filter(assignee_type=SharedTask.Assignee.PA), "shared")]
+    """Everything in this person's own day: their personal items, their work list, and meetings they set with
+    someone on the team."""
+    from .services import diary_qs  # local import: services imports this module
+    return [
+        (PrivateTask.objects.filter(owner=user), "private"),
+        (diary_qs(user), "shared"),
+    ]
 
 
 def _span(task) -> tuple[datetime, datetime] | None:
