@@ -2543,7 +2543,7 @@ def briefing_facts(user: User, kind: str, conceal_private: bool = False) -> tupl
 
 # ------------------------------------------------------------------ the team page (the MD adds and manages people)
 _USERNAME = re.compile(r"^[a-z0-9][a-z0-9._-]{2,29}$")
-MIN_PASSWORD = 4
+MIN_PASSWORD = 3  # the MD chooses short, easy logins for the team ("smm" / "smm")
 TEAM_LIMIT = 60
 
 

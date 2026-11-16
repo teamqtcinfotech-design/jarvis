@@ -302,7 +302,7 @@ function PersonForm({ person, onDone, onCancel }: { person?: TeamPerson; onDone:
       setBusy('');
     }
   };
-  const ready = name.trim() && (!isNew || (username.trim().length >= 3 && password.length >= 4));
+  const ready = name.trim() && (!isNew || (username.trim().length >= 3 && password.length >= 3));
   return (
     <View style={s.personForm}>
       <Txt variant="label" style={s.formLabel}>Name</Txt>
@@ -322,7 +322,7 @@ function PersonForm({ person, onDone, onCancel }: { person?: TeamPerson; onDone:
         </>
       ) : null}
       <Txt variant="label" style={s.formLabel}>{isNew ? 'Password' : 'New password (leave empty to keep it)'}</Txt>
-      <TextInput value={password} onChangeText={setPassword} style={s.formInput} autoCapitalize="none" autoCorrect={false} maxLength={60} placeholder={isNew ? 'At least 4 characters' : ''} placeholderTextColor={colors.faint} />
+      <TextInput value={password} onChangeText={setPassword} style={s.formInput} autoCapitalize="none" autoCorrect={false} maxLength={60} placeholder={isNew ? 'At least 3 characters' : ''} placeholderTextColor={colors.faint} />
       {note ? <Txt variant="small" style={{ color: colors.danger, marginTop: 8 }}>{note}</Txt> : null}
       <View style={{ flexDirection: 'row', marginTop: 12 }}>
         <Button title={isNew ? 'Add' : 'Save'} compact disabled={!ready || !!busy} loading={busy === 'save'} onPress={() => save()} style={{ flex: 1, marginRight: 8 }} />
