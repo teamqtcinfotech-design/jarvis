@@ -11,6 +11,9 @@ import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -73,6 +76,7 @@ object WalkieEngine {
     private var recorder: AudioRecord? = null
     private var encoder: MediaCodec? = null
     private var captureThread: Thread? = null
+    private var endThread: Thread? = null
     @Volatile private var capturing = false
 
     // playback
@@ -228,6 +232,8 @@ object WalkieEngine {
     fun talkStart(to: List<Int>, talk: String?) {
         val socket = ws ?: run { emit("refused", JSONObject().put("why", "no line")); return }
         if (talking) return
+        // The last press may still be sending its final pieces and its "end": let that finish first, in order.
+        try { endThread?.join(600) } catch (_: InterruptedException) {}
         val msg = JSONObject().put("t", "talk").put("codec", "amrwb")
         if (!talk.isNullOrEmpty()) msg.put("talk", talk) else msg.put("to", JSONArray(to))
         talking = true
@@ -240,8 +246,14 @@ object WalkieEngine {
     fun talkEnd() {
         if (!talking) return
         talking = false
+        val mic = captureThread
         stopCapture()
-        send(JSONObject().put("t", "end"))
+        // "end" goes out AFTER the last pieces: the microphone thread flushes the encoder as it winds down, and the
+        // relay drops any sound that arrives after "end" (the last words were being cut).
+        endThread = Thread({
+            try { mic?.join(500) } catch (_: InterruptedException) {}
+            send(JSONObject().put("t", "end"))
+        }, "jarvis-walkie-end").also { it.start() }
     }
 
     fun quiet(minutes: Int) = send(JSONObject().put("t", "quiet").put("minutes", minutes))
@@ -270,6 +282,11 @@ object WalkieEngine {
                 rec = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, FRAME_BYTES * 25))
                 recorder = rec
+                // No automatic gain: it turns the room up, and another phone's speaker nearby into a feedback loop.
+                // Noise suppression on; the phone's own echo canceller on where it exists.
+                try { AutomaticGainControl.create(rec.audioSessionId)?.enabled = false } catch (_: Throwable) {}
+                try { NoiseSuppressor.create(rec.audioSessionId)?.enabled = true } catch (_: Throwable) {}
+                try { AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true } catch (_: Throwable) {}
                 enc = amrEncoder()
                 encoder = enc
                 Log.i(TAG, "capture: ${enc?.name ?: "raw pcm (no encoder)"}")
