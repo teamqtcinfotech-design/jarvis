@@ -57,8 +57,8 @@ def make_voice(text: str, out_dir: str) -> bytes:
         "$s.Dispose()"
     )
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, capture_output=True)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", wav, "-ar", "16000", "-ac", "1", "-c:a", "libvo_amrwbenc", "-b:a", "23850", awb],
-                   check=True, capture_output=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", wav, "-ar", "16000", "-ac", "1", "-c:a", "libvo_amrwbenc", "-b:a", "23850",
+                    "-f", "amr", awb], check=True, capture_output=True)
     with open(awb, "rb") as f:
         data = f.read()
     if not data.startswith(AWB_HEADER):

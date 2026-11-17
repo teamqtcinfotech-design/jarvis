@@ -81,6 +81,12 @@ object WalkieEngine {
     @Volatile private var playing = false
     @Volatile private var playCodec = "amrwb"
     private var cushionMs = CUSHION_MS
+    // Timing marks (elapsedRealtime ms) so a test can read how fast a talk reaches this phone from logcat.
+    @Volatile private var pressAt = 0L
+    @Volatile private var incomingAt = 0L
+    @Volatile private var firstAudioAt = 0L
+    @Volatile private var pingAt = 0L
+    @Volatile private var audioPieces = 0
 
     private fun emit(event: String, data: JSONObject = JSONObject()) {
         try { listener?.invoke(event, data) } catch (_: Throwable) {}
@@ -179,6 +185,7 @@ object WalkieEngine {
             }
             "floor" -> {
                 currentTalk = msg.optString("talk")
+                Log.i(TAG, "timing: floor ${SystemClock.elapsedRealtime() - pressAt} ms after the press (listening ${msg.optJSONArray("listening")})")
                 emit("floor", msg)
             }
             "busy", "refused", "cut" -> {
@@ -190,10 +197,16 @@ object WalkieEngine {
                 incomingTalk = msg.optString("talk")
                 currentTalk = incomingTalk
                 playCodec = msg.optString("codec", "amrwb")
+                incomingAt = SystemClock.elapsedRealtime()
+                firstAudioAt = 0L
+                pingAt = incomingAt
+                send(JSONObject().put("t", "ping"))  // the line's round trip, logged with the pong
+                Log.i(TAG, "timing: incoming from $incomingFrom ($playCodec)")
                 startPlayback()
                 emit("incoming", msg)
             }
             "done" -> {
+                Log.i(TAG, "timing: they let go ${SystemClock.elapsedRealtime() - incomingAt} ms after incoming; $audioPieces messages of sound arrived, ${queue.size} still to play")
                 // Let the cushion drain, then stop; a reply may follow in the same talk.
                 Thread { Thread.sleep((cushionMs + 100).toLong()); if (queue.isEmpty()) stopPlayback() }.start()
                 emit("done", msg)
@@ -203,7 +216,10 @@ object WalkieEngine {
                 emit("ended", msg)
             }
             "quiet" -> emit("quiet", msg)
-            "pong" -> {}
+            "pong" -> if (pingAt != 0L) {
+                Log.i(TAG, "timing: line round trip ${SystemClock.elapsedRealtime() - pingAt} ms")
+                pingAt = 0L
+            }
         }
     }
 
@@ -215,6 +231,7 @@ object WalkieEngine {
         val msg = JSONObject().put("t", "talk").put("codec", "amrwb")
         if (!talk.isNullOrEmpty()) msg.put("talk", talk) else msg.put("to", JSONArray(to))
         talking = true
+        pressAt = SystemClock.elapsedRealtime()
         stopPlayback()  // the speaker is theirs now
         socket.send(msg.toString())
         startCapture()
@@ -231,35 +248,72 @@ object WalkieEngine {
 
     fun refreshPeople() = send(JSONObject().put("t", "status"))
 
+    /** Each press is its own capture; a press that starts while the last one is still winding down never shares its mic. */
+    @Volatile private var captureGen = 0
+
     private fun startCapture() {
         val ctx = context ?: return
+        val gen = ++captureGen
         capturing = true
         captureThread = Thread({
             var rec: AudioRecord? = null
             var enc: MediaCodec? = null
+            val startedAt = SystemClock.elapsedRealtime()
+            var read = 0
+            var dropped = 0
+            var sent = 0
             try {
                 val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                 val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                // Half a second of room in the microphone's own buffer: a slow moment delays a piece, never loses it.
                 rec = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, FRAME_BYTES * 8))
+                    AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, FRAME_BYTES * 25))
                 recorder = rec
                 enc = amrEncoder()
                 encoder = enc
+                Log.i(TAG, "capture: ${enc?.name ?: "raw pcm (no encoder)"}")
                 rec.startRecording()
                 val pcm = ByteArray(FRAME_BYTES)
                 val out = java.io.ByteArrayOutputStream()
                 var pieces = 0
                 var lastLevel = 0L
                 val info = MediaCodec.BufferInfo()
-                while (capturing) {
+                val live = { capturing && gen == captureGen }
+
+                // Take whatever the encoder has ready (waiting at most `waitUs`) and send it, two pieces at a time.
+                fun drain(waitUs: Long) {
+                    val e = enc ?: return
+                    var outIndex = e.dequeueOutputBuffer(info, waitUs)
+                    while (outIndex >= 0) {
+                        val buf = e.getOutputBuffer(outIndex)!!
+                        val frame = ByteArray(info.size)
+                        buf.position(info.offset)
+                        buf.get(frame)
+                        e.releaseOutputBuffer(outIndex, false)
+                        if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && frame.isNotEmpty()) {
+                            out.write(frame)
+                            pieces++
+                            if (pieces >= PIECES_PER_MESSAGE) {
+                                ws?.send(out.toByteArray().toByteString())
+                                sent++
+                                out.reset()
+                                pieces = 0
+                            }
+                        }
+                        outIndex = e.dequeueOutputBuffer(info, 0)
+                    }
+                }
+
+                while (live()) {
                     var got = 0
-                    while (got < FRAME_BYTES && capturing) {
+                    while (got < FRAME_BYTES && live()) {
                         val n = rec.read(pcm, got, FRAME_BYTES - got)
                         if (n <= 0) break
                         got += n
                     }
                     if (got < FRAME_BYTES) continue
+                    read++
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastLevel > 100) {
                         lastLevel = now
@@ -267,35 +321,38 @@ object WalkieEngine {
                     }
                     if (enc == null) {
                         ws?.send(pcm.toByteString())  // no encoder on this phone: raw PCM (the relay does not mind)
+                        sent++
                         continue
                     }
-                    val inIndex = enc.dequeueInputBuffer(20_000)
-                    if (inIndex >= 0) {
-                        val buf = enc.getInputBuffer(inIndex)!!
-                        buf.clear()
-                        buf.put(pcm)
-                        enc.queueInputBuffer(inIndex, 0, FRAME_BYTES, now * 1000, 0)
+                    // Feed the encoder. When its input is full, take its output first; a piece is dropped only if it
+                    // stays full for 100 ms, which a working encoder never does.
+                    var inIndex = enc.dequeueInputBuffer(0)
+                    var tries = 0
+                    while (inIndex < 0 && tries < 10 && live()) {
+                        drain(5_000)
+                        inIndex = enc.dequeueInputBuffer(5_000)
+                        tries++
                     }
-                    var outIndex = enc.dequeueOutputBuffer(info, 0)
-                    while (outIndex >= 0) {
-                        val buf = enc.getOutputBuffer(outIndex)!!
-                        val frame = ByteArray(info.size)
-                        buf.position(info.offset)
-                        buf.get(frame)
-                        enc.releaseOutputBuffer(outIndex, false)
-                        if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && frame.isNotEmpty()) {
-                            out.write(frame)
-                            pieces++
-                            if (pieces >= PIECES_PER_MESSAGE) {
-                                ws?.send(out.toByteArray().toByteString())
-                                out.reset()
-                                pieces = 0
-                            }
-                        }
-                        outIndex = enc.dequeueOutputBuffer(info, 0)
+                    if (inIndex < 0) {
+                        dropped++
+                        continue
                     }
+                    val buf = enc.getInputBuffer(inIndex)!!
+                    buf.clear()
+                    buf.put(pcm)
+                    enc.queueInputBuffer(inIndex, 0, FRAME_BYTES, now * 1000, 0)
+                    drain(0)
                 }
-                if (out.size() > 0) ws?.send(out.toByteArray().toByteString())
+                // The last words: give the encoder a moment to finish what it holds, then send the remainder.
+                if (enc != null) {
+                    val until = SystemClock.elapsedRealtime() + 120
+                    while (SystemClock.elapsedRealtime() < until) drain(10_000)
+                }
+                if (out.size() > 0) {
+                    ws?.send(out.toByteArray().toByteString())
+                    sent++
+                }
+                Log.i(TAG, "timing: press ended after ${SystemClock.elapsedRealtime() - startedAt} ms: $read pieces read, $dropped dropped, $sent messages sent")
             } catch (e: Throwable) {
                 Log.w(TAG, "capture failed: ${e.message}")
                 emit("error", JSONObject().put("where", "mic").put("message", e.message ?: ""))
@@ -303,8 +360,10 @@ object WalkieEngine {
                 try { rec?.stop() } catch (_: Throwable) {}
                 try { rec?.release() } catch (_: Throwable) {}
                 try { enc?.stop(); enc?.release() } catch (_: Throwable) {}
-                recorder = null
-                encoder = null
+                if (gen == captureGen) {
+                    recorder = null
+                    encoder = null
+                }
                 try { (ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager).abandonAudioFocus(null) } catch (_: Throwable) {}
             }
         }, "jarvis-walkie-mic").also { it.start() }
@@ -313,6 +372,7 @@ object WalkieEngine {
     private fun stopCapture() {
         capturing = false
         talking = false
+        captureGen++
         captureThread = null
     }
 
@@ -346,6 +406,12 @@ object WalkieEngine {
     private fun onAudio(data: ByteArray) {
         if (talking) return
         if (!playing) startPlayback()
+        if (firstAudioAt == 0L) {
+            firstAudioAt = SystemClock.elapsedRealtime()
+            audioPieces = 0
+            Log.i(TAG, "timing: first piece (${data.size} bytes) ${firstAudioAt - incomingAt} ms after incoming")
+        }
+        audioPieces++
         queue.add(data)
         if (queue.size > 60) queue.poll()  // a second behind: skip ahead rather than fall further back
     }
@@ -379,6 +445,7 @@ object WalkieEngine {
                 val startedAt = SystemClock.elapsedRealtime()
                 while (playing && queue.size < cushionMs / 20 && SystemClock.elapsedRealtime() - startedAt < cushionMs + 100) Thread.sleep(5)
                 var idleSince = 0L
+                var firstWrite = true
                 val info = MediaCodec.BufferInfo()
                 while (playing) {
                     val data = queue.poll()
@@ -393,6 +460,7 @@ object WalkieEngine {
                     }
                     idleSince = 0L
                     if (dec == null || playCodec != "amrwb") {
+                        if (firstWrite) { firstWrite = false; logFirstSound() }
                         track.write(data, 0, data.size)
                         continue
                     }
@@ -415,7 +483,10 @@ object WalkieEngine {
                             buf.position(info.offset)
                             buf.get(pcm)
                             dec.releaseOutputBuffer(outIndex, false)
-                            if (pcm.isNotEmpty()) track.write(pcm, 0, pcm.size)
+                            if (pcm.isNotEmpty()) {
+                                if (firstWrite) { firstWrite = false; logFirstSound() }
+                                track.write(pcm, 0, pcm.size)
+                            }
                             outIndex = dec.dequeueOutputBuffer(info, 0)
                         }
                     }
@@ -442,6 +513,11 @@ object WalkieEngine {
         playing = false
         queue.clear()
         player = null
+    }
+
+    private fun logFirstSound() {
+        val now = SystemClock.elapsedRealtime()
+        Log.i(TAG, "timing: first sound out ${now - incomingAt} ms after incoming, ${if (firstAudioAt != 0L) now - firstAudioAt else -1} ms after the first piece arrived (cushion $cushionMs ms)")
     }
 
     private fun amrDecoder(): MediaCodec? = try {
