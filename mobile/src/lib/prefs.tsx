@@ -102,7 +102,7 @@ const DEFAULTS: Prefs = {
   ringEveryMinutes: 10,
   ringUrgentEveryMinutes: 1,
   ringForMinutes: 30,
-  walkieEnabled: false,
+  walkieEnabled: true,
   walkieQuietUntil: '',
   walkieAnyoneStarts: true,
 };

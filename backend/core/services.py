@@ -2359,7 +2359,7 @@ PREF_SCHEMA = {
                        "say": "ring for (minutes) before the sender is told it was not seen"},
     # Walkie-talkie: the person's own switch, their quiet time (set by voice: "walkie quiet for 30 minutes"), and
     # the MD's rule on who may start a talk.
-    "walkieEnabled": {"type": "bool", "default": False, "say": "walkie-talkie"},
+    "walkieEnabled": {"type": "bool", "default": True, "say": "walkie-talkie"},
     "walkieQuietUntil": {"type": "text", "default": "", "say": "walkie-talkie quiet until", "hidden": True},
     "walkieAnyoneStarts": {"type": "bool", "default": True, "say": "anyone may start a walkie-talkie talk (off = only the MD)", "md_only": True},
 }

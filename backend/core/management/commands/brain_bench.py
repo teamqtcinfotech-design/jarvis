@@ -101,6 +101,14 @@ BENCH = [
     ("md", "mujhe Ma'am bolo", {"intent": "set_setting", "setting_key": "addressAs"}),
     ("pa", "mujhe Mansi bulao", {"intent": "set_setting", "setting_key": "myName", "setting_value": "Mansi"}),
     ("md", "meri meetings aam taur par 30 minute ki hoti hain", {"intent": "set_setting", "setting_key": "meetingMinutes", "setting_value": "30"}),
+    # --- the walkie-talkie (Nov 2026): open it on people, quiet for a while, on / off; a task is never the walkie
+    ("md", "{mg} se walkie par baat karo", {"intent": "screen_action", "screen_action": "open_walkie", "recipients": ["{mg}"]}),
+    ("md", "walkie on {pa}", {"intent": "screen_action", "screen_action": "open_walkie", "recipients": ["{pa}"]}),
+    ("md", "accounts team ko walkie karo", {"intent": "screen_action", "screen_action": "open_walkie"}),
+    ("md", "walkie quiet for 30 minutes", {"intent": "set_setting", "setting_key": "walkieQuiet", "setting_value": "30"}),
+    ("pa", "walkie 1 ghante ke liye shaant", {"intent": "set_setting", "setting_key": "walkieQuiet", "setting_value": "60"}),
+    ("md", "walkie band karo", {"intent": "set_setting", "setting_key": "walkieEnabled"}),
+    ("md", "{mg} ko walkie pe bolo ki report bhej de", {"intent": "screen_action", "screen_action": "open_walkie", "recipients": ["{mg}"]}),
 ]
 
 
