@@ -53,12 +53,17 @@ function WalkieScreen() {
     return [...map.entries()];
   }, [dash?.team]);
   const management = (dash?.team ?? []).filter((p) => !p.you && (p.role === 'MG' || p.role === 'PA')).map((p) => p.id);
-  const everyone = w.people.filter((p) => p.status !== 'off').map((p) => p.id);
+  // Before the new app is on this phone there is no line: the team is shown as a preview, nothing can be held.
+  const preview = !w.supported;
+  const people: WalkiePerson[] = useMemo(() => (preview
+    ? (dash?.team ?? []).filter((p) => !p.you).map((p) => ({ id: p.id, name: p.name, title: p.title, role: p.role, status: 'available' as const, quiet_until: '', talking: false }))
+    : w.people), [preview, dash?.team, w.people]);
+  const everyone = people.filter((p) => p.status !== 'off').map((p) => p.id);
 
   // A talk I am in (someone spoke to me): the selection is its members, so Hold replies to them.
   const inTalk = !!w.talk;
   const to = inTalk ? w.members.filter((id) => id !== w.you) : selected;
-  const names = (ids: number[]) => ids.map((id) => w.people.find((p) => p.id === id)?.name ?? '').filter(Boolean);
+  const names = (ids: number[]) => ids.map((id) => people.find((p) => p.id === id)?.name ?? '').filter(Boolean);
 
   // The button's glow follows the voice while talking; the other side's avatar pulses while they talk.
   useEffect(() => {
@@ -94,7 +99,7 @@ function WalkieScreen() {
 
   const canTalk = w.enabled && w.supported && (inTalk || to.length > 0) && w.state !== 'listening' && w.state !== 'busy';
   const status =
-    !w.supported ? 'Needs the 2.6.0 app'
+    preview ? 'Preview · live talk comes with the new app'
     : !w.enabled ? 'Switched off in Settings'
     : w.state === 'listening' ? `${w.incomingFrom || 'Someone'} is talking…`
     : w.state === 'talking' ? `Talking · ${names(to).join(', ') || 'them'}`
@@ -136,8 +141,8 @@ function WalkieScreen() {
         ) : null}
 
         <View style={s.people}>
-          {w.people.map((p) => {
-            const st = STATUS[p.status];
+          {people.map((p) => {
+            const st = preview ? { label: 'On the team', color: colors.muted } : STATUS[p.status];
             const on = to.includes(p.id);
             const speaking = w.state === 'listening' && p.name === w.incomingFrom;
             return (
@@ -158,7 +163,7 @@ function WalkieScreen() {
               </Pressable>
             );
           })}
-          {!w.people.length ? <Txt variant="small" style={{ textAlign: 'center', marginTop: 20 }}>{w.connected ? 'Nobody else is on the team yet.' : status}</Txt> : null}
+          {!people.length ? <Txt variant="small" style={{ textAlign: 'center', marginTop: 20 }}>{w.connected || preview ? 'Nobody else is on the team yet.' : status}</Txt> : null}
         </View>
       </ScrollView>
 

@@ -289,7 +289,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         </View>
       )}
       {/* The walkie-talkie, bottom-left, the orb's twin: tap = pick who; hold = talk to the last people at once. */}
-      {!conv.talkOpen && walkie.supported && walkie.enabled ? (
+      {!conv.talkOpen && walkie.enabled ? (
         <View style={[s.cornerWalkie, { bottom: insets.bottom + 18 }]} pointerEvents="box-none">
           <Pressable
             onPress={() => { tick(); router.push('/walkie'); }}
@@ -299,7 +299,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
             style={({ pressed }) => [s.walkieBtn, walkie.state === 'listening' && { backgroundColor: colors.success }, pressed && { transform: [{ scale: 0.94 }] }]}
           >
             <Icon name={walkie.state === 'listening' ? 'volume-high' : 'radio'} size={24} color={colors.white} />
-            <View style={[s.walkieDot, { backgroundColor: walkie.connected ? colors.success : colors.warn }]} />
+            <View style={[s.walkieDot, { backgroundColor: !walkie.supported ? colors.faint : walkie.connected ? colors.success : colors.warn }]} />
           </Pressable>
         </View>
       ) : null}
