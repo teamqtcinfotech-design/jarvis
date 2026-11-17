@@ -110,7 +110,11 @@ def bucket_of(user: User) -> str:
 
 
 def _with_people(qs):
-    return qs.select_related("created_by", "staff", "assignee_user")
+    return qs.select_related("created_by", "staff", "assignee_user", "section")
+
+
+def private_qs_with_section(qs):
+    return qs.select_related("section")
 
 
 def person_tasks_qs(person: User):
@@ -159,10 +163,11 @@ def team(active: bool = True) -> list[User]:
 
 
 def person_item(u: User, viewer: User | None = None) -> dict:
-    """One person as the phones show them: name, job, department."""
+    """One person as the phones show them: name, job, department(s)."""
+    depts = [d.name for d in u.departments.all() if d.active] if not (u.is_md or u.is_pa or u.is_mg) else []
     return {"id": u.id, "name": u.spoken_name, "username": u.username, "role": u.role, "title": u.title_label,
-            "department": u.department, "gender": u.gender, "active": u.is_active,
-            **({"you": True} if viewer is not None and viewer.id == u.id else {})}
+            "department": u.department or (depts[0] if depts else ""), "departments": depts, "gender": u.gender,
+            "active": u.is_active, **({"you": True} if viewer is not None and viewer.id == u.id else {})}
 
 
 def role_label(user: User) -> str:
@@ -264,6 +269,12 @@ def find_group(name: str, *, exclude: User | None = None) -> tuple[list[User], s
             key = key[: -len(suffix)].strip()
     if not key:
         return pool, "everyone"
+    # A department made by the MD (by voice or on the Departments page): its members.
+    from . import sections as _sections  # local import: sections builds on this module
+    found = _sections.find_department(key)
+    if found["status"] in ("known", "close"):
+        members = [u for u in found["department"].members.all() if u.is_active and (exclude is None or u.id != exclude.id)]
+        return members, f"the {found['department'].name} team"
     dept = [u for u in pool if u.department and (u.department.lower() == key or u.department.lower().startswith(key)
                                                   or key.startswith(u.department.lower()))]
     if dept:
@@ -475,7 +486,10 @@ def _base_item(task, scope: str) -> dict:
 def private_item(task: PrivateTask) -> dict:
     item = _base_item(task, "private")
     item.update({"assignee": {"type": "MD" if task.owner.is_md else "USER", "user_id": task.owner_id},
-                 "source": task.source})
+                 "source": task.source,
+                 "section": task.section.name if task.section_id and task.section.active else "",
+                 "section_id": task.section_id if task.section_id and task.section.active else None,
+                 "section_colour": task.section.colour if task.section_id else ""})
     return item
 
 
@@ -511,6 +525,10 @@ def shared_item(task: SharedTask) -> dict:
             "seen_at": task.seen_at.isoformat() if task.seen_at else None,
             "promise_label": tu.due_phrase(task.promise_kind, task.promise_date, task.promise_at),
             "promise_label_hi": tu.due_phrase_hi(task.promise_kind, task.promise_date, task.promise_at),
+            # The section it is filed in (GST, Accounts…).
+            "section": task.section.name if task.section_id and task.section.active else "",
+            "section_id": task.section_id if task.section_id and task.section.active else None,
+            "section_colour": task.section.colour if task.section_id else "",
         }
     )
     return item
@@ -998,6 +1016,8 @@ def create_private_task(md: User, data: dict, source: str = PrivateTask.Source.M
     task.save()
     if task.kind == Kind.MEETING and data.get("duration_minutes"):
         learn_meeting_minutes(md, int(data["duration_minutes"]))
+    from . import sections as _sections  # local import: sections builds on this module
+    _sections.file_private(task, f"{task.title} {task.notes}", md, said=data.get("section") or "")
     audit(md, "private_task.create", "private_task", task.id)  # no title in audit, by design
     return task
 
@@ -1094,6 +1114,9 @@ def create_person_task(giver: User, person: User, data: dict, *, meeting: bool =
     task.save()
     if task.kind == Kind.MEETING and data.get("duration_minutes"):
         learn_meeting_minutes(giver, int(data["duration_minutes"]))
+    from . import sections as _sections  # local import: sections builds on this module
+    _sections.file_task(task, f"{task.title} {task.description} {task.notes}", giver=giver, person=person,
+                        said=data.get("section") or "")
     who, who_hi = giver_words(giver)
     name = person.spoken_name
     when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
@@ -1121,7 +1144,7 @@ def create_person_task(giver: User, person: User, data: dict, *, meeting: bool =
         body=message[:400], spoken_text=message[:400], spoken_text_hi=message_hi[:400],
         ref_type="shared_task", ref_id=str(task.id), **ring_fields(person, task.priority),
     )
-    log_event(task, TaskEvent.Kind.GIVEN, giver, to=person.id)
+    log_event(task, TaskEvent.Kind.GIVEN, giver, to=person.id, **_sections.section_data(task))
     audit(giver, "person_meeting.create" if meeting else "person_task.create", "shared_task", task.id, f"to user {person.id}")
     return task
 
@@ -1163,7 +1186,10 @@ def create_own_task(user: User, data: dict) -> SharedTask:
         learn_meeting_minutes(user, int(data["duration_minutes"]))
     task.announcement = (data.get("announcement") or "")[:300]
     task.save()
-    log_event(task, TaskEvent.Kind.ADDED, user)
+    from . import sections as _sections  # local import: sections builds on this module
+    _sections.file_task(task, f"{task.title} {task.description} {task.notes}", giver=user, person=user,
+                        said=data.get("section") or "")
+    log_event(task, TaskEvent.Kind.ADDED, user, **_sections.section_data(task))
     audit(user, "own_task.create", "shared_task", task.id)
     return task
 
@@ -1444,7 +1470,10 @@ def accept_request(md: User, request_id) -> TaskRequest:
             apply_schedule(task, {**data, "_prefs": get_prefs(md)}, creating=True)
             task.announcement = (data.get("announcement") or "")[:300]
             task.save()
-            log_event(task, TaskEvent.Kind.REQUESTED, req.requested_by, by=md.id)
+            from . import sections as _sections  # local import: sections builds on this module
+            _sections.file_task(task, f"{task.title} {task.notes}", giver=req.requested_by, person=md,
+                                said=data.get("section") or "")
+            log_event(task, TaskEvent.Kind.REQUESTED, req.requested_by, by=md.id, **_sections.section_data(task))
             req.resulting_task = task
         else:
             task = SharedTask.objects.select_for_update().get(id=req.target_id)
@@ -1577,7 +1606,9 @@ def delegate_to_staff(user: User, data: dict, staff: StaffMember, *, category_ke
         )
         apply_schedule(task, data, creating=True)
         task.save()
-        log_event(task, TaskEvent.Kind.DELEGATED, user, staff=staff.name)
+        from . import sections as _sections  # local import: sections builds on this module
+        _sections.file_task(task, f"{task.title} {task.description}", giver=user, said=data.get("section") or "")
+        log_event(task, TaskEvent.Kind.DELEGATED, user, staff=staff.name, **_sections.section_data(task))
         command_id = uuid.uuid4()
         payload = build_create_command(task, str(command_id))
         command = IntegrationCommand.objects.create(
@@ -2002,17 +2033,19 @@ def _history_text(kind: str, actor: User | None, data: dict, task: SharedTask, p
     label, label_hi = data.get("label") or "", data.get("label_hi") or data.get("label") or ""
     reason = data.get("reason") or ""
     K = TaskEvent.Kind
+    sec = data.get("section") or ""
+    in_sec, in_sec_hi = (f" · in {sec}", f" · {sec} में") if sec else ("", "")
     if kind == K.GIVEN:
         if task.kind == Kind.MEETING:
-            return f"Meeting set by {a} with {to}", f"{a_hi} ने {to_hi} के साथ मीटिंग रखी"
-        return f"Given by {a} to {to}", f"{a_hi} ने {to_hi} को दिया"
+            return f"Meeting set by {a} with {to}{in_sec}", f"{a_hi} ने {to_hi} के साथ मीटिंग रखी{in_sec_hi}"
+        return f"Given by {a} to {to}{in_sec}", f"{a_hi} ने {to_hi} को दिया{in_sec_hi}"
     if kind == K.ADDED:
-        return f"Added by {a}", f"{a_hi} ने जोड़ा"
+        return f"Added by {a}{in_sec}", f"{a_hi} ने जोड़ा{in_sec_hi}"
     if kind == K.REQUESTED:
-        return (f"Asked for by {a}, accepted by {md_address()}", f"{a_hi} की रिक्वेस्ट, {md_address_hi()} ने मंज़ूर की")
+        return (f"Asked for by {a}, accepted by {md_address()}{in_sec}", f"{a_hi} की रिक्वेस्ट, {md_address_hi()} ने मंज़ूर की{in_sec_hi}")
     if kind == K.DELEGATED:
         staff = data.get("staff") or "staff"
-        return f"Given by {a} to {staff} (staff)", f"{a_hi} ने {staff} को दिया (स्टाफ़)"
+        return f"Given by {a} to {staff} (staff){in_sec}", f"{a_hi} ने {staff} को दिया (स्टाफ़){in_sec_hi}"
     if kind == K.SEEN:
         return f"Seen by {a}", f"{a_hi} ने देख लिया"
     if kind == K.PROMISED:
@@ -2042,6 +2075,10 @@ def _history_text(kind: str, actor: User | None, data: dict, task: SharedTask, p
         return f"Reopened by {a}", f"{a_hi} ने फिर से खोला"
     if kind == K.CANCELLED:
         return f"Cancelled by {a}", f"{a_hi} ने कैंसल किया"
+    if kind == K.FILED:
+        if data.get("from"):
+            return f"Moved from {data['from']} to {sec} by {a}", f"{a_hi} ने {data['from']} से {sec} में रखा"
+        return f"Put in {sec} by {a}", f"{a_hi} ने {sec} में रखा"
     return kind.title(), kind.title()
 
 
@@ -2140,6 +2177,9 @@ def ai_context(user: User, include_private: bool = True) -> dict:
         "task_categories": categories,
         "default_category": settings.TASKPANEL_DEFAULT_CATEGORY,
     }
+    # Departments (groups of people) and sections (folders of work), for organising by voice and asking by them.
+    from . import sections as _sections  # local import: sections builds on this module
+    ctx.update(_sections.ai_lists(user))
     dash = dashboard(user)
     def brief(item):
         return {k: item.get(k) for k in ("id", "title", "kind", "priority", "status", "due_label", "scope", "version")} | (
@@ -3095,8 +3135,22 @@ def team_add(md: User, data: dict) -> User:
         job_title=_clean_text(data.get("title"), 80), department=_clean_text(data.get("department"), 80),
         gender=_clean_gender(data.get("gender")),
     )
+    if person.department:
+        _join_department(md, person, person.department)
     audit(md, "team.add", "user", person.id, f"{username} ({person.job_title})")
     return person
+
+
+def _join_department(md: User, person: User, name: str) -> None:
+    """A department typed on the Team page: the person joins it (made if new); the old text stays as a mirror."""
+    from . import sections as _sections  # local import: sections builds on this module
+    try:
+        _sections.eligible(person)
+    except ServiceError:
+        return
+    found = _sections.find_department(name)
+    dept = found["department"] if found["status"] in ("known", "close") else _sections.create_department(md, name)[0]
+    _sections.add_members(md, dept, [person])
 
 
 def team_update(md: User, user_id, data: dict) -> User:
@@ -3116,6 +3170,19 @@ def team_update(md: User, user_id, data: dict) -> User:
         if key in data:
             setattr(person, field, _clean_text(data.get(key), limit))
             fields.append(field)
+    if "department" in data and not (person.is_md or person.is_pa or person.is_mg):
+        # The text typed is the person's department now: in it (made if new), and out of the others.
+        from . import sections as _sections  # local import: sections builds on this module
+        wanted = _clean_text(data.get("department"), 80)
+        current = _sections.member_of(person)
+        keep = _sections.find_department(wanted)["department"] if wanted else None
+        for d in current:
+            if keep is None or d.id != keep.id:
+                _sections.remove_members(md, d, [person])
+        if wanted:
+            _join_department(md, person, wanted)
+            person.refresh_from_db(fields=["department"])
+            person.department = person.department or wanted
     if "gender" in data:
         person.gender = _clean_gender(data.get("gender"))
         fields.append("gender")

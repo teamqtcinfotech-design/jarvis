@@ -73,6 +73,55 @@ class User(AbstractUser):
         return self.display_name or self.first_name or self.username
 
 
+class Department(models.Model):
+    """A group of people on the team (Accounts, Farm, Social Media…), made and changed by the MD, by voice or on the
+    Departments page. Only team members belong to one; the MD, the manager and the PA never do (they work across all
+    of them). `User.department` (text) mirrors a person's first department for older screens."""
+
+    name = models.CharField(max_length=80, unique=True)
+    name_hi = models.CharField(max_length=80, blank=True, default="")
+    aliases = models.JSONField(default=list, blank=True)  # other ways people say it ("accounts team", "hisaab")
+    colour = models.CharField(max_length=7, blank=True, default="")
+    members = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="departments", blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class Section(models.Model):
+    """A folder for work (GST, Accounts, Franchise…) shared across the company, or a person's own personal folder
+    that nobody else sees. JARVIS files every task into one from the words, and learns each section's words."""
+
+    class Kind(models.TextChoices):
+        WORK = "WORK", "Work (shared)"
+        PERSONAL = "PERSONAL", "Personal (one person's own)"
+
+    name = models.CharField(max_length=80)
+    name_hi = models.CharField(max_length=80, blank=True, default="")
+    aliases = models.JSONField(default=list, blank=True)  # words that file a task here, learned and given
+    colour = models.CharField(max_length=7, blank=True, default="")
+    kind = models.CharField(max_length=8, choices=Kind.choices, default=Kind.WORK)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, related_name="personal_sections")
+    # The department this section belongs with (Accounts ↔ Accounts): its members' own work files here by default.
+    department = models.ForeignKey(Department, null=True, blank=True, on_delete=models.SET_NULL, related_name="sections")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [models.UniqueConstraint(fields=["name", "kind", "owner"], name="unique_section_name")]
+
+    def __str__(self):
+        return self.name
+
+
 class Priority(models.TextChoices):
     URGENT = "URGENT", "Urgent"
     HIGH = "HIGH", "High"
@@ -152,6 +201,8 @@ class PrivateTask(TaskFields):
     notes = EncryptedTextField(blank=True, default="")
     announcement = EncryptedTextField(blank=True, default="")
     source = models.CharField(max_length=6, choices=Source.choices, default=Source.MANUAL)
+    # One of the owner's own personal sections (never a work section): the folder it is filed in, if any.
+    section = models.ForeignKey(Section, null=True, blank=True, on_delete=models.SET_NULL, related_name="private_tasks")
 
     class Meta:
         indexes = [models.Index(fields=["owner", "status"]), models.Index(fields=["due_at"])]
@@ -245,6 +296,8 @@ class SharedTask(TaskFields):
     category_key = models.CharField(max_length=64, blank=True, default="")
     origin = models.CharField(max_length=13, choices=Origin.choices)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="shared_created")
+    # The work section it is filed in (GST, Accounts…), from the words or said outright; empty = not filed yet.
+    section = models.ForeignKey(Section, null=True, blank=True, on_delete=models.SET_NULL, related_name="tasks")
 
     # Projection of the canonical TaskPanel task (TaskPanel is the authority for staff tasks).
     remote_task_uuid = models.CharField(max_length=64, unique=True, null=True, blank=True)
@@ -293,6 +346,7 @@ class TaskEvent(models.Model):
         DONE = "DONE", "Done"
         REOPENED = "REOPENED", "Reopened"
         CANCELLED = "CANCELLED", "Cancelled"
+        FILED = "FILED", "Filed in a section"
 
     task = models.ForeignKey(SharedTask, on_delete=models.CASCADE, related_name="events")
     kind = models.CharField(max_length=10, choices=Kind.choices)

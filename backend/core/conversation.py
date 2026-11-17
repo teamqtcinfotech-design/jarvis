@@ -24,7 +24,7 @@ log = logging.getLogger("jarvis.conversation")
 
 STATE_TTL = timedelta(minutes=10)
 MAX_HISTORY = 8
-CONFIRMABLE = TASK_ACTIONS | {"message", "accept_request", "decline_request", "complete", "remember", "change_task", "delete_task"}
+CONFIRMABLE = TASK_ACTIONS | {"message", "accept_request", "decline_request", "complete", "remember", "change_task", "delete_task", "organise"}
 AI_DONE_OK = {"private_task", "md_request", "remember", "accept_request", "decline_request", "complete", "own_task"}
 EMPTY = {"history": [], "pending": None, "choices": None, "offer": None,
          "last_view": None,  # the list JARVIS showed last (see services.remember_last_view); kept, not used here
@@ -85,7 +85,7 @@ def _heading(p: dict) -> str:
         "md_request": f"Request to {services.md_address()}", "pa_self_task": "Your own task",
         "accept_request": "Accept request", "decline_request": "Decline request",
         "complete": "Mark as done", "remember": "Remember this", "choose_destination": "Where should this go?",
-        "change_task": "Change task", "delete_task": "Delete task",
+        "change_task": "Change task", "delete_task": "Delete task", "organise": p.get("title") or "Change the team",
     }.get(p.get("action", ""), "JARVIS")
 
 

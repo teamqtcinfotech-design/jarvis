@@ -844,6 +844,108 @@ class TeamView(APIView):
         return Response(services.person_item(person, request.user), status=201)
 
 
+class DepartmentListView(APIView):
+    """Departments with their members (everyone may look); the MD makes one (with people, by id)."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        from . import sections
+        return Response({"results": [sections.department_item(d, request.user) for d in sections.departments(active=not request.user.is_md)],
+                         "management": [services.person_item(u, request.user) for u in sections.management()]})
+
+    def post(self, request):
+        from . import sections
+        from .models import User as _User
+        data = request.data if isinstance(request.data, dict) else {}
+        people = list(_User.objects.filter(id__in=[int(i) for i in (data.get("people") or []) if str(i).isdigit()]))
+        dept, _created = sections.create_department(request.user, str(data.get("name") or ""), people)
+        return Response(sections.department_item(dept, request.user), status=201)
+
+
+class DepartmentView(APIView):
+    """One department: rename, add or remove people (by id), switch it off."""
+    permission_classes = [IsMD]
+
+    def patch(self, request, dept_id):
+        from . import sections
+        from .models import Department, User as _User
+        dept = Department.objects.get(id=dept_id)
+        data = request.data if isinstance(request.data, dict) else {}
+        if data.get("name"):
+            sections.rename_department(request.user, dept, str(data["name"]))
+        for key, fn in (("add", sections.add_members), ("remove", sections.remove_members)):
+            ids = [int(i) for i in (data.get(key) or []) if str(i).isdigit()]
+            if ids:
+                fn(request.user, dept, list(_User.objects.filter(id__in=ids)))
+        if data.get("active") is False and dept.active:
+            sections.delete_department(request.user, dept)
+        elif data.get("active") is True and not dept.active:
+            dept.active = True
+            dept.save(update_fields=["active"])
+        return Response(sections.department_item(dept, request.user))
+
+    def delete(self, request, dept_id):
+        from . import sections
+        from .models import Department
+        dept = Department.objects.get(id=dept_id)
+        sections.delete_department(request.user, dept)
+        return Response({"deleted": dept.id})
+
+
+class SectionListView(APIView):
+    """Sections: the shared work ones plus the caller's own personal ones; anyone makes a work section."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        from . import sections
+        return Response({"results": [sections.section_item(s, request.user) for s in sections.sections(request.user, active=not request.user.is_md)]})
+
+    def post(self, request):
+        from . import sections
+        from .models import Section
+        data = request.data if isinstance(request.data, dict) else {}
+        kind = Section.Kind.PERSONAL if data.get("kind") == "PERSONAL" else Section.Kind.WORK
+        section, _created = sections.create_section(request.user, str(data.get("name") or ""), kind)
+        return Response(sections.section_item(section, request.user), status=201)
+
+
+class SectionView(APIView):
+    """One section: rename, merge into another, switch off (work sections: the MD; personal: its owner)."""
+    permission_classes = [IsMDOrPA]
+
+    def patch(self, request, section_id):
+        from . import sections
+        from .models import Section
+        section = Section.objects.get(id=section_id)
+        data = request.data if isinstance(request.data, dict) else {}
+        if data.get("name"):
+            sections.rename_section(request.user, section, str(data["name"]))
+        if data.get("merge_into"):
+            dst = Section.objects.get(id=int(data["merge_into"]))
+            sections.merge_sections(request.user, section, dst)
+        if data.get("active") is False and section.active:
+            sections.delete_section(request.user, section)
+        return Response(sections.section_item(section, request.user))
+
+    def delete(self, request, section_id):
+        from . import sections
+        from .models import Section
+        section = Section.objects.get(id=section_id)
+        sections.delete_section(request.user, section)
+        return Response({"deleted": section.id})
+
+
+class TaskSectionView(APIView):
+    """Move a work item into a section (by name; made if new): whoever gave it, whoever does it, or the MD."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, task_id):
+        from . import sections
+        data = request.data if isinstance(request.data, dict) else {}
+        task, section = sections.move_task(request.user, task_id, str(data.get("section") or ""))
+        return Response({"task": services.shared_item(task), "section": sections.section_item(section, request.user)})
+
+
 class TeamMemberView(APIView):
     """The MD changes one person: name, job, department, gender, password, or switches the account off / on."""
     permission_classes = [IsMD]

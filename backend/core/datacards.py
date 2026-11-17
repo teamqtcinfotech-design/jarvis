@@ -13,7 +13,8 @@ from . import timeutils as tu
 from .models import Kind, PrivateTask, SharedTask, Status
 
 VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
-              "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person"]
+              "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person",
+              "department", "departments", "section"]
 
 _PROGRESS = {Status.OPEN: 0, Status.IN_PROGRESS: 50, Status.BLOCKED: 50, Status.COMPLETED: 100, Status.CANCELLED: 0}
 _REMOTE_PROGRESS = {"todo": 0, "working": 50, "waiting": 50, "done": 100}
@@ -405,6 +406,17 @@ def _history_view(user, include_private: bool, p: dict) -> dict:
     who = (p.get("who") or "").strip().lower()
     start, end = p.get("from"), p.get("to")
     items = _closed_items(user, include_private, (Status.COMPLETED, Status.CANCELLED, Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED), None)
+    # "Is mahine franchise mein kya hua" / "Accounts ka pichhla hafta": only that section's, or that department's, items.
+    section_name, member_ids = "", None
+    if p.get("group"):
+        from . import listviews as _lv, sections as _sections
+        sec = _lv.section_of(p)
+        if sec is not None:
+            section_name = sec.name.lower()
+        else:
+            found = _sections.find_department(p["group"])
+            if found["status"] in ("known", "close"):
+                member_ids = {u.id for u in found["department"].members.all()}
 
     def moment(when, item):
         if item.get("status") == Status.COMPLETED and item.get("completed_at"):
@@ -427,6 +439,10 @@ def _history_view(user, include_private: bool, p: dict) -> dict:
             return False
         if who == "staff" and item.get("assignee", {}).get("type") != "STAFF":
             return False
+        if section_name and (item.get("section") or "").lower() != section_name:
+            return False
+        if member_ids is not None and item.get("assignee", {}).get("user_id") not in member_ids:
+            return False
         if start:
             d = tu.to_local(moment(None, item)).date()
             if not (start <= d <= (end or start)):
@@ -446,7 +462,7 @@ def _history_view(user, include_private: bool, p: dict) -> dict:
         row.update({"status": outcome, "when": tu.fmt_time(at), "day": tu.fmt_day(tu.to_local(at).date()),
                     "past": tu.to_local(at).date() <= today})
         rows.append(row)
-    what = " ".join(p.get("words", "").split()) or (p.get("who") if who not in ("me", "all") else "") or "this"
+    what = " ".join(p.get("words", "").split()) or p.get("group") or (p.get("who") if who not in ("me", "all") else "") or "this"
     view = _table("history", f"History: {what}", rows, [("day", "Day"), ("when", "At"), ("title", "What"), ("status", "Outcome"), ("who", "Who")],
                   subtitle="Newest first, every outcome" if rows else f"Nothing about {what} so far")
     view["stats"] = [{"label": "Done", "value": sum(1 for r in rows if r["status"] == "Done"), "tone": "success", "icon": "checkmark-done-outline"},
@@ -543,6 +559,46 @@ def _first_two(rows: list[dict], key: str = "when") -> tuple[str, str]:
 
 
 def _build(user, kind: str, include_private: bool, day: date | None, p: dict, missing: str, listviews) -> dict | None:
+    from . import sections as _sections
+    address, address_hi = _addr(user)
+    if kind == "departments":
+        return _sections.departments_grid(user)
+    if kind == "department":
+        name = p["group"] or p["who"]
+        found = _sections.find_department(name) if name else {"status": "unknown", "department": None, "options": []}
+        if found["status"] in ("known", "close"):
+            return _sections.department_card(user, found["department"])
+        if found["status"] == "ambiguous":
+            return {"ask": f"{address}, which department: {' or '.join(found['options'])}?",
+                    "ask_hi": f"{address_hi}, कौन सा डिपार्टमेंट: {' या '.join(found['options'])}?"}
+        if not name:
+            return _sections.departments_grid(user)
+        # Not a department: maybe a section was meant, else a person.
+        if listviews.section_of({"group": name}) is not None:
+            return listviews.tasks_view(user, {**p, "group": name}, include_private, missing=missing)
+        view = _sections.departments_grid(user)
+        hint = f" Did you mean {found['options'][0]}?" if found.get("options") else ""
+        view["summary"] = f"{address}, there is no department called {name}.{hint} " + view["summary"].split(", ", 1)[-1]
+        view["summary_hi"] = f"{address_hi}, {name} नाम का कोई डिपार्टमेंट नहीं है। " + view["summary_hi"].split(", ", 1)[-1]
+        return view
+    if kind == "section":
+        name = p["group"] or p["who"]
+        if name and listviews.section_of({"group": name}) is None:
+            found = _sections.find_section(name, kind="WORK")
+            if found["status"] == "ambiguous":
+                return {"ask": f"{address}, which section: {' or '.join(found['options'])}?",
+                        "ask_hi": f"{address_hi}, कौन सा सेक्शन: {' या '.join(found['options'])}?"}
+            if _sections.find_department(name)["status"] in ("known", "close"):
+                return _build(user, "department", include_private, day, {**p, "group": name}, missing, listviews)
+            names = ", ".join(s.name for s in _sections.sections(None, "WORK")) or "none yet"
+            view = listviews.tasks_view(user, {**p, "group": "", "who": p["who"] if p["who"] != name else ""}, include_private, missing=missing)
+            hint = f" Did you mean {found['options'][0]}?" if found.get("options") else ""
+            view["summary"] = f"{address}, there is no section called {name}.{hint} The sections are {names}. " + view["summary"].split(", ", 1)[-1]
+            view["summary_hi"] = f"{address_hi}, {name} नाम का कोई सेक्शन नहीं है। सेक्शन हैं: {names}। " + view["summary_hi"].split(", ", 1)[-1]
+            return view
+        return listviews.tasks_view(user, {**p, "group": name}, include_private, missing=missing)
+    if p["group"] and kind in ("tasks", "today", "week", "pending", "late", "done", "history") and listviews.section_of(p) is not None and kind != "history":
+        return listviews.tasks_view(user, p, include_private, missing=missing)
     one_named = bool(p["who"]) and p["who"].lower() not in listviews._STAFF | listviews._ALL | listviews._ME
     if kind == "person" or (kind == "people" and one_named):
         # "Details of Kavita Singh" (even when the model filed it under people): that one person's own card.
@@ -553,6 +609,8 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
             return listviews.people_view(user, p, missing=missing)
         return listviews.tasks_view(user, p, include_private, mode="person", missing=missing)
     if kind == "people":
+        if p["group"] and listviews.section_of(p) is not None:
+            return listviews.tasks_view(user, p, include_private, missing=missing)  # a section is work, not people
         return listviews.people_view(user, p, missing=missing)
     if kind == "history":
         view = _history_view(user, include_private, p)
@@ -764,6 +822,7 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
 
 
 _QUERY_HINTS = [
+    ("departments", ("departments", "sab department", "sare department", "saare department", "kitne department", "all departments")),
     ("performance", ("performance", "report", "kaisa kaam", "kis ne kitna", "productivity", "kaun late", "who is late", "on time")),
     ("history", ("last time", "pichhli baar", "pichli baar", "kab mila", "last met", "last meeting with", "history", "kab diya tha", "pehle kab")),
     ("cancelled", ("cancelled", "canceled", "cancel kiye", "cancel hue", "hataye", "deleted", "restore")),

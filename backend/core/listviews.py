@@ -141,6 +141,11 @@ def resolve_subject(user, who: str) -> dict:
         return {"type": "me", "label": "you"} if user.is_md else {"type": "md", "label": services.md_address()}
     if raw in _TEAM:
         return {"type": "team", "label": "the team"}
+    # A department the MD made ("Accounts", "farm team"): its members' work.
+    from . import sections as _sections
+    dept = _sections.find_department(raw)
+    if dept["status"] in ("known", "close"):
+        return {"type": "department", "label": dept["department"].name, "department": dept["department"]}
     # Someone on the team, by name or by job ("Sunil", "accountant", "PA", "manager"); a name heard a little wrong
     # that is clearly one person is taken (for looking things up only).
     found = services.find_people(raw)
@@ -227,6 +232,13 @@ def _collect(user, subject: dict, include_private: bool) -> list[dict]:
         items += _shared(staff_work.filter(staff=subject["staff"]))
     if kind == "department":
         items += _shared(staff_work.filter(staff__department__iexact=subject["label"]))
+        dept = subject.get("department")
+        if dept is not None:
+            # The team members in it: all their work for the MD; for anyone else only what they gave them.
+            members = [u for u in dept.members.all() if u.is_active]
+            for member in members:
+                theirs = services.person_tasks_qs(member)
+                items += _shared(theirs if user.is_md else theirs.filter(created_by=user))
     if kind in ("staff_all", "all"):
         items += _shared(staff_work)
     seen, unique = set(), []
@@ -335,7 +347,20 @@ def _keep(item: dict, p: dict, user) -> bool:
         return False
     if p["ids"] and item["id"] not in p["ids"]:
         return False
+    if p.get("section") and (item.get("section") or "").lower() != p["section"].lower():
+        return False
     return True
+
+
+def section_of(p: dict):
+    """The work section a request's group names (GST, Franchise…), or None when it names nothing or a department."""
+    from . import sections as _sections
+    if not p.get("group"):
+        return None
+    if _sections.find_department(p["group"])["status"] in ("known", "close"):
+        return None
+    found = _sections.find_section(p["group"], kind="WORK")
+    return found["section"] if found["status"] in ("known", "close") else None
 
 
 def _by_words(items: list[dict], words: str) -> list[dict]:
@@ -433,7 +458,10 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
     links = dict(TaskPanelLink.objects.filter(active=True).values_list("actor_key", "user__role"))
     everyone = [s for s in services.staff_qs().order_by("department", "name")
                 if links.get(s.external_id) != User.Role.MD]
-    wanted = _match_department(p["group"]) if p["group"] else ""
+    from . import sections as _sections
+    dept_found = _sections.find_department(p["group"]) if p["group"] else {"status": "unknown", "department": None}
+    dept_obj = dept_found["department"] if dept_found["status"] in ("known", "close") else None
+    wanted = dept_obj.name if dept_obj else (_match_department(p["group"]) if p["group"] else "")
     group_missed = bool(p["group"] and not wanted)
     staff = [s for s in everyone if not wanted or s.department == wanted]
     on_leave_only = p["filter"] == "on_leave"
@@ -459,9 +487,10 @@ def people_view(user, p: dict, missing: str = "", not_found: str = "", suggestio
     # The people with a JARVIS account come first (the MD is not his own staff). Their open work is counted for the
     # MD, who sees all work; anyone else sees only what they themselves gave each person.
     staff_names = {services.norm_person(s.name) for s in staff}
+    member_ids = {u.id for u in dept_obj.members.all()} if dept_obj else None
     mates = [u for u in services.team() if not u.is_md and u.id != user.id
              and services.norm_person(u.spoken_name) not in staff_names
-             and (not wanted or (u.department or "").lower() == wanted.lower())]
+             and (member_ids is not None and u.id in member_ids if dept_obj else (not wanted or (u.department or "").lower() == wanted.lower()))]
     if on_leave_only:
         mates = []
     for u in mates:
@@ -680,7 +709,16 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
     mode "performance": the same template as one person's report for the last 30 days (or the period said).
     mode "person": the same template as one person's whole picture: who they are (team, role, leave), what is
     on their plate now and what they finished lately."""
+    # A section asked for ("GST ka pending", "Franchise mein kya baaki hai"): everyone's work filed there that the
+    # speaker may see, grouped by person; a department named as the group is the same as naming it as "who".
+    section = section_of(p)
+    if section is not None:
+        p = {**p, "section": section.name, "who": p["who"] or ("all" if user.is_md else "team"), "filter": p["filter"] or "open"}
+    elif p.get("group") and not p["who"]:
+        p = {**p, "who": p["group"]}
     subject = resolve_subject(user, p["who"])
+    if section is not None and subject["type"] == "team" and not user.is_md:
+        subject = {"type": "all", "label": "everyone"}
     profile = _profile(subject) if mode == "person" else None
     if mode == "person" and profile is None and subject["type"] not in ("ambiguous", "unknown"):
         mode = ""  # "details" of a team or of everyone is simply their list
@@ -705,7 +743,9 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
     if p["words"]:
         items = _by_words(items, p["words"])
     items = _ordered(items)
-    many = kind in ("staff_all", "all", "department", "team")
+    many = kind in ("staff_all", "all", "department", "team") or section is not None
+    if section is not None:  # a section's work reads best person by person
+        items = sorted(items, key=lambda i: (_owner(i, user).lower(), 0 if not _is_done(i) else 1))
     pa = services.get_pa()
     pa_name = pa.spoken_name if pa else "your PA"
     ph = _phrases(p, user, pa_name)
@@ -731,6 +771,8 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
                  "staff_all": "Work with staff", "all": "Everyone's tasks",
                  "team": "The team's work" if user.is_md else "Given by you"}[kind]
     period = _period_title(start, end)
+    if section is not None:
+        who_title = f"{section.name} section"
     title = _join(who_title, f"· {period}" if period else "")
     basis = {"given": "Given in this period", "done": "Finished in this period", "due": "Due in this period",
              "": "Due or finished then" if start else "Open, and finished in the last 30 days"}[by]
@@ -741,9 +783,12 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
     if kind == "me" and user.is_md and not private_ok and flt != "official":
         subtitle = _join(subtitle, "· personal items hidden while locked")
     view = datacards._table(
-        "tasks", title, rows,
+        "section" if section is not None else "tasks", title, rows,
         [("day", "Day"), ("when", "When"), ("title", "What"), ("who", "Who"), ("status", "Status")],
-        subtitle=subtitle, layout="table" if kind in ("me", "md") else "progress")
+        subtitle=subtitle, layout="table" if kind in ("me", "md") and section is None else "progress")
+    if section is not None:
+        view["section"] = {"name": section.name, "colour": section.colour, "id": section.id}
+        view["request"] = request_of("section", {**p, "group": section.name})
     if performance:
         view["stats"] = [
             {"label": "Given", "value": total, "tone": "accent", "icon": "briefcase-outline"},
@@ -795,6 +840,9 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
            "md": f"{sir} {'had' if past else 'has'}", "staff_one": f"{name} {'had' if past else 'has'}",
            "department": f"the {name} team {'had' if past else 'has'}", "staff_all": f"the staff {'had' if past else 'have'}",
            "all": "there were" if past else "there are", "team": f"the team {'had' if past else 'has'}"}[kind]
+    if section is not None:
+        has = f"{section.name} {'had' if past else 'has'}"
+        name = section.name
     whose_hi = {"me": "आपके", "pa": f"{name} के", "md": f"{sir_hi} के", "staff_one": f"{name} के", "department": f"{name} टीम के",
                 "staff_all": "स्टाफ़ के", "all": "सबके", "team": "टीम के"}[kind]
     to_hi = {"me": "आपको", "pa": f"{name} को", "md": f"{sir_hi} को", "staff_one": f"{name} को", "department": f"{name} टीम को",

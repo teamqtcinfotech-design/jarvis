@@ -6,11 +6,11 @@ export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delega
 
 /** Cards of the team's kind, saved on the server by the same path the voice uses (/assistant/execute/). */
 export const SERVER_SAVED: DraftAction[] = ['person_task', 'person_meeting', 'own_task', 'message', 'pa_task', 'pa_meeting',
-  'pa_self_task', 'mg_task'];
+  'pa_self_task', 'mg_task', 'organise'];
 
 /** Cards that end with a question ("shall I save it?") and wait for a yes / no / change. */
 export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'message', 'accept_request', 'decline_request', 'complete', 'remember',
-  'change_task', 'delete_task'];
+  'change_task', 'delete_task', 'organise'];
 
 const CHANGE_LABEL: Record<string, string> = {
   title: 'name', due_date: 'day', due_time: 'time', priority: 'priority', kind: 'type', duration_minutes: 'length',
@@ -78,6 +78,8 @@ export function draftHeading(d: Draft, md = 'Sir', him = 'him'): { title: string
       return { title: 'Delete task', detail: 'It will be cancelled, not erased.', icon: 'trash-outline' };
     case 'set_setting':
       return { title: 'Setting', detail: '', icon: 'settings-outline' };
+    case 'organise':
+      return { title: d.title || 'Change the team', detail: 'Departments and sections. A yes does it; "undo" takes it back for a minute.', icon: 'git-network-outline' };
     case 'remember':
       return { title: 'Remember this', detail: 'Only you can see your notes. Delete them any time in Settings.', icon: 'bookmark-outline' };
     case 'choose_destination':

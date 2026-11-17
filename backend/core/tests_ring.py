@@ -272,7 +272,7 @@ class RingUntilSeenTests(BaseCase):
         # Sunil no longer sees it; Kiran does; the history keeps it all.
         self.assertEqual(self.sunil_client.get(f"/api/v1/shared-tasks/{task.id}/history/").status_code, 404)
         lines = [e["text"] for e in self.kiran_client.get(f"/api/v1/shared-tasks/{task.id}/history/").json()["results"]]
-        self.assertEqual(lines[0], "Given by Sir to Sunil")
+        self.assertTrue(lines[0].startswith("Given by Sir to Sunil"), lines[0])  # "· in Accounts" since Phase 3
         self.assertIn("Sunil can't do it: bank band hai", lines)
         self.assertIn("Sir gave it to Kiran instead of Sunil", lines)
 

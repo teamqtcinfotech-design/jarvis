@@ -58,6 +58,7 @@ export function TaskRow({ item, onPress, showStaffStatus, flat, last }: {
             <Tag label={`From ${item.created_by}`} color={colors.gold} bg={colors.goldSoft} />
           ) : null}
           {staff ? <Tag label={staff} icon="person-outline" /> : null}
+          {item.section ? <Tag label={item.section} icon="folder-outline" color={item.section_colour || colors.accent} bg={colors.accentSoft} /> : null}
           {showStaffStatus && status ? <Tag label={status.label} color={status.color} bg={status.bg} /> : null}
         </View>
         {showStaffStatus ? (

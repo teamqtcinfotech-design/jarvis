@@ -23,7 +23,7 @@ UNDO_WINDOW = timedelta(minutes=2)  # said as "a minute" to the person; a little
 
 # Card actions that put something new in somebody's list (or send a message) and that JARVIS saves by itself when
 # the instruction was complete and clear.
-PERSON_ACTIONS = {"person_task", "person_meeting", "own_task", "message"}
+PERSON_ACTIONS = {"person_task", "person_meeting", "own_task", "message", "organise"}
 # The names older phones (and cards saved before the team) still use, and what they mean now.
 LEGACY = {"pa_task": "person_task", "mg_task": "person_task", "pa_meeting": "person_meeting", "pa_self_task": "own_task"}
 
@@ -134,6 +134,12 @@ def run_item(user: User, p: dict) -> dict:
             en = f"Done, {address}: given to {who}{when}. I'll tell you when it's done."
             hi = f"हो गया, {address_hi}: {who_hi} को दे दिया" + (f", {due_hi}" if due_hi else "") + "। पूरा होने पर बताऊँगा।"
         return {"en": en, "hi": hi, "undo": refs, "title": p.get("title", ""), "people": [u.spoken_name for u in names]}
+    if action == "organise":
+        # A department or section change the speaker confirmed (removing people, deleting, merging): see organise.py.
+        from . import organise  # noqa: PLC0415 — organise imports this module
+        plan = p.get("organise") if isinstance(p.get("organise"), dict) else {}
+        r = organise.apply(user, plan)
+        return {"en": r["en"], "hi": r["hi"], "undo": r.get("undo") or [], "title": p.get("title") or "", "view": r.get("view")}
     if action == "message":
         people = _people_of(user, p)
         text = " ".join(str(p.get("message") or p.get("notes") or p.get("title") or "").split())
@@ -283,4 +289,7 @@ def _undo_one(user: User, ref: dict) -> int:
             task.save(update_fields=["status", "completed_at", "version", "updated_at"])
             return 1
         return 0
+    if kind == "organise":
+        from . import organise  # noqa: PLC0415 — organise imports this module
+        return organise.undo(user, ref.get("inverse") or {})
     return 0

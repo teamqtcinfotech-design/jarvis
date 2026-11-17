@@ -5,6 +5,8 @@ import React, { useEffect, useState } from 'react';
 import { AppState, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { DepartmentsPanel } from '@/components/DepartmentsPanel';
+import { SectionsPanel } from '@/components/SectionsPanel';
 import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui';
 import { useAlertEngine } from '@/lib/alertEngine';
 import { api, currentServer, deviceTokens } from '@/lib/api';
@@ -27,10 +29,12 @@ import { type WakeStatus, wakeSetListening, wakeSetVoice, wakeSettings, wakeStar
  * (`/settings?section=voice`), so nothing needs a long scroll. Nothing technical (server, sync, usage) is shown.
  */
 
-type SectionKey = 'team' | 'names' | 'voice' | 'alerts' | 'routine' | 'background' | 'memory';
+type SectionKey = 'team' | 'departments' | 'sections' | 'names' | 'voice' | 'alerts' | 'routine' | 'background' | 'memory';
 
 const SECTIONS: { key: SectionKey; title: string; detail: string; icon: string; mdOnly?: boolean }[] = [
   { key: 'team', title: 'Team', detail: 'Add people, their jobs and logins', icon: 'people-outline', mdOnly: true },
+  { key: 'departments', title: 'Departments', detail: 'Groups of people, here or by voice', icon: 'git-network-outline' },
+  { key: 'sections', title: 'Sections', detail: 'Folders of work: GST, Franchise…', icon: 'folder-outline' },
   { key: 'names', title: 'Your name', detail: 'And how JARVIS addresses you', icon: 'person-circle-outline', mdOnly: true },
   { key: 'voice', title: 'Voice & language', detail: 'Hindi or English, JARVIS’s voice', icon: 'mic-outline' },
   { key: 'alerts', title: 'Reminders & alerts', detail: 'Snooze, sound, quiet hours', icon: 'notifications-outline' },
@@ -117,6 +121,8 @@ function SettingsScreen() {
       {open ? (
         <ScrollView contentContainerStyle={s.page} keyboardShouldPersistTaps="handled">
           {open.key === 'team' ? <TeamSection /> : null}
+          {open.key === 'departments' ? <DepartmentsPanel /> : null}
+          {open.key === 'sections' ? <SectionsPanel /> : null}
           {open.key === 'names' ? <NamesSection /> : null}
           {open.key === 'voice' ? <VoiceSection /> : null}
           {open.key === 'alerts' ? <AlertsSection /> : null}

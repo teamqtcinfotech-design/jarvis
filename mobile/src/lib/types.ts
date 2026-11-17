@@ -63,6 +63,36 @@ export interface TaskItem {
   seen_at?: string | null;
   promise_label?: string;
   promise_label_hi?: string;
+  /** The section it is filed in (GST, Accounts…), empty when not filed. */
+  section?: string;
+  section_id?: number | null;
+  section_colour?: string;
+}
+
+/** A department: a group of people on the team (never the MD, the manager or the PA). */
+export interface DepartmentItem {
+  id: number;
+  name: string;
+  name_hi: string;
+  colour: string;
+  active: boolean;
+  members: TeamMember[];
+  open: number;
+  late: number;
+  section: string;
+}
+
+/** A section: a shared folder of work, or one person's own personal folder. */
+export interface SectionItem {
+  id: number;
+  name: string;
+  name_hi: string;
+  kind: 'WORK' | 'PERSONAL';
+  colour: string;
+  active: boolean;
+  department: string;
+  open: number;
+  aliases: string[];
 }
 
 export interface RequestItem {
@@ -97,6 +127,8 @@ export interface TeamMember {
   gender: '' | 'male' | 'female';
   active: boolean;
   you?: boolean;
+  /** The departments this person is in (team members only). */
+  departments?: string[];
 }
 
 export interface Dashboard {
@@ -241,6 +273,7 @@ export type DraftAction =
   | 'md_request'
   | 'delegation'
   | 'team_delegation'
+  | 'organise'
   | 'pa_task'
   | 'pa_meeting'
   | 'pa_self_task'
@@ -324,6 +357,8 @@ export interface DataView {
   office?: { start_min: number; end_min: number };
   /** One person's card: who they are, from the staff app. */
   profile?: { name: string; department: string; designation: string; on_leave: boolean; leave: string };
+  /** A section's work: the section it shows. */
+  section?: { id: number; name: string; colour: string };
   /** The sentence JARVIS spoke for this card (and its Hindi twin), written by the server from the real numbers. */
   summary?: string;
   summary_hi?: string;
@@ -413,6 +448,8 @@ export interface Draft {
   view?: DataView | null;
   /** Something to do on the screen by voice: export_pdf / export_csv / share / open_item / open_settings / go_home. */
   screen_action?: string;
+  /** organise: a department or section change waiting for a yes (removing people, deleting, merging); sent back as is. */
+  organise?: Record<string, unknown>;
   setting_key: string;
   setting_value: string;
   setting_patch?: Record<string, string | number | boolean>;

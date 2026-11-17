@@ -1167,7 +1167,46 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
     return draft
 
 
-_SCREEN_ACTIONS = {"export_pdf", "export_csv", "share", "open_item", "open_settings", "go_home"}
+_SCREEN_ACTIONS = {"export_pdf", "export_csv", "share", "send_list", "open_item", "open_settings", "go_home"}
+
+
+def _send_list(user: User, cmd: dict, draft: dict, on_screen: dict, include_private: bool, address: str, address_hi: str) -> None:
+    """The card on screen as a message to the people named (a group by team_name)."""
+    names = _recipients_of(cmd)
+    people: list = []
+    if names:
+        for raw in names:
+            found = services.find_people(raw, exclude=user)
+            if found["status"] in ("known", "close"):
+                people += found["people"]
+            elif found["status"] == "ambiguous":
+                _ask(draft, f"{address}, which {raw}: {' or '.join(found['options'])}?")
+                return
+            else:
+                group, _label = services.find_group(raw, exclude=user)
+                people += group
+    if not people and cmd.get("team_name"):
+        people, _label = services.find_group(str(cmd["team_name"]), exclude=user)
+    if not people:
+        _ask(draft, f"{address}, who should get this list?", f"{address_hi}, ये लिस्ट किसे भेजूँ?")
+        return
+    filters = on_screen.get("filters") or {}
+    kind = str(filters.get("kind") or on_screen.get("kind") or "tasks")
+    view = datacards.build(user, kind, include_private, params=filters) if kind in datacards.VIEW_KINDS else None
+    text = (view or {}).get("text") or "\n".join(f"• {i['title']}" for i in on_screen.get("items", []))
+    text = f"{on_screen.get('title') or (view or {}).get('title') or 'List'}\n{text}" if not text.startswith(on_screen.get("title") or "\0") else text
+    if any(r.get("private") for r in (view or {}).get("rows") or []):
+        _ask(draft, f"{address}, that list has your personal items in it; I won't send those. Ask for the official list and I'll send that.",
+             f"{address_hi}, उस लिस्ट में आपके पर्सनल काम हैं; वो नहीं भेजूँगा। ऑफ़िशियल लिस्ट माँगिए, वो भेज दूँगा।")
+        return
+    try:
+        services.send_message_to(user, people, text[:services.MESSAGE_MAX_CHARS])
+    except services.ServiceError as err:
+        _ask(draft, f"{address}, {err.message}")
+        return
+    who, who_hi = services.names_phrase(people), services.names_phrase(people, hindi=True)
+    draft["booked"] = True
+    _say(draft, f"Sent the list to {who}, {address}.", f"{who_hi} को लिस्ट भेज दी, {address_hi}।")
 
 
 def _clean_screen(screen) -> dict | None:
@@ -1690,6 +1729,37 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 _say(draft, f"Done {address}: {what}.", f"हो गया {address_hi}: {what}।")
         except services.ServiceError as err:
             _ask(draft, f"{address}, {err.message}")
+    elif intent == "organise":
+        # Departments, their people, sections, and moving work into a section: read in full by core/organise.py.
+        # Making and adding happen at once (undo for a minute); removing, deleting and merging ask first.
+        from . import organise  # noqa: PLC0415 — organise imports this module's neighbours
+        draft["action"], draft["needs_clarification"], draft["question"], draft["spoken_reply"] = "answer", False, "", ""
+        try:
+            result = organise.plan(user, full_text, on_screen)
+        except services.ServiceError as err:
+            result = {"ask": f"{address}, {err.message}", "ask_hi": f"{address_hi}, {err.message}"}
+        if result.get("nothing"):
+            _say(draft, f"{address}, I didn't understand what to organise. Say, for example, 'Farm department banao aur Kiran ko add kar do'.",
+                 f"{address_hi}, समझ नहीं आया क्या बदलना है। जैसे बोलिए, 'Farm department banao aur Kiran ko add kar do'।")
+        elif result.get("ask"):
+            _ask(draft, result["ask"], result.get("ask_hi", ""))
+        elif result.get("confirm"):
+            draft["action"] = "organise"
+            draft["organise"] = result["plan"]
+            draft["title"] = organise.describe(result["plan"])
+            _ask(draft, result["question"], result.get("question_hi", ""))
+        else:
+            draft["booked"] = True  # the lists change: the phone refreshes them
+            if result.get("view"):
+                draft["view"] = result["view"]
+                services.remember_last_view(user, result["view"].get("request") or {}, result["view"].get("summary", ""))
+            if result.get("en"):
+                _say(draft, result["en"], result.get("hi", ""))
+            elif result.get("view"):
+                draft["spoken_reply"], summary_hi = result["view"].get("summary", ""), result["view"].get("summary_hi", "")
+            if result.get("undo"):
+                from . import actions  # noqa: PLC0415
+                actions.remember_done(user, result["undo"], draft["title"] or "the last change")
     elif intent == "briefing":
         draft["action"] = "briefing"
         if not draft["spoken_reply"]:
@@ -1760,10 +1830,14 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         draft["screen_action"] = act
         draft["needs_clarification"] = False
         draft["question"] = ""
-        if act in ("export_pdf", "export_csv", "share") and not on_screen:
+        if act in ("export_pdf", "export_csv", "share", "send_list") and not on_screen:
             draft["action"], draft["screen_action"] = "answer", ""
-            _say(draft, f"{address}, there is no list on screen. Ask me for one first, then I can download or share it.",
-                 f"{address_hi}, स्क्रीन पर कोई लिस्ट नहीं है। पहले कोई लिस्ट माँगिए, फिर मैं डाउनलोड या शेयर कर सकता हूँ।")
+            _say(draft, f"{address}, there is no list on screen. Ask me for one first, then I can download, share or send it.",
+                 f"{address_hi}, स्क्रीन पर कोई लिस्ट नहीं है। पहले कोई लिस्ट माँगिए, फिर मैं डाउनलोड, शेयर या भेज सकता हूँ।")
+        elif act == "send_list":
+            # "Ye list Nikki ko bhej do": the card on screen, rebuilt here from its filters, goes as a message.
+            draft["action"], draft["screen_action"] = "answer", ""
+            _send_list(user, cmd, draft, on_screen, include_private, address, address_hi)
         elif act == "open_item":
             known = {i["id"]: i for i in ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]}
             for i in (on_screen or {}).get("items", []):

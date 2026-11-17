@@ -13,7 +13,7 @@ import { colors, kindLabel, radius } from '@/lib/theme';
 import type { HistoryStep, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 
-import { Button, Icon, PriorityTag, Tag, Txt } from './ui';
+import { Button, Chip, Icon, PriorityTag, Tag, Txt } from './ui';
 
 /** "Today 10:42 AM" for a moment the server sent. */
 const momentLabel = (iso: string) => `${dayLabel(isoDate(new Date(iso)))} ${timeOf(iso)}`;
@@ -79,6 +79,10 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
   const [message, setMessage] = useState('');
   const [holdReason, setHoldReason] = useState('');
   const [askHold, setAskHold] = useState(false);
+  // The section picker: the work sections, loaded when it opens; a new one is made by typing its name.
+  const [pickSection, setPickSection] = useState(false);
+  const [sectionsList, setSectionsList] = useState<{ id: number; name: string; kind: string; colour: string }[] | null>(null);
+  const [newSection, setNewSection] = useState('');
   if (!item) return null;
 
   const isMD = user?.role === 'MD';
@@ -121,6 +125,22 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
       setBusy('');
     }
   };
+
+  // Sections: whoever gave it, whoever does it, or the MD may move it ("put this in Partners" by voice does the same).
+  const canMove = item.scope === 'shared' && !closed && !isStaff && (isMD || gaveIt || isMine);
+  const openPicker = async () => {
+    setPickSection((v) => !v);
+    if (sectionsList) return;
+    try {
+      const r = await api<{ results: { id: number; name: string; kind: string; colour: string }[] }>('/sections/');
+      setSectionsList(r.data.results.filter((sct) => sct.kind === 'WORK'));
+    } catch {
+      setSectionsList([]);
+    }
+  };
+  const moveTo = (name: string) =>
+    run('section', () => api(`/shared-tasks/${item.id}/section/`, { method: 'POST', body: { section: name } }),
+      `Moved to ${name}, ${address}.`, `${name} में रख दिया, ${addressHi}।`);
 
   // A cancel is undone from the Cancelled list, but it still asks first.
   const confirmCancel = () => {
@@ -205,6 +225,31 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
           </View>
         ) : item.created_by ? (
           <Txt variant="small" style={{ marginTop: 8 }}>Requested by {item.created_by}</Txt>
+        ) : null}
+        {item.scope === 'shared' && !isStaff ? (
+          <View style={s.sectionRow}>
+            <Pressable onPress={canMove ? openPicker : undefined} style={[s.sectionChip, { borderColor: item.section_colour || colors.line }]}>
+              <Icon name="folder-outline" size={14} color={item.section_colour || colors.inkSoft} />
+              <Txt variant="small" style={{ marginLeft: 6, color: item.section ? colors.text : colors.inkSoft }}>{item.section || 'No section'}</Txt>
+              {canMove ? <Icon name={pickSection ? 'chevron-up' : 'chevron-down'} size={14} color={colors.faint} /> : null}
+            </Pressable>
+          </View>
+        ) : null}
+        {pickSection ? (
+          <View style={s.picker}>
+            <Txt variant="label">Move to</Txt>
+            <View style={s.chips}>
+              {(sectionsList ?? []).filter((sct) => sct.name !== item.section).map((sct) => (
+                <Chip key={sct.id} label={sct.name} icon="folder-outline" onPress={() => moveTo(sct.name)} />
+              ))}
+              {sectionsList === null ? <Txt variant="caption">Loading…</Txt> : null}
+              {sectionsList && !sectionsList.filter((sct) => sct.name !== item.section).length ? <Txt variant="caption">No other section yet. Type one below.</Txt> : null}
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+              <TextInput value={newSection} onChangeText={setNewSection} placeholder="New section, e.g. Franchise" placeholderTextColor={colors.faint} style={[s.input, { flex: 1 }]} autoCapitalize="words" maxLength={60} />
+              <Button title="Move" compact disabled={!newSection.trim() || busy === 'section'} loading={busy === 'section'} onPress={() => moveTo(newSection.trim())} style={{ marginLeft: 8 }} />
+            </View>
+          </View>
         ) : null}
         {item.scope === 'shared' ? <History taskId={item.id} version={item.version} /> : null}
         {message ? <Txt variant="small" style={{ marginTop: 12, color: colors.warn }}>{message}</Txt> : null}
@@ -312,6 +357,10 @@ const s = StyleSheet.create({
   grabber: { alignSelf: 'center', width: 44, height: 5, borderRadius: 3, backgroundColor: colors.line, marginBottom: 14 },
   closeBtn: { position: 'absolute', top: 14, right: 14, zIndex: 2, width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   box: { marginTop: 12, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  sectionRow: { flexDirection: 'row', marginTop: 10 },
+  sectionChip: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: 999, paddingVertical: 5, paddingHorizontal: 10, backgroundColor: colors.surface },
+  picker: { marginTop: 10, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 6, gap: 6 },
   history: { marginTop: 12 },
   historyHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   step: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 4 },

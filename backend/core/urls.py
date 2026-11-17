@@ -55,6 +55,12 @@ urlpatterns = [
     # The team (everyone sees who is on it; the MD adds and manages people)
     path("team/", views.TeamView.as_view()),
     path("team/<int:user_id>/", views.TeamMemberView.as_view()),
+    # Departments (groups of people) and sections (folders of work)
+    path("departments/", views.DepartmentListView.as_view()),
+    path("departments/<int:dept_id>/", views.DepartmentView.as_view()),
+    path("sections/", views.SectionListView.as_view()),
+    path("sections/<int:section_id>/", views.SectionView.as_view()),
+    path("shared-tasks/<uuid:task_id>/section/", views.TaskSectionView.as_view()),
     path("assistant/interpret/", views.InterpretView.as_view()),
     path("assistant/execute/", views.ExecuteView.as_view()),
     path("assistant/undo/", views.UndoView.as_view()),
