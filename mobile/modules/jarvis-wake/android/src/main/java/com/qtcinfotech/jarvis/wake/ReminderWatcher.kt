@@ -32,7 +32,10 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
      * asks right after it (a contract from the server: kind, en, hi), if any.
      */
     private class Item(val key: String, val reminderKey: String?, val alertId: String?, val title: String,
-                       val spoken: String, val isPrivate: Boolean, val urgent: Boolean, val question: JSONObject? = null)
+                       val spoken: String, val isPrivate: Boolean, val urgent: Boolean, val question: JSONObject? = null,
+                       /** Ring until seen: shown with the "ting ting" and the Seen button. */
+                       val ring: Boolean = false, val quiet: Boolean = false, val seenLabel: String = "Seen",
+                       val priority: String = "NORMAL")
 
     /** Set by the service: after a spoken item with a question, listen for the answer (the voice-only conversation). */
     @Volatile var onAsk: ((JSONObject) -> Unit)? = null
@@ -85,19 +88,44 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         }
         val results = alerts?.optJSONArray("results")
         if (results != null) {
+            val stillRinging = HashSet<String>()  // what the server says waits for Seen right now
+            var rungAgain = 0                      // items rung at a new number this pass (one sound for all)
             for (i in 0 until results.length()) {
                 val a = results.getJSONObject(i)
                 val id = a.optString("id")
                 val key = a.optString("announce_key").ifEmpty { "alert:$id" }  // a snoozed alert comes back as new
-                if (id.isEmpty() || key in spoken) continue
+                val ringing = a.optBoolean("ringing") && !RingReceiver.seenHere(context, id)
+                if (ringing) stillRinging.add(id)
+                val ringNo = a.optInt("rings").toString()
+                if (id.isNotEmpty() && key in spoken) {
+                    // Ring until seen, without live push: ring again once per ring number the server has counted.
+                    if (ringing && RingReceiver.firstRing(context, id, ringNo)) {
+                        notifier.showRingItem(id, a.optString("title"), a.optString("spoken_text").ifBlank { a.optString("body") },
+                            a.optString("priority"), a.optString("seen_label", "Seen"))
+                        rungAgain++
+                    }
+                    continue
+                }
+                if (id.isEmpty()) continue
                 if (!a.optBoolean("fresh", true)) {  // told already, or old news: it stays in the lists only
                     spoken.add(key)
                     continue
                 }
+                if (ringing) RingReceiver.firstRing(context, id, ringNo)
                 val item = Item(key, null, id, a.optString("title"), a.optString("spoken_text"), false,
-                                a.optString("priority") == "URGENT", a.optJSONObject("question"))
-                if (a.optString("priority") == "LOW") quiet.add(item) else due.add(item)
+                                a.optString("priority") == "URGENT", a.optJSONObject("question"),
+                                ring = ringing, seenLabel = a.optString("seen_label", "Seen"), priority = a.optString("priority", "NORMAL"))
+                if (a.optString("priority") == "LOW" && !ringing) quiet.add(item) else due.add(item)
             }
+            if (rungAgain > 0) {
+                val n = notifier.active().size
+                val hindi = prefs.getString(WakeBus.KEY_REPLY_LANG, "") == "hi"
+                notifier.showRingSummary(if (hindi) "$n चीज़ें आपके देखने का इंतज़ार कर रही हैं" else "$n waiting for you",
+                    if (hindi) "हर एक पर “देख लिया” दबाइए, या JARVIS खोलिए।" else "Tap Seen on each, or open JARVIS.",
+                    quiet = false, alert = true)
+            }
+            // Seen, done or withdrawn somewhere else while this phone was off the network: its notification goes.
+            for (id in notifier.active()) if (id !in stillRinging) notifier.cancelRing(id)
         }
         if (due.isNotEmpty()) announce(due)
         for (item in missed) {
@@ -119,12 +147,16 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
      * An alert comes with its id in the key ("alert:<id>"); a reminder comes with its own key (reminderKey).
      */
     fun deliverPush(key: String, title: String, spoken: String, urgent: Boolean, priority: String = "NORMAL",
-                    question: JSONObject? = null, reminderKey: String? = null, isPrivate: Boolean = false) {
+                    question: JSONObject? = null, reminderKey: String? = null, isPrivate: Boolean = false,
+                    ring: Boolean = false, quiet: Boolean = false, seenLabel: String = "Seen") {
         val spokenKeys = prefs.getStringSet(WakeBus.KEY_SPOKEN, emptySet())?.toMutableSet() ?: mutableSetOf()
         if (key in spokenKeys) return
         val alertId = if (reminderKey == null) key.removePrefix("alert:").substringBefore(":s") else null
-        val item = Item(key, reminderKey, alertId, title, spoken, isPrivate, urgent, question)
-        if (!WakeBus.inConversation && priority != "LOW") announce(listOf(item))
+        val item = Item(key, reminderKey, alertId, title, spoken, isPrivate, urgent, question, ring, quiet, seenLabel)
+        if (ring && alertId != null && WakeBus.inConversation) {
+            notifier.showRing(alertId, title, spoken, priority, quiet, seenLabel) // mid-conversation: rung and shown, not spoken
+        }
+        if (!WakeBus.inConversation && (priority != "LOW" || ring)) announce(listOf(item))
         spokenKeys.add(key)
         prefs.edit().putStringSet(WakeBus.KEY_SPOKEN, spokenKeys).apply()
         tell(listOf(item))
@@ -185,8 +217,12 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         val lines = ArrayList<String>()
         var ask: Item? = null  // the one item whose question JARVIS asks aloud, then listens for the answer
         for (item in items) {
-            notifier.show(item.key, if (item.isPrivate) "JARVIS" else "JARVIS · Reminder",
-                if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent, silentSound())
+            if (item.ring && item.alertId != null) {
+                notifier.showRing(item.alertId, item.title, item.spoken, if (item.urgent) "URGENT" else "NORMAL", item.quiet, item.seenLabel)
+            } else {
+                notifier.show(item.key, if (item.isPrivate) "JARVIS" else "JARVIS · Reminder",
+                    if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent, silentSound())
+            }
             val generic = if (DEVANAGARI.containsMatchIn(item.spoken)) "$addressHi, आपका एक प्राइवेट रिमाइंडर है।"
                           else "$address, you have a private reminder."
             val line = when {

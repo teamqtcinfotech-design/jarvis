@@ -114,6 +114,10 @@ object WakeBus {
     const val KEY_BARGE_IN = "barge_in"
     const val KEY_SPEAK_LOCKED = "speak_locked"
     const val KEY_SPOKEN = "spoken_keys"
+    /** Alerts whose Seen was tapped on this phone (ring until seen): they never ring here again. */
+    const val KEY_SEEN_IDS = "seen_ids"
+    /** Alerts still waiting for Seen on this phone (their notifications are up), so the "N waiting" summary is right. */
+    const val KEY_RING_ACTIVE = "ring_active"
     const val KEY_PUSH_TOKEN = "push_token"
     /** Which Grok voice JARVIS speaks with (the MD's choice in Settings; male voices only). */
     const val KEY_VOICE_NAME = "voice_name"
