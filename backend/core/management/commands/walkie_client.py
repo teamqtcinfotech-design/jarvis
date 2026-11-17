@@ -280,7 +280,10 @@ class Command(BaseCommand):
             req = urllib.request.Request(f"{api}/me/", headers={"Authorization": f"Bearer {token}"})
             with urllib.request.urlopen(req, timeout=20) as r:
                 me = json.loads(r.read())
-            user = User(id=me["id"], username=username, spoken_name=me.get("name") or username)
+            import base64  # noqa: PLC0415
+            claims = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))  # the id is in the token itself
+            from types import SimpleNamespace  # noqa: PLC0415
+            user = SimpleNamespace(id=int(claims["user_id"]), username=username, spoken_name=me.get("name") or username)
             self.stdout.write(f"signed in at {api} as {user.spoken_name} (id {user.id})")
             talk_to = [int(x) for x in opts["talk"].split(",") if x.strip().isdigit()]
         else:
