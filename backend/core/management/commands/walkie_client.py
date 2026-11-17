@@ -227,22 +227,34 @@ class Line:
     # ------------------------------------------------------------------ the loop
     async def run(self, token: str, talk_to: list[int]) -> None:
         from websockets.asyncio.client import connect  # noqa: PLC0415
+        from websockets.exceptions import ConnectionClosed  # noqa: PLC0415
         url = f"{self.url}?token={token}"
-        self.log(f"connecting to {self.url} as {self.user.spoken_name} ({self.user.username})")
-        async with connect(url, ping_interval=20, max_size=16384, compression=None) as ws:
-            self.ws = ws
-            await self.send({"t": "hello"})
-            if talk_to:
-                async def later():
-                    await asyncio.sleep(0.8)
-                    await self.call(talk_to)
-                asyncio.create_task(later())
-            async for raw in ws:
-                if isinstance(raw, (bytes, bytearray)):
-                    self.on_bytes(bytes(raw))
-                else:
-                    await self.on_text(raw)
-        self.log("line closed")
+        first = True
+        while True:
+            self.log(f"connecting to {self.url} as {self.user.spoken_name} ({self.user.username})")
+            try:
+                async with connect(url, ping_interval=20, ping_timeout=30, max_size=16384, compression=None) as ws:
+                    self.ws = ws
+                    await self.send({"t": "hello"})
+                    if talk_to and first:
+                        async def later():
+                            await asyncio.sleep(0.8)
+                            await self.call(talk_to)
+                        asyncio.create_task(later())
+                    first = False
+                    async for raw in ws:
+                        if isinstance(raw, (bytes, bytearray)):
+                            self.on_bytes(bytes(raw))
+                        else:
+                            await self.on_text(raw)
+                self.log("line closed")
+            except ConnectionClosed as e:
+                self.log(f"line dropped ({e.__class__.__name__}: {e}); back in 3 s")
+            except OSError as e:
+                self.log(f"could not connect ({e}); again in 3 s")
+            self.ws = None
+            self.talk_id = ""
+            await asyncio.sleep(3)
 
 
 class Command(BaseCommand):

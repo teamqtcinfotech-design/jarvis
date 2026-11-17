@@ -60,7 +60,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         .then((r) => {
           if (cancelled || !r.data?.username) return;
           const next: SessionUser = { username: r.data.username, role: r.data.role, name: r.data.name, address: r.data.address,
-            address_hi: r.data.address_hi, language: r.data.language };
+            address_hi: r.data.address_hi, language: r.data.language, walkie_url: r.data.walkie_url ?? '' };
           setReplyLang(next.language); // the language JARVIS is speaking to this person, as the server sees it
           setUser((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
           apiClient.storeUser(next).catch(() => undefined);

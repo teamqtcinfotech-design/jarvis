@@ -147,6 +147,11 @@ class WalkieTests(BaseCase):
         services.set_prefs(self.nikki, {"walkieQuiet": "off"})
         self.assertEqual(services.get_prefs(self.nikki)["walkieQuietUntil"], "")
         self.assertEqual(self.md_client.get("/api/v1/me/").json()["walkie_url"], "ws://localhost:8001/ws/walkie/")
+        # Live: nginx hides the port from Django, so the address comes from the public URL the phones already use.
+        with self.settings(JARVIS_WALKIE_URL="", JARVIS_PUBLIC_URL="http://1.2.3.4:8088"):
+            self.assertEqual(self.md_client.get("/api/v1/me/").json()["walkie_url"], "ws://1.2.3.4:8088/ws/walkie/")
+        with self.settings(JARVIS_WALKIE_URL="", JARVIS_PUBLIC_URL=""):
+            self.assertEqual(self.md_client.get("/api/v1/me/").json()["walkie_url"], "ws://testserver/ws/walkie/")
         # A switched-off person is not in a talk at all, and a busy one is "busy".
         services.set_prefs(self.seema, {"walkieEnabled": False})
         md, md_ws = self.line(self.md)

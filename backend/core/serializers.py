@@ -12,8 +12,11 @@ class LoginSerializer(TokenObtainPairSerializer):
         user = self.user
         from . import services  # how this person is addressed ("Sir", "Ma'am", a name) comes with the login
 
+        from .views import walkie_url  # noqa: PLC0415  (views import this module; resolved at call time)
+
         data["user"] = {"username": user.username, "role": user.role, "name": user.spoken_name,
-                        "address": services.address_of(user), "address_hi": services.address_hi_of(user)}
+                        "address": services.address_of(user), "address_hi": services.address_hi_of(user),
+                        "walkie_url": walkie_url(self.context["request"]) if self.context.get("request") else ""}
         return data
 
 

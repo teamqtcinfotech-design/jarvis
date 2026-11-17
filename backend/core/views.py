@@ -81,10 +81,15 @@ class LogoutView(APIView):
 
 
 def walkie_url(request) -> str:
-    """The walkie-talkie relay's address for phones: the setting, else this server's host under /ws/walkie/."""
+    """The walkie-talkie relay's address for phones: JARVIS_WALKIE_URL, else the public address the phones already
+    use (JARVIS_PUBLIC_URL, with its port), else this request's host. Behind nginx the request's host loses the
+    port (Host is passed without it), so the public address comes first."""
     configured = getattr(settings, "JARVIS_WALKIE_URL", "")
     if configured:
         return configured if configured.endswith("/walkie/") else configured.rstrip("/") + "/ws/walkie/"
+    public = (getattr(settings, "JARVIS_PUBLIC_URL", "") or "").strip().rstrip("/")
+    if public.startswith("http"):
+        return "ws" + public[4:] + "/ws/walkie/"  # http -> ws, https -> wss
     scheme = "wss" if request.is_secure() else "ws"
     return f"{scheme}://{request.get_host()}/ws/walkie/"
 
