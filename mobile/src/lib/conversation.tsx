@@ -712,6 +712,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       } else if (act === 'open_settings') {
         setTalkOpen(false);
         router.push('/settings');
+      } else if (act === 'open_walkie') {
+        // "Talk to Mansi on the walkie": the Talk screen, with the named people already picked.
+        setTalkOpen(false);
+        const ids = (d.assignees ?? []).map((p) => p.id).filter(Boolean);
+        router.push(ids.length ? `/walkie?to=${ids.join(',')}` : '/walkie');
       } else if (act === 'go_home') {
         setTalkOpen(false);
         router.navigate('/');
@@ -1308,6 +1313,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               voiceName: prefs.voiceName,
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
+              walkie: prefs.walkieEnabled,
+              walkieUrl: user.walkie_url ?? '',
             });
             configured = true;
             configuredPaName = paName;
@@ -1331,7 +1338,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       sub.remove();
     };
     // The names, the voice and the listening language go along too, and again whenever they change.
-  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, user, paName, hints, listenLang]);
+  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, prefs.walkieEnabled, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

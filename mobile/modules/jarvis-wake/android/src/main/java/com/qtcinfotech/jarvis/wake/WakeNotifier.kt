@@ -263,6 +263,29 @@ class WakeNotifier(private val context: Context) {
 
     private fun ringId(alertId: String) = ("alert:$alertId").hashCode()
 
+    // ---------------------------------------------------------------- walkie-talkie
+    /** Somebody is talking on the walkie-talkie while the app is closed or the phone locked: the sound already
+     *  plays; this card brings the Talk screen up (full screen on a locked phone) with Hold to reply. */
+    fun showIncomingTalk(from: String, talkId: String) {
+        val open = openApp(openKey = "walkie:$talkId")
+        manager.notify(
+            WALKIE_ID,
+            builder(CHANNEL_REMINDERS).setSmallIcon(icon())
+                .setContentTitle("$from is talking…")
+                .setContentText("Walkie-talkie · tap to reply")
+                .setContentIntent(open)
+                .setFullScreenIntent(open, true)
+                .setCategory(Notification.CATEGORY_CALL)
+                .setPriority(Notification.PRIORITY_MAX)
+                .setAutoCancel(true)
+                .setTimeoutAfter(90_000)
+                .setOnlyAlertOnce(true)
+                .build(),
+        )
+    }
+
+    fun cancelIncomingTalk() = manager.cancel(WALKIE_ID)
+
     fun showSwitchOn() {
         manager.notify(
             SWITCH_ON_ID,
@@ -325,5 +348,6 @@ class WakeNotifier(private val context: Context) {
         private const val SWITCH_ON_ID = 7002
         private const val WAKE_ID = 7003
         private const val RING_SUMMARY_ID = 7004
+        private const val WALKIE_ID = 7005
     }
 }

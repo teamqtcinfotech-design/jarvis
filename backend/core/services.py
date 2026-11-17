@@ -2357,6 +2357,11 @@ PREF_SCHEMA = {
                                "say": "urgent work: ring again every (minutes) until seen"},
     "ringForMinutes": {"type": "int", "min": 5, "max": 240, "default": 30,
                        "say": "ring for (minutes) before the sender is told it was not seen"},
+    # Walkie-talkie: the person's own switch, their quiet time (set by voice: "walkie quiet for 30 minutes"), and
+    # the MD's rule on who may start a talk.
+    "walkieEnabled": {"type": "bool", "default": False, "say": "walkie-talkie"},
+    "walkieQuietUntil": {"type": "text", "default": "", "say": "walkie-talkie quiet until", "hidden": True},
+    "walkieAnyoneStarts": {"type": "bool", "default": True, "say": "anyone may start a walkie-talkie talk (off = only the MD)", "md_only": True},
 }
 _TRUE_WORDS = {"on", "true", "yes", "1", "haan", "han", "ha", "enable", "enabled", "chalu", "chaalu", "start"}
 _FALSE_WORDS = {"off", "false", "no", "0", "nahi", "nahin", "disable", "disabled", "band", "stop"}
@@ -2653,6 +2658,17 @@ def expand_pref_patch(patch: dict, current: dict | None = None) -> dict:
     routineAdd 'Gym 07:00-08:00 daily' / routineRemove 'gym' -> the full routineBlocks list (needs ``current``).
     """
     patch = dict(patch)
+    if "walkieQuiet" in patch:
+        # "walkie quiet for 30 minutes" -> quiet until then; "off" / 0 -> quiet over.
+        raw = str(patch.pop("walkieQuiet")).strip().lower()
+        nums = re.findall(r"\d{1,4}", raw)
+        minutes = int(nums[0]) if nums else 0
+        if "hour" in raw or "ghant" in raw or "घंट" in raw:
+            minutes = (int(nums[0]) if nums else 1) * 60
+        if raw in _FALSE_WORDS or raw in ("hatao", "hata do", "khatam", "over") or minutes <= 0:
+            patch["walkieQuietUntil"] = ""
+        else:
+            patch["walkieQuietUntil"] = (timezone.now() + timedelta(minutes=min(minutes, 24 * 60))).isoformat()
     if "quietHours" in patch:
         raw = str(patch.pop("quietHours"))
         nums = [int(n) for n in re.findall(r"\d{1,2}", raw)]

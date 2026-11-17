@@ -10,6 +10,8 @@
   <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
   <uses-permission android:name="android.permission.VIBRATE" />
   <uses-permission android:name="android.permission.INTERNET" />
+  <!-- Walkie-talkie: the speaker on for an incoming talk. -->
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
   <application>
     <!-- Background service while signed in: watches for reminders and messages (specialUse) and, when

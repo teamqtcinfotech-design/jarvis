@@ -21,10 +21,17 @@ class JarvisWakeModule : Module() {
 
     override fun definition() = ModuleDefinition {
         Name("JarvisWake")
-        Events("wake", "tts", "push", "barge")
+        Events("wake", "tts", "push", "barge", "walkie")
 
         OnCreate {
             WakeBus.listener = { sendEvent("wake", emptyMap<String, Any>()) }
+            // The walkie-talkie engine tells the app what happens on the line (people, floor, incoming, levels).
+            WalkieEngine.listener = { event, data ->
+                try {
+                    sendEvent("walkie", mapOf("event" to event, "data" to data.toString()))
+                } catch (_: Throwable) {
+                }
+            }
             WakeBus.pushListener = {
                 try {
                     sendEvent("push", emptyMap<String, Any>())
@@ -50,6 +57,27 @@ class JarvisWakeModule : Module() {
             WakeBus.pushListener = null
             WakeBus.bargeListener = null
             TtsEngine.callback = null
+            WalkieEngine.listener = null
+        }
+
+        // ---------------------------------------------------------------- walkie-talkie
+        /** The person's switch and the relay's address (from /me/): the line opens when both are set. */
+        AsyncFunction("walkieStart") { url: String, enabled: Boolean ->
+            WakeBus.prefs(context).edit().putBoolean(WakeBus.KEY_WALKIE_ENABLED, enabled).putString(WakeBus.KEY_WALKIE_URL, url.trim()).apply()
+            if (enabled) WalkieEngine.start(context) else WalkieEngine.stop()
+            enabled
+        }
+        /** Hold to talk: to these people (a new talk), or a reply inside a talk. The sound streams at once. */
+        Function("walkieTalk") { to: List<Int>, talk: String? -> WalkieEngine.talkStart(to, talk) }
+        Function("walkieEnd") { WalkieEngine.talkEnd() }
+        Function("walkieQuiet") { minutes: Int -> WalkieEngine.quiet(minutes) }
+        Function("walkieRefresh") { WalkieEngine.refreshPeople() }
+        Function("walkieStatus") { WalkieEngine.status().toString() }
+        /** The talk behind the incoming card that opened the app, once; null otherwise. */
+        Function("consumePendingWalkie") {
+            val talk = WakeBus.pendingWalkieTalk
+            WakeBus.pendingWalkieTalk = null
+            talk
         }
 
         // Live push: this phone's Firebase token (registered with the server by the app), and its removal at sign-out.
@@ -118,6 +146,8 @@ class JarvisWakeModule : Module() {
                     ?: (config["address"] as? String ?: "Sir"))
                 .putBoolean(WakeBus.KEY_IS_MD, config["isMd"] as? Boolean ?: ((config["address"] as? String ?: "Sir") == "Sir"))
                 .putBoolean(WakeBus.KEY_SPEAK_LOCKED, config["speakWhenLocked"] as? Boolean ?: false)
+                .putBoolean(WakeBus.KEY_WALKIE_ENABLED, config["walkie"] as? Boolean ?: false)
+                .putString(WakeBus.KEY_WALKIE_URL, (config["walkieUrl"] as? String ?: "").trim())
                 .apply()
             (config["paName"] as? String)?.takeIf { it.isNotBlank() }?.let {
                 WakeBus.prefs(context).edit().putString(WakeBus.KEY_PA_NAME, it).apply()
@@ -136,6 +166,7 @@ class JarvisWakeModule : Module() {
             more.apply()
             WakeBus.paused = false
             WakeService.start(context)
+            if (config["walkie"] as? Boolean == true) WalkieEngine.start(context) else WalkieEngine.stop()
             wakeWord
         }
 
@@ -220,7 +251,18 @@ class JarvisWakeModule : Module() {
         }
         intent.getStringExtra(WakeService.EXTRA_OPEN_KEY)?.let {
             intent.removeExtra(WakeService.EXTRA_OPEN_KEY)
-            if (it.isNotBlank()) WakeBus.pendingOpenKey = it
+            if (it.startsWith("walkie:")) {
+                // The incoming-talk card: the Talk screen comes up over the lock screen, ready for Hold to reply.
+                WakeBus.pendingWalkieTalk = it.removePrefix("walkie:")
+                appContext.currentActivity?.let { a ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        a.setShowWhenLocked(true)
+                        a.setTurnScreenOn(true)
+                    }
+                }
+            } else if (it.isNotBlank()) {
+                WakeBus.pendingOpenKey = it
+            }
         }
     }
 

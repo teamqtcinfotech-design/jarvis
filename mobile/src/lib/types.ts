@@ -16,6 +16,8 @@ export interface SessionUser {
   address_hi?: string;
   /** The language JARVIS is speaking to this person right now ('hi' / 'en'), from the server's language rule. */
   language?: 'hi' | 'en';
+  /** Where this phone's walkie-talkie line goes (the relay), from the server. */
+  walkie_url?: string;
 }
 
 export interface TaskItem {

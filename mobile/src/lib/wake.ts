@@ -33,6 +33,9 @@ export interface WakeConfig {
   speakWhenLocked: boolean;
   /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
   wakeWord: boolean;
+  /** Walkie-talkie: keep the line to the relay open (the person's switch), and where the relay is (from /me/). */
+  walkie?: boolean;
+  walkieUrl?: string;
 }
 
 export interface WakeStatus {
@@ -80,9 +83,23 @@ type Native = {
   speak: (id: string, text: string, lang: string, fallback: string | null, rate: number) => void;
   stopSpeaking: () => void;
   setVoiceName?: (name: string) => void;
+  walkieStart?: (url: string, enabled: boolean) => Promise<boolean>;
+  walkieTalk?: (to: number[], talk: string | null) => void;
+  walkieEnd?: () => void;
+  walkieQuiet?: (minutes: number) => void;
+  walkieRefresh?: () => void;
+  walkieStatus?: () => string;
+  consumePendingWalkie?: () => string | null;
   addListener: ((event: 'wake' | 'push' | 'barge', listener: () => void) => { remove: () => void }) &
-    ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void });
+    ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void }) &
+    ((event: 'walkie', listener: (e: WalkieEvent) => void) => { remove: () => void });
 };
+
+/** What the walkie-talkie engine reports: the event name and its details (JSON text from the native side). */
+export interface WalkieEvent {
+  event: 'state' | 'people' | 'floor' | 'busy' | 'refused' | 'cut' | 'incoming' | 'done' | 'ended' | 'quiet' | 'level' | 'error';
+  data: string;
+}
 
 let native: Native | null = null;
 if (Platform.OS === 'android') {
@@ -266,6 +283,78 @@ export function onTts(listener: (e: TtsEvent) => void): () => void {
   if (!native || !ttsAvailable) return () => undefined;
   try {
     const sub = native.addListener('tts', listener);
+    return () => sub.remove();
+  } catch {
+    return () => undefined;
+  }
+}
+
+// ---------------------------------------------------------------- walkie-talkie (the native engine)
+export const walkieSupported = native !== null && typeof native.walkieStart === 'function';
+
+export async function walkieStart(url: string, enabled: boolean): Promise<boolean> {
+  if (!native?.walkieStart) return false;
+  try {
+    return await native.walkieStart(url, enabled);
+  } catch {
+    return false;
+  }
+}
+
+/** Hold to talk: to these people (a new talk) or a reply inside `talk`. The sound streams from this moment. */
+export function walkieTalk(to: number[], talk: string | null) {
+  try {
+    native?.walkieTalk?.(to, talk);
+  } catch {
+    // ignore
+  }
+}
+
+export function walkieEnd() {
+  try {
+    native?.walkieEnd?.();
+  } catch {
+    // ignore
+  }
+}
+
+export function walkieQuiet(minutes: number) {
+  try {
+    native?.walkieQuiet?.(minutes);
+  } catch {
+    // ignore
+  }
+}
+
+export function walkieRefresh() {
+  try {
+    native?.walkieRefresh?.();
+  } catch {
+    // ignore
+  }
+}
+
+export function walkieStatus(): Record<string, unknown> {
+  try {
+    return JSON.parse(native?.walkieStatus?.() ?? '{}');
+  } catch {
+    return {};
+  }
+}
+
+/** The talk behind the incoming card that just opened the app, once; null otherwise. */
+export function walkieConsumePending(): string | null {
+  try {
+    return native?.consumePendingWalkie?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function onWalkie(listener: (e: WalkieEvent) => void): () => void {
+  if (!native || !walkieSupported) return () => undefined;
+  try {
+    const sub = native.addListener('walkie', listener);
     return () => sub.remove();
   } catch {
     return () => undefined;

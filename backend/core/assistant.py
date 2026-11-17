@@ -1167,7 +1167,7 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
     return draft
 
 
-_SCREEN_ACTIONS = {"export_pdf", "export_csv", "share", "send_list", "open_item", "open_settings", "go_home"}
+_SCREEN_ACTIONS = {"export_pdf", "export_csv", "share", "send_list", "open_walkie", "open_item", "open_settings", "go_home"}
 
 
 def _send_list(user: User, cmd: dict, draft: dict, on_screen: dict, include_private: bool, address: str, address_hi: str) -> None:
@@ -1838,6 +1838,26 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             # "Ye list Nikki ko bhej do": the card on screen, rebuilt here from its filters, goes as a message.
             draft["action"], draft["screen_action"] = "answer", ""
             _send_list(user, cmd, draft, on_screen, include_private, address, address_hi)
+        elif act == "open_walkie":
+            # "Mansi se walkie par baat karo": the app opens the talk screen on the people named (looked up here).
+            people = []
+            for raw in _recipients_of(cmd):
+                found = services.find_people(raw, exclude=user)
+                if found["status"] in ("known", "close"):
+                    people += found["people"]
+                elif found["status"] == "ambiguous":
+                    draft["action"], draft["screen_action"] = "answer", ""
+                    _ask(draft, f"{address}, which {raw}: {' or '.join(found['options'])}?")
+                    break
+                else:
+                    people += services.find_group(raw, exclude=user)[0]
+            else:
+                if not people and cmd.get("team_name"):
+                    people = services.find_group(str(cmd["team_name"]), exclude=user)[0]
+                draft["assignees"] = [{"id": u.id, "name": u.spoken_name} for u in people]
+                who = services.names_phrase(people) if people else ""
+                _say(draft, f"Walkie-talkie{f' with {who}' if who else ''}, {address}. Hold to talk.",
+                     f"{who + ' के साथ ' if who else ''}वॉकी-टॉकी, {address_hi}। बोलने के लिए दबाए रखिए।")
         elif act == "open_item":
             known = {i["id"]: i for i in ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]}
             for i in (on_screen or {}).get("items", []):

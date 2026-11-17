@@ -16,6 +16,7 @@ import { PrefsProvider } from '@/lib/prefs';
 import { SessionProvider, useSession } from '@/lib/session';
 import { colors } from '@/lib/theme';
 import { DashboardProvider } from '@/lib/useDashboard';
+import { WalkieProvider } from '@/lib/walkie';
 
 // Errors and crashes are kept on the phone (short lines) and sent with "Send diagnostics", or after a crash.
 diag.install();
@@ -33,12 +34,14 @@ function Shell() {
     <DashboardProvider>
       <AlertEngineProvider>
         <ConversationProvider>
-          <View style={{ flex: 1 }}>
-            {stack}
-            <AlertBanner />
-            <HeldSheet />
-            <UpdateKeeper />
-          </View>
+          <WalkieProvider>
+            <View style={{ flex: 1 }}>
+              {stack}
+              <AlertBanner />
+              <HeldSheet />
+              <UpdateKeeper />
+            </View>
+          </WalkieProvider>
         </ConversationProvider>
       </AlertEngineProvider>
     </DashboardProvider>

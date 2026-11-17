@@ -200,6 +200,11 @@ JARVIS_UPDATES_DIR = Path(os.environ.get("JARVIS_UPDATES_DIR", str(BASE_DIR.pare
 JARVIS_UPDATES_KEY_FILE = Path(os.environ.get("JARVIS_UPDATES_KEY_FILE", str(BASE_DIR.parent / "keys" / "updates-private.pem")))
 JARVIS_PUBLIC_URL = os.environ.get("JARVIS_PUBLIC_URL", "").rstrip("/")
 
+# Walkie-talkie: the live-connection relay (manage.py walkie_server) and where phones reach it. On the laptop
+# ws://localhost:8001/ws/walkie/ (the relay's own port, through adb reverse); live: nginx passes /ws/ to the relay.
+JARVIS_WALKIE_PORT = int(os.environ.get("JARVIS_WALKIE_PORT", "8001"))
+JARVIS_WALKIE_URL = os.environ.get("JARVIS_WALKIE_URL", "").rstrip("/")
+
 # Live push to the phones (Firebase Cloud Messaging). Either a path to the service-account key or its JSON.
 # Without one, push is off and the phones fall back to their half-minute check.
 FIREBASE_SERVICE_ACCOUNT_FILE = os.environ.get("FIREBASE_SERVICE_ACCOUNT_FILE", "")

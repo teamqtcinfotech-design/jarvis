@@ -85,6 +85,16 @@ class WakeService : Service() {
         WakeBus.listening = listening
         WakeBus.micBlocked = false
         prefetchGreetings()
+        // The walkie-talkie line lives as long as this service does; with the app closed, an incoming talk shows
+        // the full-screen card (the sound plays either way).
+        WalkieEngine.serviceListener = { event, data ->
+            if (event == "incoming" && !WakeBus.appInForeground) {
+                notifier.showIncomingTalk(data.optJSONObject("from")?.optString("name") ?: "Someone", data.optString("talk"))
+            } else if (event == "ended" || event == "state") {
+                notifier.cancelIncomingTalk()
+            }
+        }
+        WalkieEngine.start(this)
         return START_STICKY
     }
 
@@ -568,6 +578,8 @@ class WakeService : Service() {
         WakeBus.listening = false
         loop?.destroy()
         loop = null
+        WalkieEngine.serviceListener = null
+        WalkieEngine.stop()
         try {
             beep?.release()
         } catch (_: Throwable) {

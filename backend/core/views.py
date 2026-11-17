@@ -80,6 +80,15 @@ class LogoutView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def walkie_url(request) -> str:
+    """The walkie-talkie relay's address for phones: the setting, else this server's host under /ws/walkie/."""
+    configured = getattr(settings, "JARVIS_WALKIE_URL", "")
+    if configured:
+        return configured if configured.endswith("/walkie/") else configured.rstrip("/") + "/ws/walkie/"
+    scheme = "wss" if request.is_secure() else "ws"
+    return f"{scheme}://{request.get_host()}/ws/walkie/"
+
+
 class MeView(APIView):
     permission_classes = [IsMDOrPA]
 
@@ -93,6 +102,8 @@ class MeView(APIView):
             "department": u.department,
             "address": services.address_of(u),
             "address_hi": services.address_hi_of(u),
+            # Where this phone's walkie-talkie line goes (the relay), with the login token added by the app.
+            "walkie_url": walkie_url(request),
             "language": lang.current(u),  # the language JARVIS is speaking to this person right now ("hi" / "en")
             "features": {
                 "ai": ai_brain.ai_available(),

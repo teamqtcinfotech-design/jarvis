@@ -77,6 +77,9 @@ object Api {
         return request(method, url, body, prefs.getString(WakeBus.KEY_ACCESS, "") ?: "", timeoutMs).second
     }
 
+    /** A fresh access token after the old one expired (the walkie-talkie line signs in with it). */
+    fun refreshTokens(context: Context): Boolean = refresh(context)
+
     private fun refresh(context: Context): Boolean {
         val prefs = WakeBus.prefs(context)
         val server = prefs.getString(WakeBus.KEY_SERVER, "") ?: ""

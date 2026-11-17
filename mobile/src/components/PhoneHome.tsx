@@ -17,6 +17,7 @@ import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
 import type { SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
+import { useWalkie } from '@/lib/walkie';
 
 import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
@@ -67,6 +68,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const insets = useSafeAreaInsets();
   const conv = useConversation();
   const engine = useAlertEngine();
+  const walkie = useWalkie();
   const { data, reload, error: loadError } = useDashboard();
   const [menu, setMenu] = useState(false);
   const [openTask, setOpenTask] = useState<TaskItem | null>(null);
@@ -286,6 +288,21 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           <Orb state={conv.orb} size={ORB_CORNER} level={conv.level} onPress={talk} shift />
         </View>
       )}
+      {/* The walkie-talkie, bottom-left, the orb's twin: tap = pick who; hold = talk to the last people at once. */}
+      {!conv.talkOpen && walkie.supported && walkie.enabled ? (
+        <View style={[s.cornerWalkie, { bottom: insets.bottom + 18 }]} pointerEvents="box-none">
+          <Pressable
+            onPress={() => { tick(); router.push('/walkie'); }}
+            onLongPress={() => { tick(); router.push(walkie.lastTo.length ? '/walkie?quick=1' : '/walkie'); }}
+            delayLongPress={250}
+            accessibilityLabel="Walkie-talkie"
+            style={({ pressed }) => [s.walkieBtn, walkie.state === 'listening' && { backgroundColor: colors.success }, pressed && { transform: [{ scale: 0.94 }] }]}
+          >
+            <Icon name={walkie.state === 'listening' ? 'volume-high' : 'radio'} size={24} color={colors.white} />
+            <View style={[s.walkieDot, { backgroundColor: walkie.connected ? colors.success : colors.warn }]} />
+          </Pressable>
+        </View>
+      ) : null}
 
       <Drawer
         open={menu}
@@ -316,6 +333,9 @@ const s = StyleSheet.create({
   body: { paddingHorizontal: 20, paddingTop: 8 },
   blurred: { filter: [{ blur: 14 }] },
   cornerOrb: { position: 'absolute', right: 6, width: ORB_CORNER, height: ORB_CORNER },
+  cornerWalkie: { position: 'absolute', left: 16 },
+  walkieBtn: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.accentDeep, alignItems: 'center', justifyContent: 'center', ...shadow, shadowOpacity: 0.25, elevation: 8 },
+  walkieDot: { position: 'absolute', top: 3, right: 3, width: 11, height: 11, borderRadius: 6, borderWidth: 2, borderColor: colors.bg },
   heroWrap: { marginTop: 18, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },

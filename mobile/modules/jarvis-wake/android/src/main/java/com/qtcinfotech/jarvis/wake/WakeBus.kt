@@ -118,6 +118,12 @@ object WakeBus {
     const val KEY_SEEN_IDS = "seen_ids"
     /** Alerts still waiting for Seen on this phone (their notifications are up), so the "N waiting" summary is right. */
     const val KEY_RING_ACTIVE = "ring_active"
+    /** Walkie-talkie: the person's switch, and where the relay is (ws://…/ws/walkie/, from /me/). */
+    const val KEY_WALKIE_ENABLED = "walkie_enabled"
+    const val KEY_WALKIE_URL = "walkie_url"
+
+    /** The talk behind the incoming card that opened the app (consumed once by the app). */
+    @Volatile var pendingWalkieTalk: String? = null
     const val KEY_PUSH_TOKEN = "push_token"
     /** Which Grok voice JARVIS speaks with (the MD's choice in Settings; male voices only). */
     const val KEY_VOICE_NAME = "voice_name"

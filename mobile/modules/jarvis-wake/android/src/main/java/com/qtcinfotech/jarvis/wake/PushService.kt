@@ -31,6 +31,12 @@ class PushService : FirebaseMessagingService() {
         if (!prefs.getBoolean(WakeBus.KEY_ENABLED, false)) return // signed out: ignore anything still arriving
         val data = message.data
         val type = data["type"]
+        if (type == "walkie") {
+            // Somebody is talking to this phone and its line was down: open the line now; the sound follows on it.
+            Log.i(TAG, "push: walkie from ${data["from"]}")
+            WalkieEngine.start(this)
+            return
+        }
         // Ring until seen: the stop (seen elsewhere, done, withdrawn) and every ring after the first.
         if (type == "ring_stop") {
             data["id"]?.let { WakeNotifier(this).cancelRing(it) }

@@ -57,6 +57,10 @@ export interface Prefs {
   ringEveryMinutes: number;
   ringUrgentEveryMinutes: number;
   ringForMinutes: number;
+  /** Walkie-talkie: the person's own switch, quiet until (ISO, '' = not quiet), and the MD's rule on who may start. */
+  walkieEnabled: boolean;
+  walkieQuietUntil: string;
+  walkieAnyoneStarts: boolean;
 }
 
 export interface RoutineBlock {
@@ -98,6 +102,9 @@ const DEFAULTS: Prefs = {
   ringEveryMinutes: 10,
   ringUrgentEveryMinutes: 1,
   ringForMinutes: 30,
+  walkieEnabled: false,
+  walkieQuietUntil: '',
+  walkieAnyoneStarts: true,
 };
 
 const KEY = 'jarvis.prefs';

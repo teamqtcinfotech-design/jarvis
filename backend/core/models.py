@@ -672,6 +672,33 @@ class AiUsage(models.Model):
         constraints = [models.UniqueConstraint(fields=["user", "day", "kind"], name="unique_ai_usage_day")]
 
 
+class TalkSession(models.Model):
+    """One walkie-talkie talk: who started it, who was in it, how many turns and how long. Never the sound itself
+    (nothing is recorded, by design); this is what the Recent list and Sir's team view show."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    started_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="talks_started")
+    members = models.JSONField(default=list)  # user ids, the starter included
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    turns = models.PositiveIntegerField(default=0)   # presses of the button, all speakers together
+    seconds = models.PositiveIntegerField(default=0)  # time somebody was talking
+    last_speaker = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        ordering = ["-started_at"]
+
+
+class WalkiePresence(models.Model):
+    """Whether a person's phone holds its walkie-talkie line open right now, and until when they asked for quiet.
+    Written by the relay (manage.py walkie_server); read by the API for Sir's team view."""
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="walkie")
+    connected = models.BooleanField(default=False)
+    last_seen = models.DateTimeField(null=True, blank=True)
+    quiet_until = models.DateTimeField(null=True, blank=True)
+
+
 class Channel(models.TextChoices):
     """Who gets a new app version: the test phones first, everyone after "promote"."""
     PREVIEW = "preview", "Test phones only"
