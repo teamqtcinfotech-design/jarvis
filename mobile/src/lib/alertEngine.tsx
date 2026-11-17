@@ -68,6 +68,10 @@ export interface EngineItem {
   mode?: 'loud' | 'silent';
   /** Why it was kept back instead of spoken: the offer later says "during your meeting" rather than "while you were away". */
   heldFor?: 'missed' | 'away' | 'meeting' | 'facedown' | 'quiet' | 'more';
+  /** Ring until seen: work or a message from the team that waits for a Seen (the banner's main button). */
+  ring?: boolean;
+  /** "Seen" / "देख लिया": the button's word in the person's language. */
+  seenLabel?: string;
 }
 
 /** "while you were away" / "during your meeting" …: one phrase for the whole batch, honest about the reason. */
@@ -150,6 +154,11 @@ interface EngineValue {
   lastSync: number | null;
   notificationsGranted: boolean | null;
   upcomingCount: number;
+  /** Ring until seen: "Seen" tapped on the banner. The ringing stops everywhere, the sender is told, and for work
+   *  JARVIS asks at once "Shall I tell Sir when you'll do it?". */
+  markSeen: (item: EngineItem) => Promise<void>;
+  /** Off the screen here only (the server has already settled it, e.g. an answer to "by when?"). */
+  dismiss: (item: EngineItem) => void;
   /** Every unseen server message (news, decisions, nudges), newest first, for the Updates screen. */
   news: ServerAlert[];
   /** The Updates screen was opened: the small news on it counts as seen. */
@@ -217,10 +226,12 @@ function fromAlert(a: ServerAlert): EngineItem {
     alertId: a.id,
     alertKind: a.kind,
     requestId: a.ref_type === 'request' ? a.ref_id : undefined,
-    personal: a.ref_type === 'message' || a.kind === 'TASK_ASSIGNED' || a.kind === 'NEW_REQUEST',
+    personal: a.ref_type === 'message' || a.kind === 'TASK_ASSIGNED' || a.kind === 'NEW_REQUEST' || !!a.ring,
     fireAt: Date.parse(a.snoozed_until && Date.parse(a.snoozed_until) > Date.parse(a.created_at) ? a.snoozed_until : a.created_at),
     followups: 0,
     question: a.question,
+    ring: !!a.ring,
+    seenLabel: a.seen_label || 'Seen',
   };
 }
 
@@ -485,7 +496,11 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
    * the conversation on it at once, speak it, ask its question, listen for the answer.
    */
   const presentItem = useCallback(
-    (item: EngineItem) => {
+    (raw: EngineItem) => {
+      // Ring until seen: opening it from its notification IS seeing it. The ringing stops and the sender is told;
+      // a message then needs no question, work still asks "Shall I tell Sir when you'll do it?".
+      const item = raw.ring ? { ...raw, ring: false, question: raw.question?.kind === 'seen' ? null : raw.question } : raw;
+      if (raw.ring && raw.alertId) api(`/alerts/${raw.alertId}/seen/`, { method: 'POST', body: {} }).catch(() => undefined);
       handled.current.add(item.key);
       snoozed.current.delete(item.key);
       followups.current.delete(item.key);
@@ -591,7 +606,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         hold(item, 'missed'); // fired while the app was closed or the phone asleep
         return null;
       }
-      if (item.priority === 'LOW' && item.source === 'server') {
+      if (item.priority === 'LOW' && item.source === 'server' && !item.ring) {
         // Small news ("Mansi started a task"): never spoken, never vibrates, never offered; it is in the lists.
         tell([item]);
         return null;
@@ -668,6 +683,9 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (handled.current.has(key)) continue;
       if (!a.fresh) {
         handled.current.add(key); // told already, or old news: it stays in the lists, it is not announced
+        // Still waiting for its Seen (said earlier by the phone's background part, or before the app restarted):
+        // it is not said again, but its banner with the Seen button is back on screen.
+        if (a.ring) show(fromAlert(a), 'silent');
         continue;
       }
       due.push(fromAlert(a));
@@ -696,7 +714,24 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     }
     if (loud.length) speakNow(loud);
     offerHeldIfBack();
-  }, [route, speakNow, offerHeldIfBack, setCurrent]);
+  }, [route, speakNow, offerHeldIfBack, setCurrent, show]);
+
+  /**
+   * "Shall I tell Sir when you'll do it?" for work already seen (Seen tapped on the banner, or on a locked phone's
+   * notification, which brings the app up with "promise:<id>"). Only the question is said; the answer goes to the
+   * server as words ("kal shaam tak").
+   */
+  const askPromise = useCallback(async (alertId: string, known?: EngineItem) => {
+    try {
+      const res = await api<ServerAlert>(`/alerts/${alertId}/`);
+      const q = res.data.question;
+      if (!q || q.kind !== 'promise') return; // answered already, or no longer theirs
+      const item = { ...(known ?? fromAlert(res.data)), ring: false, question: q };
+      presenterRef.current?.(item, '');
+    } catch {
+      // gone, or offline: nothing to ask
+    }
+  }, []);
 
   /** The server list is the truth: anything no longer in it (task finished, request decided) leaves the screen. */
   const pruneGone = useCallback(
@@ -843,6 +878,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       const key = wakeConsumeOpenKey();
       if (!key) return;
       markActive();
+      if (key.startsWith('promise:')) {
+        askPromise(key.slice('promise:'.length)).catch(() => undefined);
+        return;
+      }
       poll()
         .catch(() => undefined)
         .then(() => {
@@ -856,11 +895,17 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (timer) clearTimeout(timer);
       timer = setTimeout(check, 300);
     });
+    // Seen tapped on a notification while the app stayed open under the shade: the native part leaves the key and
+    // sends a push event instead of a return to the app.
+    const offPush = onPush(() => {
+      if (AppState.currentState === 'active') setTimeout(check, 200);
+    });
     return () => {
       if (timer) clearTimeout(timer);
       sub.remove();
+      offPush();
     };
-  }, [markActive, itemForKey, presentItem, poll]);
+  }, [markActive, itemForKey, presentItem, poll, askPromise]);
 
   const clearKey = useCallback(
     (item: EngineItem) => {
@@ -890,6 +935,22 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       }
     },
     [clearKey],
+  );
+
+  // Ring until seen: the banner's Seen button.
+  const markSeen = useCallback(
+    async (item: EngineItem) => {
+      clearKey(item);
+      if (!item.alertId) return;
+      try {
+        const res = await api<{ question?: AlertQuestion | null }>(`/alerts/${item.alertId}/seen/`, { method: 'POST', body: {} });
+        dataChanged.emit();
+        if (res.data.question?.kind === 'promise') await askPromise(item.alertId, item);
+      } catch {
+        // Offline: it keeps ringing until the server hears the Seen (tap it again then).
+      }
+    },
+    [clearKey, askPromise],
   );
 
   const acknowledgeAllHeld = useCallback(async () => {
@@ -1069,6 +1130,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     presence,
     setPresenter,
     answerQuestion,
+    markSeen,
+    dismiss: clearKey,
     news,
     markRead,
     meetingMode,

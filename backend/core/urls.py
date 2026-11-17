@@ -30,6 +30,7 @@ urlpatterns = [
     # Shared MD tasks (MD direct, PA proposes)
     path("shared-tasks/<uuid:task_id>/", views.SharedTaskDetailView.as_view()),
     path("shared-tasks/<uuid:task_id>/complete/", views.SharedTaskCompleteView.as_view()),
+    path("shared-tasks/<uuid:task_id>/history/", views.TaskHistoryView.as_view()),
     # MD -> PA tasks (inside JARVIS)
     path("pa-tasks/", views.PaTaskListView.as_view()),
     path("pa-tasks/self/", views.PaSelfTaskView.as_view()),
@@ -72,5 +73,8 @@ urlpatterns = [
     path("reminders/snooze/", views.ReminderSnoozeView.as_view()),
     path("told/", views.ToldView.as_view()),
     path("alerts/", views.AlertListView.as_view()),
+    path("alerts/<uuid:alert_id>/", views.AlertDetailView.as_view()),
     path("alerts/<uuid:alert_id>/ack/", views.AlertAckView.as_view()),
+    path("alerts/<uuid:alert_id>/seen/", views.AlertSeenView.as_view()),
+    path("alerts/<uuid:alert_id>/answer/", views.AlertAnswerView.as_view()),
 ]

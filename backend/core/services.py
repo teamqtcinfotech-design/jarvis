@@ -18,6 +18,7 @@ import re
 import uuid
 from datetime import date, datetime, time, timedelta
 
+from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import Q
@@ -45,6 +46,7 @@ from .models import (
     StaffMember,
     Status,
     TaskCategory,
+    TaskEvent,
     TaskRequest,
     User,
     UserPrefs,
@@ -505,6 +507,10 @@ def shared_item(task: SharedTask) -> dict:
             ),
             "hold_reason": task.hold_reason,
             "last_synced_at": task.last_synced_at.isoformat() if task.last_synced_at else None,
+            # Ring until seen: when the person it is for saw it, and by when they said they would do it.
+            "seen_at": task.seen_at.isoformat() if task.seen_at else None,
+            "promise_label": tu.due_phrase(task.promise_kind, task.promise_date, task.promise_at),
+            "promise_label_hi": tu.due_phrase_hi(task.promise_kind, task.promise_date, task.promise_at),
         }
     )
     return item
@@ -574,23 +580,52 @@ def alert_question(alert: Alert) -> dict | None:
     briefing that found the day too full ("Shall I move X to tomorrow?"). Decisions and staff news are spoken only.
     Both the app and the phone's background part read this contract; neither spells its own."""
     if isinstance(alert.question, dict) and alert.question.get("kind"):
+        if alert.seen_at and alert.question.get("kind") == "seen":
+            return None  # seen already (and the sender told): nothing left to ask
         return alert.question
     if alert.kind == Alert.Kind.NEW_REQUEST and alert.ref_type == "request" and alert.recipient.is_md:
         return {"kind": "accept", "en": "Accept it?", "hi": "मंज़ूर करूँ?"}
     if alert.kind == Alert.Kind.TASK_ASSIGNED and not alert.recipient.is_md:
-        giver = alert.sender
-        if giver is None and alert.ref_type == "shared_task" and alert.ref_id:
-            task = SharedTask.objects.filter(id=alert.ref_id).select_related("created_by").first()
-            giver = task.created_by if task else None
+        task = task_of(alert)
+        giver = alert.sender or (task.created_by if task else None)
         if giver is not None and giver.id != alert.recipient_id:
             who, who_hi = giver_words(giver)
+            # Work given to them (not a meeting): when will they do it? The answer goes back to the giver, and it
+            # counts as seen. Once they have said, or once it is no longer theirs, nothing is asked.
+            if task is not None and task.kind != Kind.MEETING:
+                if task.is_closed or task.assignee_user_id != alert.recipient_id or task.promise_date:
+                    return None
+                return promise_question(giver)
+            if alert.seen_at:
+                return None
             return {"kind": "seen", "en": f"Shall I tell {who} you've seen it?", "hi": f"{who_hi} को बता दूँ कि आपने देख लिया?"}
     return None
+
+
+def promise_question(giver: User) -> dict:
+    """"Shall I tell Sir when you'll do it?": asked of the person a task was given to, once they have seen it."""
+    who, who_hi = giver_words(giver)
+    return {"kind": "promise", "en": f"Shall I tell {who} when you'll do it?",
+            "hi": f"{who_hi} को बता दूँ कि आप ये कब तक कर देंगे?"}
+
+
+def task_of(alert: Alert) -> SharedTask | None:
+    """The work item an alert is about, if any."""
+    if alert.ref_type != "shared_task" or not alert.ref_id:
+        return None
+    try:
+        return SharedTask.objects.select_related("created_by", "assignee_user").filter(id=alert.ref_id).first()
+    except (ValueError, TypeError, ValidationError):  # not a task id
+        return None
 
 
 _TITLE_HI = (
     # (words in the English title, the Hindi title; {who} = whoever it is from or about)
     ("has seen it", "{who} ने देख लिया"),
+    ("hasn't seen it", "{who} ने अभी तक नहीं देखा"),
+    ("will do it", "{who} कब तक करेंगे"),
+    ("can't do it", "{who} नहीं कर पाएँगे"),
+    ("gave your task to", "आपका काम किसी और को दिया गया"),
     ("completed a task", "{who} ने काम पूरा किया"),
     ("put a task on hold", "{who} ने काम होल्ड पर रखा"),
     ("started a task", "{who} ने काम शुरू किया"),
@@ -660,7 +695,20 @@ def alert_item(alert: Alert, lang: str = "en") -> dict:
         # only for the list.
         "fresh": alert.delivered_at is None and not snoozed and (
             alert.created_at >= now - ALERT_FRESH_FOR or (alert.snoozed_until is not None and alert.snoozed_until >= now - ALERT_FRESH_FOR)),
+        # Ring until seen: `ring` = it waits for a Seen (the banner shows the Seen button); `ringing` = the phone
+        # rings again every few minutes right now; `rings` = how many times it has rung (the phone's own watcher
+        # rings once per number, so a lost push still rings).
+        "ring": bool(alert.ring and not alert.seen_at),
+        "ringing": ringing_now(alert),
+        "rings": alert.rings,
+        "seen_at": alert.seen_at.isoformat() if alert.seen_at else None,
+        "seen_label": "देख लिया" if lang == "hi" else "Seen",
     }
+
+
+def ringing_now(alert: Alert) -> bool:
+    return bool(alert.ring and alert.seen_at is None and alert.acknowledged_at is None and alert.next_ring_at is not None
+                and alert.rings > 0)
 
 
 # --------------------------------------------------------------------------- "later"
@@ -687,6 +735,8 @@ def snooze_reminder(user: User, key: str, until: datetime) -> None:
 
 def snooze_alert(user: User, alert_id, until: datetime) -> Alert:
     alert = Alert.objects.get(id=alert_id, recipient=user)
+    if alert.ring and alert.seen_at is None:
+        mark_seen(user, alert)  # "later" means they have seen it: the ringing stops, the sender is told
     alert.snoozed_until = until
     alert.delivered_at = None  # announced afresh when it comes back
     alert.save(update_fields=["snoozed_until", "delivered_at"])
@@ -1000,6 +1050,7 @@ def update_shared_md_task(md: User, task_id, changes: dict, expected_version: in
     old_status, old_due = task.status, (task.due_at, task.due_date)
     _apply_changes(task, changes)
     task.save()
+    _log_changes(md, task, old_status, old_due)
     if task.assignee_user_id and task.assignee_user_id != md.id:
         _tell_assignee_of_change(md, task, old_status, old_due)
     elif task.status == Status.CANCELLED and old_status != Status.CANCELLED:
@@ -1063,8 +1114,9 @@ def create_person_task(giver: User, person: User, data: dict, *, meeting: bool =
     Alert.objects.create(
         recipient=person, sender=giver, kind=Alert.Kind.TASK_ASSIGNED, priority=task.priority, title=title,
         body=message[:400], spoken_text=message[:400], spoken_text_hi=message_hi[:400],
-        ref_type="shared_task", ref_id=str(task.id),
+        ref_type="shared_task", ref_id=str(task.id), **ring_fields(person, task.priority),
     )
+    log_event(task, TaskEvent.Kind.GIVEN, giver, to=person.id)
     audit(giver, "person_meeting.create" if meeting else "person_task.create", "shared_task", task.id, f"to user {person.id}")
     return task
 
@@ -1106,6 +1158,7 @@ def create_own_task(user: User, data: dict) -> SharedTask:
         learn_meeting_minutes(user, int(data["duration_minutes"]))
     task.announcement = (data.get("announcement") or "")[:300]
     task.save()
+    log_event(task, TaskEvent.Kind.ADDED, user)
     audit(user, "own_task.create", "shared_task", task.id)
     return task
 
@@ -1124,6 +1177,7 @@ def update_given_task(user: User, task_id, changes: dict, expected_version: int)
     old_status, old_due = task.status, (task.due_at, task.due_date)
     _apply_changes(task, changes)
     task.save()
+    _log_changes(user, task, old_status, old_due)
     _tell_assignee_of_change(user, task, old_status, old_due)
     audit(user, "given_task.update", "shared_task", task.id, "fields: " + ",".join(sorted(changes)))
     return task
@@ -1156,8 +1210,10 @@ def update_own_task(user: User, task_id, changes: dict, expected_version: int) -
     """A team member changes, moves or cancels their own work item (never one someone gave them)."""
     task = SharedTask.objects.select_for_update().get(id=task_id, assignee_user=user, origin__in=OWN_ORIGINS, created_by=user)
     _check_version(task, expected_version)
+    old_status, old_due = task.status, (task.due_at, task.due_date)
     _apply_changes(task, changes)
     task.save()
+    _log_changes(user, task, old_status, old_due)
     audit(user, "own_task.update", "shared_task", task.id, "fields: " + ",".join(sorted(changes)))
     return task
 
@@ -1185,7 +1241,16 @@ def update_task_status(user: User, task_id, new_status: str, expected_version: i
     task.hold_reason = note.strip()[:300] if new_status == Status.BLOCKED else ""
     task.completed_at = timezone.now() if new_status == Status.COMPLETED else None
     task.version += 1
+    # Moving it at all means they have seen it: the ringing stops (the giver hears the step itself, not a "seen").
+    first_look = task.seen_at is None and task.origin not in OWN_ORIGINS
+    if first_look:
+        task.seen_at = timezone.now()
     task.save()
+    if first_look:
+        log_event(task, TaskEvent.Kind.SEEN, user)
+        Alert.objects.filter(recipient=user, ref_type="shared_task", ref_id=str(task.id), seen_at__isnull=True) \
+            .update(seen_at=task.seen_at)
+    _log_changes(user, task, old, (task.due_at, task.due_date))
     if new_status == Status.COMPLETED:
         close_task_alerts(task)
     giver = task.created_by if task.created_by_id and task.created_by_id != user.id else None
@@ -1374,6 +1439,7 @@ def accept_request(md: User, request_id) -> TaskRequest:
             apply_schedule(task, {**data, "_prefs": get_prefs(md)}, creating=True)
             task.announcement = (data.get("announcement") or "")[:300]
             task.save()
+            log_event(task, TaskEvent.Kind.REQUESTED, req.requested_by, by=md.id)
             req.resulting_task = task
         else:
             task = SharedTask.objects.select_for_update().get(id=req.target_id)
@@ -1384,8 +1450,10 @@ def accept_request(md: User, request_id) -> TaskRequest:
                 _notify_requester(req, accepted=False, conflict=True)
                 conflict = True
             else:
+                old_status, old_due = task.status, (task.due_at, task.due_date)
                 _apply_changes(task, data)
                 task.save()
+                _log_changes(req.requested_by, task, old_status, old_due)
                 req.resulting_task = task
                 conflict = False
             if conflict:
@@ -1504,6 +1572,7 @@ def delegate_to_staff(user: User, data: dict, staff: StaffMember, *, category_ke
         )
         apply_schedule(task, data, creating=True)
         task.save()
+        log_event(task, TaskEvent.Kind.DELEGATED, user, staff=staff.name)
         command_id = uuid.uuid4()
         payload = build_create_command(task, str(command_id))
         command = IntegrationCommand.objects.create(
@@ -1623,15 +1692,381 @@ def tell_sender_seen(user: User, alert: Alert) -> Alert | None:
     if existing:
         return existing
     title = task.title if task else (alert.body or alert.title)
-    loud = bool(task and task.priority in (Priority.URGENT, Priority.HIGH)) or alert.priority in (Priority.URGENT, Priority.HIGH)
+    # Spoken when it matters: urgent or important work, or the sender was already told it had NOT been seen.
+    loud = (bool(task and task.priority in (Priority.URGENT, Priority.HIGH))
+            or alert.priority in (Priority.URGENT, Priority.HIGH) or alert.unseen_told_at is not None)
     to, to_hi = address_of(giver), address_hi_of(giver)
+    now_word, now_word_hi = (" now", " अब") if alert.unseen_told_at else ("", "")
     return Alert.objects.create(
         recipient=giver, sender=user, kind=Alert.Kind.INFO, priority=Priority.NORMAL if loud else Priority.LOW,
         title=f"{user.spoken_name} has seen it", body=title[:400],
-        spoken_text=f"{to}, {user.spoken_name} has seen: {title}."[:400],
-        spoken_text_hi=f"{to_hi}, {user.spoken_name} ने देख लिया: {title}।"[:400],
+        spoken_text=f"{to}, {user.spoken_name} has{now_word} seen: {title}."[:400],
+        spoken_text_hi=f"{to_hi}, {user.spoken_name} ने{now_word_hi} देख लिया: {title}।"[:400],
         ref_type="seen", ref_id=str(alert.id)[:64],
     )
+
+
+# --------------------------------------------------------------------------- ring until seen
+# Work given and messages sent by a person ring the receiver's phone every few minutes until they tap Seen (or open
+# it, or answer JARVIS about it). The ringing itself runs in core/ringing.py; the rules for one person live here.
+def quiet_until(prefs: dict, at: datetime) -> datetime | None:
+    """The end of the person's quiet hours when `at` falls inside them (a non-urgent ring waits until then), else None."""
+    if not prefs.get("quietHoursEnabled", True):
+        return None
+    try:
+        start, end = int(prefs.get("quietStartHour", 22)), int(prefs.get("quietEndHour", 7))
+    except (TypeError, ValueError):
+        return None
+    if start == end:
+        return None
+    local = tu.to_local(at)
+    inside = start <= local.hour < end if start < end else (local.hour >= start or local.hour < end)
+    if not inside:
+        return None
+    out = local.replace(hour=end, minute=0, second=0, microsecond=0)
+    return out if out > local else out + timedelta(days=1)
+
+
+def _minutes_pref(prefs: dict, key: str, default: int) -> int:
+    try:
+        return max(1, int(prefs.get(key) or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def ring_every(prefs: dict, priority: str) -> timedelta:
+    """How long until the next ring: every minute for urgent work, every five otherwise (the receiver's settings)."""
+    if priority == Priority.URGENT:
+        return timedelta(minutes=_minutes_pref(prefs, "ringUrgentEveryMinutes", 1))
+    return timedelta(minutes=_minutes_pref(prefs, "ringEveryMinutes", 5))
+
+
+def ring_for(prefs: dict) -> timedelta:
+    """How long it rings before the sender is told it was not seen."""
+    return timedelta(minutes=_minutes_pref(prefs, "ringForMinutes", 30))
+
+
+def ring_fields(person: User, priority: str, start: datetime | None = None) -> dict:
+    """How a new alert for this person rings. Not at all when they switched ringing off, or for "whenever you get
+    time" (LOW). Otherwise the alert itself is the first ring and the next follows after their interval; in their
+    quiet hours a non-urgent one waits for the quiet hours to end; a message held until later rings when it comes."""
+    prefs = get_prefs(person)
+    if not prefs.get("ringUntilSeen", True) or priority == Priority.LOW:
+        return {"ring": False}
+    now = timezone.now()
+    at = start if start and start > now else now
+    hold = quiet_until(prefs, at) if priority != Priority.URGENT else None
+    if hold:
+        return {"ring": True, "rings": 0, "ring_started_at": None, "next_ring_at": hold}
+    if at > now:
+        return {"ring": True, "rings": 0, "ring_started_at": None, "next_ring_at": at}
+    return {"ring": True, "rings": 1, "ring_started_at": now, "next_ring_at": now + ring_every(prefs, priority)}
+
+
+def _seen_everywhere(user: User, task: SharedTask, now: datetime, *, close: bool) -> None:
+    """Everything this person still has open about the task counts as seen (and, with close, as dealt with)."""
+    qs = Alert.objects.filter(recipient=user, ref_type="shared_task", ref_id=str(task.id))
+    ids = [str(i) for i in qs.values_list("id", flat=True)]
+    qs.filter(seen_at__isnull=True).update(seen_at=now)
+    if close:
+        qs.filter(acknowledged_at__isnull=True).update(acknowledged_at=now)
+    # A "not seen yet" the giver still has waiting about it is out of date now.
+    Alert.objects.filter(ref_type="unseen", ref_id__in=ids, acknowledged_at__isnull=True).update(acknowledged_at=now)
+
+
+def mark_seen(user: User, alert: Alert, *, tell: bool = True) -> Alert | None:
+    """The person saw this alert (tapped Seen, opened it, or answered JARVIS about it). The ringing stops on all their
+    phones (core/ringing.py sends the stop), the work item shows it was seen (and its history says so), a "not seen
+    yet" the sender may still have waiting goes away, and the sender is told, unless tell=False ("no, don't tell").
+    Seeing it again changes nothing. Returns the note to the sender, if there is one."""
+    if alert.recipient_id != user.id:
+        return None
+    now = timezone.now()
+    if alert.seen_at is None:
+        alert.seen_at = now
+        alert.delivered_at = alert.delivered_at or now
+        Alert.objects.filter(id=alert.id).update(seen_at=alert.seen_at, delivered_at=alert.delivered_at)
+        Alert.objects.filter(ref_type="unseen", ref_id=str(alert.id), acknowledged_at__isnull=True).update(acknowledged_at=now)
+        task = task_of(alert)
+        if task is not None and task.assignee_user_id == user.id and task.seen_at is None:
+            SharedTask.objects.filter(id=task.id).update(seen_at=now)  # not a change to the task: no new version
+            log_event(task, TaskEvent.Kind.SEEN, user)
+    return tell_sender_seen(user, alert) if tell else None
+
+
+def ring_again(by: User, alert: Alert) -> str:
+    """The sender asks to ring again after "not seen yet": the ringing starts afresh, for its full time. Returns
+    "rang", "seen" (seen meanwhile, nothing to ring), "closed" (done or withdrawn) or "off" (they switched ringing off)."""
+    if alert.sender_id != by.id:
+        raise ServiceError("forbidden", "only the person who sent it can ring again.", 403)
+    if alert.seen_at:
+        return "seen"
+    if alert.acknowledged_at:
+        return "closed"
+    if not get_prefs(alert.recipient).get("ringUntilSeen", True):
+        return "off"
+    now = timezone.now()
+    Alert.objects.filter(id=alert.id).update(ring=True, ring_started_at=None, next_ring_at=now, unseen_told_at=None)
+    task = task_of(alert)
+    if task is not None:
+        log_event(task, TaskEvent.Kind.RING_AGAIN, by, to=alert.recipient_id)
+    audit(by, "alert.ring_again", "alert", alert.id)
+    return "rang"
+
+
+def _note_priority(task: SharedTask) -> str:
+    return task.priority if task.priority in (Priority.URGENT, Priority.HIGH) else Priority.NORMAL
+
+
+@transaction.atomic
+def record_promise(user: User, task_id, day: date, at: datetime | None = None) -> SharedTask:
+    """The person a task was given to says by when they will do it ("kal shaam tak"). It is kept on the task (and
+    becomes its deadline when it had none, so they are reminded), written in its history, and the giver hears it,
+    in one line with "has seen it" when this answer is the first sign that they saw it."""
+    task = SharedTask.objects.select_for_update().get(id=task_id, assignee_user=user)
+    if task.is_closed:
+        raise ServiceError("closed", "this task is already closed.", 409)
+    now = timezone.now()
+    first_look = task.seen_at is None
+    task.promise_date, task.promise_at = day, at
+    task.seen_at = task.seen_at or now
+    if task.due_kind == DueKind.NONE:
+        task.due_kind = DueKind.TIMED if at else DueKind.DATE
+        task.due_date, task.due_at = (tu.to_local(at).date(), at) if at else (day, None)
+    task.version += 1
+    task.save()
+    label = tu.due_phrase(task.promise_kind, task.promise_date, task.promise_at)
+    label_hi = tu.due_phrase_hi(task.promise_kind, task.promise_date, task.promise_at)
+    if first_look:
+        log_event(task, TaskEvent.Kind.SEEN, user)
+    log_event(task, TaskEvent.Kind.PROMISED, user, label=label, label_hi=label_hi)
+    _seen_everywhere(user, task, now, close=True)
+    giver = task.created_by
+    if giver is not None and giver.id != user.id and giver.is_active:
+        name, to, to_hi = user.spoken_name, address_of(giver), address_hi_of(giver)
+        if first_look:
+            en = f"{to}, {name} has seen {task.title} and will do it by {label}."
+            hi = f"{to_hi}, {name} ने {task.title} देख लिया है, {label_hi} तक कर देंगे।"
+        else:
+            en = f"{to}, {name} will do {task.title} by {label}."
+            hi = f"{to_hi}, {name} {task.title} {label_hi} तक कर देंगे।"
+        Alert.objects.create(recipient=giver, sender=user, kind=Alert.Kind.INFO, priority=_note_priority(task),
+                             title=f"{name} will do it by {label}"[:200], body=task.title, spoken_text=en[:400],
+                             spoken_text_hi=hi[:400], ref_type="shared_task", ref_id=str(task.id))
+    audit(user, "task.promise", "shared_task", task.id, label)
+    return task
+
+
+@transaction.atomic
+def record_cannot(user: User, task_id, reason: str = "") -> SharedTask:
+    """The person a task was given to says they can't do it ("nahi ho payega, bank band hai"). It goes on hold with
+    the reason, the history keeps it, and the giver hears it and is asked whether to give it to someone else."""
+    task = SharedTask.objects.select_for_update().get(id=task_id, assignee_user=user)
+    if task.is_closed:
+        raise ServiceError("closed", "this task is already closed.", 409)
+    now = timezone.now()
+    reason = " ".join(str(reason or "").split())[:280]
+    first_look = task.seen_at is None
+    task.status = Status.BLOCKED
+    task.hold_reason = reason or "Can't do it"
+    task.seen_at = task.seen_at or now
+    task.version += 1
+    task.save()
+    if first_look:
+        log_event(task, TaskEvent.Kind.SEEN, user)
+    log_event(task, TaskEvent.Kind.CANNOT, user, reason=reason)
+    _seen_everywhere(user, task, now, close=True)
+    giver = task.created_by
+    if giver is not None and giver.id != user.id and giver.is_active:
+        name, to, to_hi = user.spoken_name, address_of(giver), address_hi_of(giver)
+        en = f"{to}, {name} can't do {task.title}." + (f" Reason: {reason}." if reason else "")
+        hi = f"{to_hi}, {name} {task.title} नहीं कर पाएँगे।" + (f" कारण: {reason}।" if reason else "")
+        Alert.objects.create(
+            recipient=giver, sender=user, kind=Alert.Kind.INFO, priority=_note_priority(task),
+            title=f"{name} can't do it", body=task.title, spoken_text=en[:400], spoken_text_hi=hi[:400],
+            ref_type="shared_task", ref_id=str(task.id),
+            question={"kind": "reassign", "en": "Shall I give it to someone else?", "hi": "किसी और को दे दूँ?",
+                      "task": str(task.id)},
+        )
+    audit(user, "task.cannot", "shared_task", task.id)
+    return task
+
+
+@transaction.atomic
+def reassign_task(by: User, task_id, person: User) -> SharedTask:
+    """Give a task to someone else instead (after "can't do it" or "not seen yet", or any time): only whoever gave it,
+    or the MD. It starts afresh with the new person (rings until seen, asks them by when); the one who had it is told
+    and its alerts go quiet; the history keeps both."""
+    task = SharedTask.objects.select_for_update().get(id=task_id)
+    if not (by.is_md or task.created_by_id == by.id):
+        raise ServiceError("forbidden", "only whoever gave it can give it to someone else.", 403)
+    if task.assignee_type != SharedTask.Assignee.USER or task.origin not in GIVEN_ORIGINS + MEET_ORIGINS:
+        raise ServiceError("invalid", "only work given to someone on the team can be given to someone else.", 422)
+    if task.is_closed:
+        raise ServiceError("closed", "this task is already closed.", 409)
+    if person is None or not person.is_active:
+        raise ServiceError("no_person", "that person's account is switched off.", 422)
+    if person.is_md and not by.is_md:
+        raise ServiceError("use_request", f"work for {md_address()} goes to {md_pronouns()[1]} as a request.", 422)
+    if person.id == by.id:
+        raise ServiceError("self", "say who should get it instead.", 422)
+    old = task.assignee_user
+    if old is not None and old.id == person.id:
+        raise ServiceError("same", f"it is already with {person.spoken_name}.", 422)
+    now = timezone.now()
+    old_alert_ids = [str(i) for i in Alert.objects.filter(ref_type="shared_task", ref_id=str(task.id)).values_list("id", flat=True)]
+    # Everything still open about it, for anybody (the old person's ringing, the giver's "can't do it"), is settled.
+    Alert.objects.filter(ref_type="shared_task", ref_id=str(task.id), acknowledged_at__isnull=True).update(acknowledged_at=now)
+    Alert.objects.filter(ref_type="unseen", ref_id__in=old_alert_ids, acknowledged_at__isnull=True).update(acknowledged_at=now)
+    task.assignee_user = person
+    task.assignee_type = bucket_of(person)
+    task.status, task.hold_reason, task.completed_at = Status.OPEN, "", None
+    task.seen_at, task.promise_date, task.promise_at = None, None, None
+    task.version += 1
+    task.save()
+    log_event(task, TaskEvent.Kind.REASSIGNED, by, to=person.id, **({"from": old.id} if old else {}))
+    who, who_hi = giver_words(by)
+    name = person.spoken_name
+    if old is not None and old.id != by.id and old.is_active:
+        Alert.objects.create(
+            recipient=old, sender=by, kind=Alert.Kind.INFO, priority=Priority.NORMAL,
+            title=f"{who} gave your task to {name}"[:200], body=task.title,
+            spoken_text=f"{old.spoken_name}, {who} has given {task.title} to {name} instead."[:400],
+            spoken_text_hi=f"{old.spoken_name}, {who_hi} ने {task.title} अब {name} को दे दिया है।"[:400],
+            ref_type="reassigned", ref_id=str(task.id),
+        )
+    when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
+    when_hi = tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at)
+    if task.kind == Kind.MEETING:
+        title = f"Meeting with {who}"
+        en = f"{name}, {who} has scheduled a meeting with you" + (f" {when}" if when else "") + f": {task.title}."
+        hi = f"{name}, {who_hi} ने आपके साथ मीटिंग रखी है" + (f" {when_hi}" if when_hi else "") + f": {task.title}।"
+    else:
+        pr_en, pr_hi = _priority_words(task.priority)
+        title = f"New task from {who}"
+        en = f"{name}, {who} has given you a new {pr_en}task: {task.title}" + (f", {when}" if when else "") + "."
+        hi = f"{name}, {who_hi} ने आपको एक नया {pr_hi}टास्क दिया है: {task.title}" + (f", {when_hi}" if when_hi else "") + "।"
+    Alert.objects.create(
+        recipient=person, sender=by, kind=Alert.Kind.TASK_ASSIGNED, priority=task.priority, title=title,
+        body=en[:400], spoken_text=en[:400], spoken_text_hi=hi[:400], ref_type="shared_task", ref_id=str(task.id),
+        **ring_fields(person, task.priority),
+    )
+    audit(by, "task.reassign", "shared_task", task.id, f"to user {person.id}")
+    return task
+
+
+# --------------------------------------------------------------------------- a task's history
+def log_event(task, kind: str, actor: User | None = None, **data) -> None:
+    """One step in a work item's history (see TaskEvent). Never stops the work itself: a failure is only logged."""
+    if not isinstance(task, SharedTask) or task.pk is None:
+        return
+    try:
+        with transaction.atomic():
+            TaskEvent.objects.create(task_id=task.pk, kind=kind, actor=actor, data=jsonable(data))
+    except Exception:  # noqa: BLE001 — the history must never undo the work it describes
+        log.exception("task history step not recorded")
+
+
+_STATUS_EVENT = {Status.IN_PROGRESS: TaskEvent.Kind.STARTED, Status.BLOCKED: TaskEvent.Kind.HOLD,
+                 Status.COMPLETED: TaskEvent.Kind.DONE, Status.CANCELLED: TaskEvent.Kind.CANCELLED,
+                 Status.OPEN: TaskEvent.Kind.REOPENED}
+
+
+def _log_changes(actor: User, task: SharedTask, old_status: str, old_due) -> None:
+    """The steps a change made: a new status, a new time."""
+    if task.status != old_status:
+        kind = _STATUS_EVENT[task.status]
+        extra = {"reason": task.hold_reason} if kind == TaskEvent.Kind.HOLD and task.hold_reason else {}
+        log_event(task, kind, actor, **extra)
+    if (task.due_at, task.due_date) != tuple(old_due) and task.status != Status.CANCELLED:
+        log_event(task, TaskEvent.Kind.MOVED, actor,
+                  label=tu.due_phrase(task.due_kind, task.due_date, task.due_at) or "no fixed time",
+                  label_hi=tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at) or "बिना तय समय")
+
+
+def _person_words(u: User | None) -> tuple[str, str]:
+    if u is None:
+        return "someone", "किसी"
+    return (md_address(), md_address_hi()) if u.is_md else (u.spoken_name, u.spoken_name)
+
+
+def _history_text(kind: str, actor: User | None, data: dict, task: SharedTask, people: dict) -> tuple[str, str]:
+    a, a_hi = _person_words(actor)
+    to, to_hi = _person_words(people.get(data.get("to")))
+    frm, frm_hi = _person_words(people.get(data.get("from")))
+    label, label_hi = data.get("label") or "", data.get("label_hi") or data.get("label") or ""
+    reason = data.get("reason") or ""
+    K = TaskEvent.Kind
+    if kind == K.GIVEN:
+        if task.kind == Kind.MEETING:
+            return f"Meeting set by {a} with {to}", f"{a_hi} ने {to_hi} के साथ मीटिंग रखी"
+        return f"Given by {a} to {to}", f"{a_hi} ने {to_hi} को दिया"
+    if kind == K.ADDED:
+        return f"Added by {a}", f"{a_hi} ने जोड़ा"
+    if kind == K.REQUESTED:
+        return (f"Asked for by {a}, accepted by {md_address()}", f"{a_hi} की रिक्वेस्ट, {md_address_hi()} ने मंज़ूर की")
+    if kind == K.DELEGATED:
+        staff = data.get("staff") or "staff"
+        return f"Given by {a} to {staff} (staff)", f"{a_hi} ने {staff} को दिया (स्टाफ़)"
+    if kind == K.SEEN:
+        return f"Seen by {a}", f"{a_hi} ने देख लिया"
+    if kind == K.PROMISED:
+        return f"{a}: will do it by {label}", f"{a_hi}: {label_hi} तक कर देंगे"
+    if kind == K.CANNOT:
+        return (f"{a} can't do it" + (f": {reason}" if reason else ""),
+                f"{a_hi} नहीं कर पाएँगे" + (f"। कारण: {reason}" if reason else ""))
+    if kind == K.NOT_SEEN:
+        m = data.get("minutes") or 0
+        return f"Not seen by {to} after {m} minutes of ringing", f"{to_hi} ने {m} मिनट रिंग के बाद भी नहीं देखा"
+    if kind == K.RING_AGAIN:
+        return f"{a} rang {to} again", f"{a_hi} ने {to_hi} को फिर से रिंग किया"
+    if kind == K.REASSIGNED:
+        if data.get("from"):
+            return f"{a} gave it to {to} instead of {frm}", f"{a_hi} ने {frm_hi} की जगह {to_hi} को दिया"
+        return f"{a} gave it to {to}", f"{a_hi} ने {to_hi} को दिया"
+    if kind == K.MOVED:
+        return f"Moved to {label} by {a}", f"{a_hi} ने {label_hi} पर किया"
+    if kind == K.STARTED:
+        return f"Started by {a}", f"{a_hi} ने शुरू किया"
+    if kind == K.HOLD:
+        return (f"Put on hold by {a}" + (f": {reason}" if reason else ""),
+                f"{a_hi} ने होल्ड पर रखा" + (f"। कारण: {reason}" if reason else ""))
+    if kind == K.DONE:
+        return (f"Done by {a}", f"{a_hi} ने पूरा किया") if actor else ("Done", "पूरा हुआ")
+    if kind == K.REOPENED:
+        return f"Reopened by {a}", f"{a_hi} ने फिर से खोला"
+    if kind == K.CANCELLED:
+        return f"Cancelled by {a}", f"{a_hi} ने कैंसल किया"
+    return kind.title(), kind.title()
+
+
+def task_history(task: SharedTask) -> list[dict]:
+    """The task's steps, oldest first, each as a short line in English and Hindi with its time. A task older than the
+    history gets its start (and its finish) from the task itself."""
+    K = TaskEvent.Kind
+    steps = [(e.kind, e.at, e.actor, e.data or {}) for e in task.events.select_related("actor")]
+    if not any(k in (K.GIVEN, K.ADDED, K.REQUESTED, K.DELEGATED) for k, *_ in steps):
+        if task.assignee_type == SharedTask.Assignee.STAFF:
+            start = (K.DELEGATED, {"staff": task.staff.name if task.staff_id else ""})
+        elif task.origin == SharedTask.Origin.PA_REQUEST:
+            start = (K.REQUESTED, {})
+        elif task.origin in OWN_ORIGINS or task.created_by_id == task.assignee_user_id:
+            start = (K.ADDED, {})
+        else:
+            start = (K.GIVEN, {"to": task.assignee_user_id})
+        steps.insert(0, (start[0], task.created_at, task.created_by, start[1]))
+    if task.status == Status.COMPLETED and task.completed_at and not any(k == K.DONE for k, *_ in steps):
+        steps.append((K.DONE, task.completed_at, None, {}))
+    ids = {d.get(k) for _, _, _, d in steps for k in ("to", "from") if isinstance(d.get(k), int)}
+    people = {u.id: u for u in User.objects.filter(id__in=ids)}
+    out = []
+    for kind, at, actor, data in steps:
+        en, hi = _history_text(kind, actor, data, task, people)
+        local = tu.to_local(at)
+        out.append({"kind": kind, "at": at.isoformat(), "text": en, "text_hi": hi,
+                    "at_label": f"{tu.fmt_day(local.date())}, {tu.fmt_time(local)}",
+                    "at_label_hi": f"{tu.fmt_day_hi(local.date())} {tu.fmt_time_hi(local)}"})
+    return out
 
 
 LAST_VIEW_TTL = timedelta(minutes=15)
@@ -1868,6 +2303,15 @@ PREF_SCHEMA = {
     # Morning briefing, raised by the server and spoken when he picks up the phone.
     "briefingEnabled": {"type": "bool", "default": True, "say": "morning briefing"},
     "briefingTime": {"type": "time", "default": "09:00", "say": "morning briefing time"},
+    # Ring until seen: work given and messages sent by someone on the team ring this person's phone ("ting ting")
+    # every few minutes until they tap Seen; after a while the sender is told it was not seen. These are the
+    # receiver's settings (it is their phone that rings). Quiet hours hold a non-urgent ring until they are over.
+    "ringUntilSeen": {"type": "bool", "default": True, "say": "ring until I tap Seen (work and messages from the team)"},
+    "ringEveryMinutes": {"type": "int", "min": 2, "max": 30, "default": 5, "say": "ring again every (minutes) until seen"},
+    "ringUrgentEveryMinutes": {"type": "int", "min": 1, "max": 10, "default": 1,
+                               "say": "urgent work: ring again every (minutes) until seen"},
+    "ringForMinutes": {"type": "int", "min": 5, "max": 240, "default": 30,
+                       "say": "ring for (minutes) before the sender is told it was not seen"},
 }
 _TRUE_WORDS = {"on", "true", "yes", "1", "haan", "han", "ha", "enable", "enabled", "chalu", "chaalu", "start"}
 _FALSE_WORDS = {"off", "false", "no", "0", "nahi", "nahin", "disable", "disabled", "band", "stop"}
@@ -2032,7 +2476,8 @@ def favourite_views(prefs: dict, limit: int = 4) -> list[str]:
 
 
 HABIT_KEYS = ("snoozeMinutes", "meetingMinutes", "langRecent", "viewsRecent", "heavyDayItems", "checkinAfterMinutes",
-              "urgentRepeatMinutes", "digestTime", "staleStaffDays", "requestWaitHours")
+              "urgentRepeatMinutes", "digestTime", "staleStaffDays", "requestWaitHours", "ringEveryMinutes",
+              "ringUrgentEveryMinutes", "ringForMinutes")
 
 
 def habits(user: User) -> list[dict]:
@@ -2057,6 +2502,12 @@ def habits(user: User) -> list[dict]:
     add("digestTime", "Evening summary at", prefs["digestTime"], "a rule you can change")
     add("staleStaffDays", "Staff silence before a nudge", f"{prefs['staleStaffDays']} days", "a rule you can change")
     add("requestWaitHours", "A request waits before a nudge", f"{prefs['requestWaitHours']} hours", "a rule you can change")
+    add("ringEveryMinutes", "Work and messages ring again every", f"{prefs['ringEveryMinutes']} minutes until seen",
+        "a rule you can change")
+    add("ringUrgentEveryMinutes", "Urgent ones ring again every", f"{prefs['ringUrgentEveryMinutes']} minutes until seen",
+        "a rule you can change")
+    add("ringForMinutes", "The sender hears “not seen” after", f"{prefs['ringForMinutes']} minutes of ringing",
+        "a rule you can change")
     return out
 
 
@@ -2275,6 +2726,7 @@ def send_message_to(sender: User, people: list[User], text: str, *, when=None,
             ref_type="message", ref_id=str(uuid.uuid4()), snoozed_until=when,
             question={"kind": "seen", "en": f"Shall I tell {from_en} you've seen it?",
                       "hi": f"{from_hi} को बता दूँ कि आपने देख लिया?"},
+            **ring_fields(person, priority, start=when),
         ))
         audit(sender, "message.send", "user", person.id, "later" if when else "now")
     return made

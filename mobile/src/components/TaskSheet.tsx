@@ -1,19 +1,61 @@
-import React, { useState } from 'react';
-import { Alert, Modal, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ApiError, api } from '@/lib/api';
 import { dataChanged } from '@/lib/bus';
-import { dayLabel, timeOf } from '@/lib/format';
+import { dayLabel, isoDate, timeOf } from '@/lib/format';
 import { twin } from '@/lib/lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from '@/lib/names';
 import { useSession } from '@/lib/session';
 import { say } from '@/lib/speech';
 import { colors, kindLabel, radius } from '@/lib/theme';
-import type { TaskItem } from '@/lib/types';
+import type { HistoryStep, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 
 import { Button, Icon, PriorityTag, Tag, Txt } from './ui';
+
+/** "Today 10:42 AM" for a moment the server sent. */
+const momentLabel = (iso: string) => `${dayLabel(isoDate(new Date(iso)))} ${timeOf(iso)}`;
+
+/**
+ * A work item's history, as the server recorded it: who gave it, when it was seen, the time promised, moves, who
+ * else got it, done. The last few steps show; the rest are one tap away.
+ */
+function History({ taskId, version }: { taskId: string; version: number }) {
+  const [steps, setSteps] = useState<HistoryStep[] | null>(null);
+  const [all, setAll] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api<{ results: HistoryStep[] }>(`/shared-tasks/${taskId}/history/`)
+      .then((r) => alive && setSteps(r.data.results))
+      .catch(() => alive && setSteps([]));
+    return () => {
+      alive = false;
+    };
+  }, [taskId, version]);
+  if (!steps || steps.length === 0) return null;
+  const shown = all ? steps : steps.slice(-3);
+  return (
+    <View style={s.history}>
+      <Pressable onPress={() => setAll((v) => !v)} disabled={steps.length <= 3} style={s.historyHead} hitSlop={8}>
+        <Txt variant="label">History</Txt>
+        {steps.length > 3 ? <Txt variant="caption">{all ? 'Show less' : `All ${steps.length} steps`}</Txt> : null}
+      </Pressable>
+      <ScrollView style={{ maxHeight: all ? 220 : undefined }} nestedScrollEnabled>
+        {shown.map((st, i) => (
+          <View key={`${st.at}-${i}`} style={s.step}>
+            <View style={[s.dot, i === shown.length - 1 && { backgroundColor: colors.gold }]} />
+            <View style={{ flex: 1 }}>
+              <Txt variant="small">{st.text}</Txt>
+              <Txt variant="caption">{st.at_label}</Txt>
+            </View>
+          </View>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
 
 function shiftDay(item: TaskItem, days: number) {
   const base = item.due_date ? new Date(`${item.due_date}T00:00:00`) : new Date();
@@ -152,11 +194,19 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                 <Txt variant="heading" style={{ fontSize: 13 }}>{isMine ? 'you' : item.assignee.staff_name}</Txt> · {item.status_label}
               </Txt>
             )}
+            {!ownPaTask && !closed ? (
+              // Ring until seen: has the person seen it, and by when did they say they would do it.
+              <Txt variant="small" style={{ marginTop: 2, color: item.seen_at ? colors.inkSoft : colors.warn }}>
+                {item.seen_at ? `Seen ${momentLabel(item.seen_at)}` : 'Not seen yet'}
+                {item.promise_label ? ` · will do it by ${item.promise_label}` : ''}
+              </Txt>
+            ) : null}
             {item.hold_reason ? <Txt variant="small" style={{ marginTop: 2 }}>On hold: {item.hold_reason}</Txt> : null}
           </View>
         ) : item.created_by ? (
           <Txt variant="small" style={{ marginTop: 8 }}>Requested by {item.created_by}</Txt>
         ) : null}
+        {item.scope === 'shared' ? <History taskId={item.id} version={item.version} /> : null}
         {message ? <Txt variant="small" style={{ marginTop: 12, color: colors.warn }}>{message}</Txt> : null}
 
         <View style={s.actions}>
@@ -262,6 +312,10 @@ const s = StyleSheet.create({
   grabber: { alignSelf: 'center', width: 44, height: 5, borderRadius: 3, backgroundColor: colors.line, marginBottom: 14 },
   closeBtn: { position: 'absolute', top: 14, right: 14, zIndex: 2, width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   box: { marginTop: 12, padding: 12, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  history: { marginTop: 12 },
+  historyHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  step: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 4 },
+  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.line, marginTop: 6, marginRight: 10 },
   actions: { marginTop: 20 },
   input: {
     backgroundColor: colors.surface,

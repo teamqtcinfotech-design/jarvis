@@ -2135,7 +2135,9 @@ class TodayAndNarrowingTests(BaseCase):
         self.assertEqual(len(his), 1)
         self.assertEqual(his[0]["spoken_text"], "Sir, Priya has seen: Sign the Pune vendor agreement.")
         self.assertEqual(his[0]["priority"], "NORMAL")   # urgent task: said aloud
-        # A plain ack says nothing to Sir; the MD cannot "see" his own alerts into a note either.
+        # A plain ack says nothing to Sir (for someone who switched ring-until-seen off: with it on, "Got it" counts
+        # as Seen); the MD cannot "see" his own alerts into a note either.
+        services.set_prefs(self.pa, {"ringUntilSeen": False})
         self.md_client.post("/api/v1/pa-tasks/", {"title": "Order water cans"}, format="json", HTTP_IDEMPOTENCY_KEY="seen-2")
         plain = [a for a in self.pa_client.get("/api/v1/alerts/").json()["results"] if "water cans" in a["body"] + a["title"]]
         self.pa_client.post(f"/api/v1/alerts/{plain[0]['id']}/ack/", {}, format="json")
@@ -2334,7 +2336,8 @@ class SnoozeAndQuestionTests(BaseCase):
         self.assertIsNone(meeting_due["question"])  # a meeting that is starting asks nothing
         self.md_client.post("/api/v1/pa-tasks/", {"title": "Courier the contract"}, format="json", HTTP_IDEMPOTENCY_KEY="q-1")
         hers = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
-        self.assertEqual(hers["question"]["kind"], "seen")
+        # Work given to her (Phase 2, ring until seen): "Shall I tell Sir when you'll do it?"
+        self.assertEqual(hers["question"]["kind"], "promise")
         self.assertIn("Sir", hers["question"]["en"])
         self.assertIn("सर", hers["question"]["hi"])
 

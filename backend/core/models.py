@@ -257,9 +257,54 @@ class SharedTask(TaskFields):
     sync_error = models.CharField(max_length=300, blank=True, default="")
     last_synced_at = models.DateTimeField(null=True, blank=True)
 
+    # Ring until seen (Nov 2026): when the person it is for saw it (tapped Seen, opened it, or answered JARVIS about
+    # it), and by when they said they will do it ("kal shaam tak"). Both start again when it is given to someone else.
+    seen_at = models.DateTimeField(null=True, blank=True)
+    promise_date = models.DateField(null=True, blank=True)
+    promise_at = models.DateTimeField(null=True, blank=True)  # set when a time was said, else only the day
+
     class Meta:
         indexes = [models.Index(fields=["assignee_type", "status"]), models.Index(fields=["due_at"]),
                    models.Index(fields=["assignee_user", "status"], name="core_shared_assigne_team_idx")]
+
+    @property
+    def promise_kind(self) -> str:
+        return DueKind.TIMED if self.promise_at else DueKind.DATE if self.promise_date else DueKind.NONE
+
+
+class TaskEvent(models.Model):
+    """One step in a work item's life, recorded as it happens: who gave it, when it was seen, the date promised,
+    when it moved, who it went to instead, when it was done. Read back as the task's history (never edited)."""
+
+    class Kind(models.TextChoices):
+        GIVEN = "GIVEN", "Given"
+        ADDED = "ADDED", "Added"
+        REQUESTED = "REQUESTED", "Requested and accepted"
+        DELEGATED = "DELEGATED", "Given to staff"
+        SEEN = "SEEN", "Seen"
+        PROMISED = "PROMISED", "Promised a time"
+        CANNOT = "CANNOT", "Can't do it"
+        NOT_SEEN = "NOT_SEEN", "Not seen while it rang"
+        RING_AGAIN = "RING_AGAIN", "Rang again"
+        REASSIGNED = "REASSIGNED", "Given to someone else"
+        MOVED = "MOVED", "Moved"
+        STARTED = "STARTED", "Started"
+        HOLD = "HOLD", "Put on hold"
+        DONE = "DONE", "Done"
+        REOPENED = "REOPENED", "Reopened"
+        CANCELLED = "CANCELLED", "Cancelled"
+
+    task = models.ForeignKey(SharedTask, on_delete=models.CASCADE, related_name="events")
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    # What the step needs to be told again: {"to": user id, "from": user id, "label": "tomorrow at 6 PM",
+    # "label_hi": ..., "reason": ..., "staff": name}. Work items only: never anything personal.
+    data = models.JSONField(default=dict, blank=True)
+    at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["at", "id"]
+        indexes = [models.Index(fields=["task", "at"])]
 
 
 class TaskPanelLink(models.Model):
@@ -396,10 +441,20 @@ class Alert(models.Model):
     # The one question JARVIS asks after this alert and what a yes does ({"kind": "move", "en": ..., "hi": ...,
     # "target": {...}}); empty = the standard question for its kind, if any (see services.alert_question).
     question = models.JSONField(null=True, blank=True)
+    # Ring until seen (Nov 2026): work given and messages sent by a person ring the recipient's phone every few
+    # minutes until they tap Seen (or open it, or answer JARVIS about it); after a while the sender is told it was
+    # not seen. next_ring_at set = ringing is on (or a stop still has to reach the phones); see core/ringing.py.
+    ring = models.BooleanField(default=False)
+    seen_at = models.DateTimeField(null=True, blank=True)
+    rings = models.PositiveSmallIntegerField(default=0)
+    ring_started_at = models.DateTimeField(null=True, blank=True)
+    next_ring_at = models.DateTimeField(null=True, blank=True)
+    unseen_told_at = models.DateTimeField(null=True, blank=True)  # the sender was told "not seen yet"
 
     class Meta:
         ordering = ["-created_at"]
-        indexes = [models.Index(fields=["recipient", "acknowledged_at"])]
+        indexes = [models.Index(fields=["recipient", "acknowledged_at"]),
+                   models.Index(fields=["next_ring_at"], name="core_alert_ring_idx")]
 
 
 class PushDevice(models.Model):

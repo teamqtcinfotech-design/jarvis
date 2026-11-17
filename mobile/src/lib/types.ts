@@ -59,6 +59,10 @@ export interface TaskItem {
   remote_status?: string; // todo | working | waiting | done
   status_label?: string; // Not started | Working | Hold | Completed | Pending confirmation | Not assigned
   hold_reason?: string;
+  /** Ring until seen: when the person it is for saw it, and by when they said they would do it. */
+  seen_at?: string | null;
+  promise_label?: string;
+  promise_label_hi?: string;
 }
 
 export interface RequestItem {
@@ -146,6 +150,14 @@ export interface ServerAlert {
   /** The key it is announced under: a snoozed alert that comes back is a new announcement, not a repeat. */
   announce_key?: string;
   question?: AlertQuestion | null;
+  /** Ring until seen: it waits for a Seen (the banner shows the Seen button). */
+  ring?: boolean;
+  /** It rings again every few minutes right now. */
+  ringing?: boolean;
+  rings?: number;
+  seen_at?: string | null;
+  /** "Seen" / "देख लिया": the button's word in the person's language. */
+  seen_label?: string;
 }
 
 export interface Reminder {
@@ -173,13 +185,38 @@ export interface Reminder {
 
 /** The one question JARVIS asks aloud after a reminder or an alert, and what a yes does. Written by the server. */
 export interface AlertQuestion {
-  kind: 'accept' | 'done' | 'seen' | 'move';
+  /** promise / unseen / reassign take free words ("kal shaam tak", "Sunil ko de do"): the server reads the answer
+   *  (POST /alerts/<id>/answer/). The others are a yes or a no, carried out by the app. */
+  kind: 'accept' | 'done' | 'seen' | 'move' | 'promise' | 'unseen' | 'reassign';
   /** Appended to the spoken line; empty when the line itself already asks (a check-in). */
   en: string;
   hi: string;
   /** move: the item a yes moves, and the day it goes to. */
   target?: { id: string; scope: 'private' | 'shared'; title: string; version?: number };
   to?: string;
+  /** unseen / reassign: the work it is about. */
+  task?: string;
+}
+
+/** The server's reading of free words said after a promise / unseen / reassign question. */
+export interface AlertAnswer {
+  /** false: the words were about something else; treat them as a new sentence. */
+  handled: boolean;
+  show?: string;
+  say?: string;
+  lang?: 'hi' | 'en';
+  /** A follow-up still waiting ("By when?", "Who should get it?"), or null when it is settled. */
+  ask?: AlertQuestion | null;
+}
+
+/** One step in a work item's history. */
+export interface HistoryStep {
+  kind: string;
+  at: string;
+  at_label: string;
+  at_label_hi: string;
+  text: string;
+  text_hi: string;
 }
 
 export interface StaffOption {

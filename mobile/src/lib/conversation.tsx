@@ -27,7 +27,7 @@ import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
 import { useSession } from './session';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
-import type { AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
+import type { AlertAnswer, AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
 import { onBarge, onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeSetListening, wakeStart, wakeStatus, wakeSupported } from './wake';
 
@@ -131,6 +131,9 @@ const newId = () => `m${Date.now()}-${seq++}`;
 /** "Go on from where you stopped", as people say it and as the recogniser writes it. */
 const CONTINUE_WORDS = /(continue|carry on|go on|go ahead|keep going|resume|aage (bolo|badho|sunao|padho|batao|bataiye|boliye)|jaari rakho|jari rakho|wahi(n)? se|jahan (se )?(ruke|roka|chhoda|chhode)|phir se (bolo|sunao)|bolte raho|कंटिन्यू|कन्टिन्यू|आगे (बोलो|बढ़ो|सुनाओ|पढ़ो|बताओ|बताइए|बोलिए)|जारी रखो|वहीं से|जहाँ (से )?(रुके|रोका|छोड़ा))/i;
 
+/** Questions answered in free words, read by the server ("kal shaam tak", "Sunil ko de do"), not by yes / no. */
+const FREE_ANSWER_KINDS = new Set<AlertQuestion['kind']>(['promise', 'unseen', 'reassign']);
+
 /** What he talked over is offered back for three minutes. */
 const stillFresh = (at: number) => Date.now() - at < 3 * 60_000;
 
@@ -138,7 +141,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { user } = useSession();
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
-    setHeldVisible, held, setPresenter, answerQuestion, snooze } = useAlertEngine();
+    setHeldVisible, held, setPresenter, answerQuestion, snooze, dismiss } = useAlertEngine();
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
   const isMD = user?.role === 'MD';
@@ -385,6 +388,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return;
     }
     const pq = questionRef.current;
+    if (pq && FREE_ANSWER_KINDS.has(pq.q.kind)) {
+      // "Kal shaam tak" / "nahi ho payega, ..." / "Sunil ko de do": free words, read by the server.
+      answerOnServer(pq, text);
+      return;
+    }
     if (pq) {
       // The answer to the alert's question; anything else he says is understood as itself (the banner stays).
       interpret(text, '', `JARVIS asked: "${pq.q.en || pq.spoken}" about "${pq.item.title}"`);
@@ -483,14 +491,56 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     } catch {
       // not mounted yet; the voice still works
     }
-    const hindi = langOfText(spoken) === 'hi';
+    // No line (only the question: "Shall I tell Sir when you'll do it?" after Seen): the language JARVIS uses with him.
+    const hindi = spoken ? langOfText(spoken) === 'hi' : replyLang() === 'hi';
     const ask = hindi ? q?.hi : q?.en;
-    const line = ask ? `${spoken} ${ask}` : spoken;
+    const line = ask ? `${spoken} ${ask}`.trim() : spoken;
     push('jarvis', line);
     expectingRef.current = !!q;
     silenceRef.current = 0;
     calledRef.current = false;
-    say(line, { interrupt: true, lang: hindi ? 'hi' : 'en', fallback: q?.en ? `${spoken} ${q.en}` : spoken, onDone: q ? listen : undefined });
+    say(line, { interrupt: true, lang: hindi ? 'hi' : 'en', fallback: q?.en ? `${spoken} ${q.en}`.trim() : spoken, onDone: q ? listen : undefined });
+  };
+
+  /**
+   * Free words after a question about work between people ("Shall I tell Sir when you'll do it?", "Ring again, or
+   * give it to someone else?", "Shall I give it to someone else?"): the server reads them and does what they say.
+   * A follow-up ("By when?", "Who should get it?") keeps JARVIS listening; words about something else entirely are
+   * understood as a sentence of their own.
+   */
+  const answerOnServer = async (pq: { item: EngineItem; q: AlertQuestion; spoken: string }, text: string) => {
+    if (!pq.item.alertId) {
+      questionRef.current = null;
+      interpret(text, previousRef.current, '');
+      return;
+    }
+    setBusy('thinking');
+    try {
+      const res = await api<AlertAnswer>(`/alerts/${pq.item.alertId}/answer/`, { method: 'POST', body: { text }, timeoutMs: 30000 });
+      setBusy('');
+      const a = res.data;
+      if (!a.handled) {
+        questionRef.current = null;
+        interpret(text, previousRef.current, '');
+        return;
+      }
+      dismiss(pq.item);
+      dataChanged.emit();
+      const lang: SpeakLang = a.lang === 'hi' ? 'hi' : 'en';
+      if (a.ask) {
+        questionRef.current = { item: { ...pq.item, question: a.ask }, q: a.ask, spoken: '' };
+        reply(a.show || a.ask.en, lang === 'hi' ? a.say : undefined, lang, true);
+      } else {
+        questionRef.current = null;
+        reply(a.show || '', lang === 'hi' ? a.say : undefined, lang, false);
+      }
+    } catch (e) {
+      setBusy('');
+      questionRef.current = null;
+      const msg = e instanceof ApiError ? e.message : "I couldn't reach the server.";
+      push('jarvis', msg, { tone: 'error' });
+      sayOwn(`Sorry ${address}, ${msg}`, `माफ़ कीजिए ${addressHi}, ${msg}`, { interrupt: true });
+    }
   };
 
   // Woken by "Hey JARVIS": come to the orb screen, greet (and offer held alerts in the same breath), listen.

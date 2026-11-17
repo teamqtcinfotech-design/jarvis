@@ -892,13 +892,67 @@ class AlertAckView(APIView):
         from django.utils import timezone
 
         alert = Alert.objects.get(id=alert_id, recipient=request.user)
+        told = None
+        said = request.data.get("seen") if isinstance(request.data, dict) else None
+        # "Shall I tell Sunil you've seen it?" — yes: whoever gave the task or sent the message learns it was seen;
+        # no: seen, but nobody is told. "Got it" on something that rings until seen counts as Seen (and tells).
+        tell = said in (True, "true", 1, "1") if said is not None else bool(alert.ring)
+        if alert.seen_at is None and (alert.ring or tell):  # seen before (an answer, a Start): nothing more to say
+            told = services.mark_seen(request.user, alert, tell=tell)
         if not alert.acknowledged_at:
             alert.acknowledged_at = timezone.now()
             alert.save(update_fields=["acknowledged_at"])
-        told = None
-        if request.data.get("seen") in (True, "true", 1, "1"):
-            # "Shall I tell Sunil you've seen it?" — yes: whoever gave the task or sent the message learns it was seen.
-            told = services.tell_sender_seen(request.user, alert)
         told_to = services.giver_words(told.recipient) if told else ("", "")
         return Response({"acknowledged": str(alert.id), "told": str(told.id) if told else None,
                          "told_to": told_to[0], "told_to_hi": told_to[1]})
+
+
+class AlertDetailView(APIView):
+    """One alert of the person's own, even one already dealt with (the phone opens it from a notification)."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request, alert_id):
+        alert = Alert.objects.select_related("recipient", "sender").get(id=alert_id, recipient=request.user)
+        return Response(services.alert_item(alert, lang.current(request.user)))
+
+
+class AlertSeenView(APIView):
+    """"Seen" (the button on the banner or on the ringing notification): the ringing stops on every phone, the
+    sender is told, and the answer says what JARVIS asks next ("Shall I tell Sir when you'll do it?") if anything.
+    A message or meeting needs nothing more and leaves the lists; work stays until that question is answered."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, alert_id):
+        from django.utils import timezone
+
+        alert = Alert.objects.select_related("recipient", "sender").get(id=alert_id, recipient=request.user)
+        told = services.mark_seen(request.user, alert, tell=True)
+        question = services.alert_question(alert)
+        if not (question and question.get("kind") == "promise") and not alert.acknowledged_at:
+            alert.acknowledged_at = timezone.now()
+            alert.save(update_fields=["acknowledged_at"])
+        to, to_hi = services.giver_words(told.recipient) if told else ("", "")
+        return Response({"seen": True, "told_to": to, "told_to_hi": to_hi, "question": question,
+                         "item": services.alert_item(alert, lang.current(request.user))})
+
+
+class AlertAnswerView(APIView):
+    """The words said after JARVIS asked about work between people (by when, can't do it, ring again, give it to
+    someone else). handled = False: the words were about something else; the phone treats them as a new sentence."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, alert_id):
+        from . import promises
+
+        alert = Alert.objects.select_related("recipient", "sender").get(id=alert_id, recipient=request.user)
+        text = str((request.data or {}).get("text") or "")[:1000] if isinstance(request.data, dict) else ""
+        return Response(promises.answer(request.user, alert, text))
+
+
+class TaskHistoryView(APIView):
+    """A work item's history: who gave it, when it was seen, the time promised, moves, who else got it, done."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request, task_id):
+        task = services.visible_shared_qs(request.user).get(id=task_id)
+        return Response({"results": services.task_history(task)})

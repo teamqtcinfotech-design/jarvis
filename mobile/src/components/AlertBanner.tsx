@@ -59,7 +59,7 @@ export function AlertBanner() {
           <View style={{ flex: 1 }}>
             <Txt variant="label" style={{ color }}>
               {isRequest ? 'Incoming task' : item.alertKind === 'TASK_ASSIGNED' ? 'New task' : item.personal ? 'Message' : item.source === 'server' ? 'Update' : `${priorityLabel[item.priority]} reminder`}
-              {item.mode === 'silent' ? ' · silent' : ''}
+              {item.ring ? ' · rings until seen' : item.mode === 'silent' ? ' · silent' : ''}
               {item.followups ? ` · repeat ${item.followups}` : ''}
             </Txt>
             <Txt variant="heading" numberOfLines={3} style={{ marginTop: 2 }}>{title}</Txt>
@@ -79,6 +79,13 @@ export function AlertBanner() {
               <Button title={later} kind="ghost" compact onPress={() => engine.snooze(item).catch(() => undefined)} />
               <Button title="Decline" kind="danger" compact onPress={() => engine.decideRequest(item, false)} style={{ marginLeft: 6 }} />
               <Button title="Accept" icon="checkmark" compact onPress={() => engine.decideRequest(item, true)} style={{ marginLeft: 6 }} />
+            </>
+          ) : item.ring ? (
+            // Ring until seen: Seen stops the ringing everywhere and tells whoever sent it (for work, JARVIS then
+            // asks by when). Later also counts as seen; it comes back at that time.
+            <>
+              <Button title={later} kind="ghost" compact onPress={() => engine.snooze(item).catch(() => undefined)} />
+              <Button title={item.seenLabel || 'Seen'} icon="eye-outline" compact onPress={() => engine.markSeen(item)} style={{ marginLeft: 6 }} />
             </>
           ) : item.source === 'reminder' ? (
             <>

@@ -470,6 +470,20 @@ function AlertsSection() {
         <Chip label="Phone's sound" selected={prefs.reminderSound === 'default'} onPress={() => update({ reminderSound: 'default' })} />
         <Chip label="Silent · vibrate" selected={prefs.reminderSound === 'silent'} onPress={() => update({ reminderSound: 'silent' })} />
       </View>
+      <Row
+        title="Ring until I tap Seen"
+        detail={prefs.ringUntilSeen
+          ? `Work and messages from the team ring every ${prefs.ringEveryMinutes} min (urgent every ${prefs.ringUrgentEveryMinutes} min) until you tap Seen. After ${prefs.ringForMinutes} min the sender hears it was not seen.`
+          : 'Off: work and messages arrive once, as before. The sender still sees when you open them.'}
+        right={<Switch value={prefs.ringUntilSeen} onValueChange={(v) => update({ ringUntilSeen: v })} trackColor={{ true: colors.gold }} />}
+      />
+      {prefs.ringUntilSeen ? (
+        <View style={s.chips}>
+          {[2, 5, 10, 15].map((m) => (
+            <Chip key={m} label={`Every ${m} min`} selected={prefs.ringEveryMinutes === m} onPress={() => update({ ringEveryMinutes: m })} />
+          ))}
+        </View>
+      ) : null}
       <Row title="Treat me as away after" detail="If the phone hasn't moved for this long, reminders wait until you pick it up." />
       <View style={s.chips}>
         {[1, 5, 10, 15, 30].map((m) => (

@@ -52,6 +52,11 @@ export interface Prefs {
   reminderSound: 'default' | 'silent';
   /** Talking over JARVIS while it speaks stops it and it listens, like a person. Off if the room echoes. */
   bargeIn: boolean;
+  /** Ring until seen: work and messages from the team ring this phone until Seen is tapped (the receiver's rules). */
+  ringUntilSeen: boolean;
+  ringEveryMinutes: number;
+  ringUrgentEveryMinutes: number;
+  ringForMinutes: number;
 }
 
 export interface RoutineBlock {
@@ -89,6 +94,10 @@ const DEFAULTS: Prefs = {
   snoozeMinutes: 15,
   reminderSound: 'default',
   bargeIn: true,
+  ringUntilSeen: true,
+  ringEveryMinutes: 5,
+  ringUrgentEveryMinutes: 1,
+  ringForMinutes: 30,
 };
 
 const KEY = 'jarvis.prefs';

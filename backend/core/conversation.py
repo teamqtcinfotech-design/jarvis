@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import date, datetime, time, timedelta
 
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.utils import timezone
 
 from . import actions, ai_brain, assistant, services
@@ -134,6 +134,21 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         return _resp(f"{address}?", *_twin(lang_mod.current(user), f"जी {address_hi}?"), listen=True, action="nudge")
     state["history"].append({"role": "user", "text": text})
     pending, choices, offer, asked = state.get("pending"), state.get("choices"), state.get("offer"), state.get("asked")
+
+    # The answer to "Shall I tell Sir when you'll do it?", "Ring again, or give it to someone else?" or "Shall I give
+    # it to someone else?": free words ("kal shaam tak", "Sunil ko de do"), read on their own (core/promises.py).
+    if asked and asked.get("kind") == "alert" and asked.get("id"):
+        out = _free_answer(user, asked, text)
+        if out is not None and not out.get("handled"):
+            state["asked"] = asked = None  # about something else: the sentence is understood as itself below
+        elif out is not None:
+            state["asked"] = {**asked, "question": out["ask"].get("en", "")} if out.get("ask") else None
+            resp = _resp(out["show"], out["say"] if out["lang"] == "hi" else "", out["lang"], listen=True,
+                         action="asking" if out.get("ask") else "saved")
+            state["history"].append({"role": "jarvis", "text": resp["show"]})
+            state["history"] = state["history"][-MAX_HISTORY:]
+            _save(user, state)
+            return resp
 
     previous, awaiting = "", ""
     if asked:
@@ -283,6 +298,21 @@ def _task_data(p: dict) -> dict:
 
 
 # ------------------------------------------------------------------ answering what the background part asked
+def _free_answer(user: User, asked: dict, text: str) -> dict | None:
+    """The words after a question that takes free words (see core/promises.py): None when the question is not one of
+    those; {"handled": False} when the words were about something else (then they are a sentence of their own)."""
+    from . import promises  # local import: promises imports the AI client
+
+    try:
+        alert = Alert.objects.filter(id=asked.get("id"), recipient=user).first()
+    except (ValueError, ValidationError):
+        return None
+    q = services.alert_question(alert) if alert else None
+    if not q or q.get("kind") not in promises.FREE_KINDS:
+        return None
+    return promises.answer(user, alert, text)
+
+
 def _task_ref_from_key(key: str) -> dict | None:
     """A reminder key ("private:<id>:t1700000000:due") -> the task it is about, with its current version."""
     parts = (key or "").split(":")
@@ -345,11 +375,13 @@ def _answer_asked(user: User, asked: dict, yes: bool, address: str, address_hi: 
                         {"due_date": q.get("to") or (tu.today_local() + timedelta(days=1)).isoformat()}, "Moved from the morning briefing")
             line = (f"Moved {t.get('title', title)} to tomorrow, {address}.", f"{t.get('title', title)} कल पर ले गया, {address_hi}।")
         elif q.get("kind") == "seen" and yes:
-            told = services.tell_sender_seen(user, alert)
+            told = services.mark_seen(user, alert, tell=True)
             to, to_hi = services.giver_words(told.recipient) if told else (sir, sir_hi)
             line = (f"Told {to}, {address}.", f"{to_hi} को बता दिया, {address_hi}।")
         else:
             line = (f"Okay {address}.", f"ठीक है {address_hi}।")
+        if alert.ring and alert.seen_at is None:
+            services.mark_seen(user, alert, tell=False)  # answered: it was seen ("no" = nobody is told)
         if not alert.acknowledged_at:
             alert.acknowledged_at = timezone.now()
             alert.save(update_fields=["acknowledged_at"])

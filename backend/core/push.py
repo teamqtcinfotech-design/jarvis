@@ -119,6 +119,7 @@ def payload_for(alert: Alert) -> dict[str, str]:
     spoken = alert.spoken_text_hi if hindi and alert.spoken_text_hi else alert.spoken_text
     title = services.alert_title_hi(alert) if hindi else alert.title
     question = services.alert_question(alert)
+    ringing = services.ringing_now(alert)
     # A long message (minutes of speaking) does not fit in one push: the push carries as much as fits (Hindi letters
     # take three bytes each) and the phone reads the whole message from the alert list when it is opened.
     return {
@@ -136,6 +137,11 @@ def payload_for(alert: Alert) -> dict[str, str]:
         # under (a snoozed alert that comes back is a new announcement).
         "question": json.dumps(question, ensure_ascii=False) if question else "",
         "announce_key": f"alert:{alert.id}" + (f":s{int(alert.snoozed_until.timestamp())}" if alert.snoozed_until else ""),
+        # Ring until seen (see core/ringing.py): this delivery is the first ring, with the Seen button.
+        "ring": "1" if ringing else "",
+        "ring_no": str(alert.rings) if ringing else "",
+        "quiet": "1" if ringing and services.get_prefs(alert.recipient).get("meetingMode") else "",
+        "seen_label": ("देख लिया" if hindi else "Seen") if ringing else "",
     }
 
 

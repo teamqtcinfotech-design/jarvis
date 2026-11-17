@@ -2,6 +2,7 @@
 
     python manage.py taskpanel_worker
 
+- rings work and messages again until they are seen (core/ringing.py), and pushes reminders at their moment
 - delivers queued / unconfirmed task commands (same command id on every retry)
 - pulls TaskPanel's change feed: every 5 s in working hours, every 30 s otherwise
 - refreshes the staff directory every 60 s
@@ -14,7 +15,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 
-from core import followups, reminderpush
+from core import followups, reminderpush, ringing
 from core import timeutils as tu
 from core.taskpanel import dispatcher, sync
 
@@ -43,6 +44,11 @@ class Command(BaseCommand):
                 pushed = reminderpush.run()
                 if pushed:
                     self.stdout.write(f"{tu.now_local():%H:%M:%S}  pushed {pushed} reminder(s)")
+                # Ring until seen: work and messages ring again until the person taps Seen (core/ringing.py).
+                rang = ringing.run()
+                if any(rang.values()):
+                    self.stdout.write(f"{tu.now_local():%H:%M:%S}  rang {rang['rung']}, stopped {rang['stopped']}, "
+                                      f"not seen {rang['given_up']}")
                 if now - last_follow >= FOLLOWUP_EVERY_SECONDS:
                     raised = followups.run()
                     last_follow = now
