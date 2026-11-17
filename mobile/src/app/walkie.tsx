@@ -60,9 +60,19 @@ function WalkieScreen() {
     : w.people), [preview, dash?.team, w.people]);
   const everyone = people.filter((p) => p.status !== 'off').map((p) => p.id);
 
-  // A talk I am in (someone spoke to me): the selection is its members, so Hold replies to them.
+  // The people picked are always the speaker's choice. When a talk reaches this phone, its people are picked for
+  // the reply, but they can be changed at any time: a press to the same people replies in that talk, a press to
+  // different people starts a new talk with them.
   const inTalk = !!w.talk;
-  const to = inTalk ? w.members.filter((id) => id !== w.you) : selected;
+  const others = useMemo(() => w.members.filter((id) => id !== w.you), [w.members, w.you]);
+  const [lastTalk, setLastTalk] = useState('');
+  if (w.talk && w.talk !== lastTalk) {
+    // A new talk reached this phone: its people are picked (React's way to adjust state when a value changes).
+    setLastTalk(w.talk);
+    if (others.length) setSelected(others);
+  }
+  const to = selected;
+  const sameAsTalk = inTalk && others.length > 0 && to.length === others.length && others.every((id) => to.includes(id));
   const names = (ids: number[]) => ids.map((id) => people.find((p) => p.id === id)?.name ?? '').filter(Boolean);
 
   // The button's glow follows the voice while talking; the other side's avatar pulses while they talk.
@@ -86,7 +96,7 @@ function WalkieScreen() {
   const down = () => {
     if (holdRef.current) return;
     holdRef.current = true;
-    if (inTalk) w.reply();
+    if (sameAsTalk) w.reply();
     else w.talkStart(to);
   };
   const up = () => {
@@ -97,7 +107,7 @@ function WalkieScreen() {
   const toggle = (id: number) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   const pick = (ids: number[]) => setSelected(ids);
 
-  const canTalk = w.enabled && w.supported && (inTalk || to.length > 0) && w.state !== 'listening' && w.state !== 'busy';
+  const canTalk = w.enabled && w.supported && to.length > 0 && w.state !== 'listening' && w.state !== 'busy';
   const status =
     preview ? 'Preview · live talk comes with the new app'
     : !w.enabled ? 'Switched off in Settings'
@@ -108,7 +118,7 @@ function WalkieScreen() {
     : !w.connected ? 'Connecting…'
     : to.length ? `Ready · ${names(to).join(', ')}`
     : 'Pick who to talk to';
-  const buttonLabel = w.state === 'listening' ? 'LISTENING' : inTalk ? 'HOLD TO\nREPLY' : 'HOLD TO\nTALK';
+  const buttonLabel = w.state === 'listening' ? 'LISTENING' : sameAsTalk ? 'HOLD TO\nREPLY' : 'HOLD TO\nTALK';
   const buttonColor = w.state === 'listening' ? colors.success : w.state === 'talking' ? colors.danger : canTalk ? colors.accent : colors.faint;
 
   return (
@@ -123,22 +133,26 @@ function WalkieScreen() {
 
       <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
         <View style={s.toRow}>
-          <Txt variant="label">{inTalk ? 'In a talk with' : 'To'}</Txt>
+          <Txt variant="label">To</Txt>
           <Txt variant="heading" numberOfLines={2} style={{ flex: 1, marginLeft: 10 }}>{names(to).join(', ') || 'nobody yet'}</Txt>
-          {!inTalk && selected.length ? (
-            <Pressable onPress={() => setSelected([])} hitSlop={8}><Icon name="close-circle" size={20} color={colors.faint} /></Pressable>
+          {selected.length ? (
+            <Pressable onPress={() => setSelected([])} hitSlop={8} accessibilityLabel="Clear"><Icon name="close-circle" size={20} color={colors.faint} /></Pressable>
           ) : null}
         </View>
-
-        {!inTalk ? (
-          <View style={s.chips}>
-            <Chip label="Everyone" icon="people-outline" selected={everyone.length > 0 && everyone.every((id) => selected.includes(id))} onPress={() => pick(everyone)} />
-            {management.length ? <Chip label="Management" icon="briefcase-outline" selected={management.every((id) => selected.includes(id))} onPress={() => pick(management)} /> : null}
-            {departments.map(([name, ids]) => (
-              <Chip key={name} label={name} icon="git-network-outline" selected={ids.every((id) => selected.includes(id))} onPress={() => pick(ids)} />
-            ))}
-          </View>
+        {inTalk && others.length ? (
+          <Txt variant="caption" style={{ marginTop: 6, marginLeft: 4 }}>
+            {sameAsTalk ? `Replying in the talk with ${names(others).join(', ')}. Pick someone else to start a new talk.`
+              : `This starts a new talk; the one with ${names(others).join(', ')} stays open for a while.`}
+          </Txt>
         ) : null}
+
+        <View style={s.chips}>
+          <Chip label="Everyone" icon="people-outline" selected={everyone.length > 0 && everyone.every((id) => selected.includes(id))} onPress={() => pick(everyone)} />
+          {management.length ? <Chip label="Management" icon="briefcase-outline" selected={management.every((id) => selected.includes(id))} onPress={() => pick(management)} /> : null}
+          {departments.map(([name, ids]) => (
+            <Chip key={name} label={name} icon="git-network-outline" selected={ids.every((id) => selected.includes(id))} onPress={() => pick(ids)} />
+          ))}
+        </View>
 
         <View style={s.people}>
           {people.map((p) => {
@@ -146,7 +160,7 @@ function WalkieScreen() {
             const on = to.includes(p.id);
             const speaking = w.state === 'listening' && p.name === w.incomingFrom;
             return (
-              <Pressable key={p.id} onPress={() => !inTalk && toggle(p.id)} disabled={inTalk || p.status === 'off'} style={({ pressed }) => [s.person, on && s.personOn, pressed && { opacity: 0.7 }]}>
+              <Pressable key={p.id} onPress={() => toggle(p.id)} disabled={p.status === 'off'} style={({ pressed }) => [s.person, on && s.personOn, pressed && { opacity: 0.7 }]}>
                 <Animated.View style={[s.avatar, { backgroundColor: on ? colors.accent : colors.surfaceAlt }, speaking && { transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] }) }] }]}>
                   <Txt variant="heading" style={{ color: on ? colors.white : colors.text }}>{p.name.slice(0, 1).toUpperCase()}</Txt>
                 </Animated.View>
@@ -183,7 +197,7 @@ function WalkieScreen() {
           </Pressable>
         </View>
         {w.note && w.state !== 'busy' ? <Txt variant="caption" style={{ textAlign: 'center', marginTop: 10 }}>{w.note}</Txt> : null}
-        {inTalk ? (
+        {sameAsTalk && others.length > 1 ? (
           <Txt variant="caption" style={{ textAlign: 'center', marginTop: 8 }}>Your reply goes to everyone in this talk.</Txt>
         ) : null}
       </View>
