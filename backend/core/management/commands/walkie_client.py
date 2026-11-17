@@ -250,8 +250,8 @@ class Line:
                 self.log("line closed")
             except ConnectionClosed as e:
                 self.log(f"line dropped ({e.__class__.__name__}: {e}); back in 3 s")
-            except OSError as e:
-                self.log(f"could not connect ({e}); again in 3 s")
+            except Exception as e:  # noqa: BLE001  (refused, 502 while the relay restarts, DNS…)
+                self.log(f"could not connect ({e.__class__.__name__}: {e}); again in 3 s")
             self.ws = None
             self.talk_id = ""
             await asyncio.sleep(3)
