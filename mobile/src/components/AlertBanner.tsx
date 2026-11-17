@@ -1,12 +1,71 @@
-import React, { useEffect, useState } from 'react';
+/**
+ * The banner at the top of the screen: what is waiting for him right now.
+ *
+ *  - The most important item is the big card: who it is from, how long ago, its priority, and its one or two
+ *    buttons (Seen / Later for work and messages that ring until seen; Accept / Decline for a request; Done / Got
+ *    it for a reminder).
+ *  - Everything else waiting sits beneath it as a short stack, ordered by priority (urgent first), each row with
+ *    its colour, who it is from, and its own quick Seen. A tap on a row brings it to the front.
+ *  - A ringing item shows a pulsing dot; an urgent one a soft red glow. Nothing here is a plain "Got it" for
+ *    work or a message from the team: those stay until Seen.
+ */
+import React, { useEffect, useMemo, useState } from 'react';
 import { Animated, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useAlertEngine } from '@/lib/alertEngine';
+import { type EngineItem, useAlertEngine } from '@/lib/alertEngine';
+import { relativeAgo } from '@/lib/format';
 import { usePrefs } from '@/lib/prefs';
 import { colors, kindIcon, priorityColor, priorityLabel, radius, shadow } from '@/lib/theme';
 
 import { Button, Icon, Txt } from './ui';
+
+const MAX_ROWS = 3;
+
+/** "Incoming task" / "New task" / "Message" / "Update" / "Urgent reminder". */
+function labelOf(item: EngineItem): string {
+  if (item.alertKind === 'NEW_REQUEST' && item.requestId) return 'Incoming task';
+  if (item.alertKind === 'TASK_ASSIGNED') return 'New task';
+  if (item.personal) return 'Message';
+  if (item.source === 'server') return 'Update';
+  return `${priorityLabel[item.priority]} reminder`;
+}
+
+function iconOf(item: EngineItem): string {
+  if (item.alertKind === 'NEW_REQUEST' && item.requestId) return 'mail-unread-outline';
+  if (item.personal && item.alertKind !== 'TASK_ASSIGNED') return 'chatbubble-ellipses-outline';
+  if (item.source === 'server') return 'notifications-outline';
+  return kindIcon[item.kind ?? 'TASK'] ?? 'alarm-outline';
+}
+
+/** The first letter of whoever it is from, in a round badge of the item's priority colour. */
+function Avatar({ item, size = 34 }: { item: EngineItem; size?: number }) {
+  const color = priorityColor[item.priority];
+  const letter = (item.from || '').trim().charAt(0).toUpperCase();
+  return (
+    <View style={[s.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: color }]}>
+      {letter ? (
+        <Txt variant="heading" style={{ color: colors.white, fontSize: size * 0.46, lineHeight: size * 0.56 }}>{letter}</Txt>
+      ) : (
+        <Icon name={iconOf(item)} size={size * 0.52} color={colors.white} />
+      )}
+    </View>
+  );
+}
+
+/** A small pulsing dot: this item rings until Seen. */
+function RingDot({ color }: { color: string }) {
+  const [pulse] = useState(() => new Animated.Value(0.35));
+  useEffect(() => {
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 650, useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0.35, duration: 650, useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+  return <Animated.View style={[s.dot, { backgroundColor: color, opacity: pulse }]} />;
+}
 
 export function AlertBanner() {
   const engine = useAlertEngine();
@@ -15,64 +74,79 @@ export function AlertBanner() {
   // "Later" = the person's usual snooze, learned from what they say by voice ("10 minute baad").
   const later = `Later · ${prefs.snoozeMinutes}m`;
   const insets = useSafeAreaInsets();
-  const [slide] = useState(() => new Animated.Value(-260));
+  const [slide] = useState(() => new Animated.Value(-320));
   const [glow] = useState(() => new Animated.Value(0));
-  const flashing = Boolean(item?.personal);
+  const urgent = item?.priority === 'URGENT';
+  const others = useMemo(() => engine.waiting.filter((w) => w.key !== item?.key), [engine.waiting, item?.key]);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
-    Animated.spring(slide, { toValue: item ? 0 : -260, useNativeDriver: true, friction: 9 }).start();
+    Animated.spring(slide, { toValue: item ? 0 : -320, useNativeDriver: true, friction: 9 }).start();
   }, [item, slide]);
 
-  // A message or a task from one of the three keeps flashing until it is answered or tapped "Got it".
+  // An urgent item breathes a soft glow until it is dealt with.
   useEffect(() => {
-    if (!flashing) {
+    if (!urgent) {
       glow.setValue(0);
       return undefined;
     }
     const loop = Animated.loop(Animated.sequence([
-      Animated.timing(glow, { toValue: 1, duration: 550, useNativeDriver: true }),
-      Animated.timing(glow, { toValue: 0, duration: 550, useNativeDriver: true }),
+      Animated.timing(glow, { toValue: 1, duration: 900, useNativeDriver: true }),
+      Animated.timing(glow, { toValue: 0.15, duration: 900, useNativeDriver: true }),
     ]));
     loop.start();
     return () => loop.stop();
-  }, [flashing, glow]);
+  }, [urgent, glow]);
 
   if (!item) return null;
   const isRequest = item.alertKind === 'NEW_REQUEST' && Boolean(item.requestId);
   const color = priorityColor[item.priority];
   const title = item.concealed ? (item.priority === 'URGENT' ? 'Urgent private reminder' : 'Private reminder') : item.title;
+  const rows = showAll ? others : others.slice(0, MAX_ROWS);
+  const more = others.length - rows.length;
 
   return (
     <Animated.View style={[s.wrap, { top: insets.top + 8, transform: [{ translateY: slide }] }]} pointerEvents="box-none">
       <View style={[s.card, { borderLeftColor: color }]}>
-        {flashing ? (
-          <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, s.flash, { borderColor: color, opacity: glow }]} />
+        {urgent ? (
+          <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, s.glow, { borderColor: color, opacity: glow }]} />
         ) : null}
+
+        {/* who, when, what kind */}
         <View style={s.head}>
-          <View style={[s.iconWrap, { backgroundColor: color }]}>
-            <Icon
-              name={isRequest ? 'mail-unread-outline' : item.source === 'server' ? 'notifications-outline' : kindIcon[item.kind ?? 'TASK'] ?? 'alarm-outline'}
-              size={18}
-              color={colors.white}
-            />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Txt variant="label" style={{ color }}>
-              {isRequest ? 'Incoming task' : item.alertKind === 'TASK_ASSIGNED' ? 'New task' : item.personal ? 'Message' : item.source === 'server' ? 'Update' : `${priorityLabel[item.priority]} reminder`}
+          <Avatar item={item} />
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <View style={s.metaRow}>
+              {item.ring ? <RingDot color={color} /> : null}
+              <Txt variant="label" style={{ color }} numberOfLines={1}>
+                {labelOf(item)}{item.from ? ` · ${item.from}` : ''}
+              </Txt>
+            </View>
+            <Txt variant="caption" numberOfLines={1}>
+              {relativeAgo(item.fireAt)}
+              {item.priority === 'URGENT' || item.priority === 'HIGH' ? ` · ${priorityLabel[item.priority]}` : ''}
               {item.ring ? ' · rings until seen' : item.mode === 'silent' ? ' · silent' : ''}
               {item.followups ? ` · repeat ${item.followups}` : ''}
             </Txt>
-            <Txt variant="heading" numberOfLines={3} style={{ marginTop: 2 }}>{title}</Txt>
-            {!item.concealed && item.body ? <Txt variant="small" numberOfLines={2}>{item.body}</Txt> : null}
           </View>
-          {engine.queued > 0 ? <Txt variant="caption">+{engine.queued}</Txt> : null}
+          {others.length ? (
+            <View style={[s.countPill, { backgroundColor: color }]}>
+              <Txt variant="caption" style={{ color: colors.white, fontWeight: '700' }}>+{others.length}</Txt>
+            </View>
+          ) : null}
         </View>
+
+        <Txt variant="heading" numberOfLines={3} style={{ marginTop: 10 }}>{title}</Txt>
+        {!item.concealed && item.body && item.body !== item.title ? (
+          <Txt variant="small" numberOfLines={3} style={{ marginTop: 4 }}>{item.body}</Txt>
+        ) : null}
         {item.concealed ? (
           <Pressable onPress={engine.reveal} style={s.reveal}>
             <Icon name="eye-outline" size={16} color={colors.inkSoft} />
             <Txt variant="small" style={{ marginLeft: 6, color: colors.inkSoft }}>Tap to reveal</Txt>
           </Pressable>
         ) : null}
+
         <View style={s.actions}>
           {isRequest ? (
             <>
@@ -98,6 +172,46 @@ export function AlertBanner() {
           )}
         </View>
       </View>
+
+      {/* the rest, as a stack beneath: most urgent first, each with its own quick Seen */}
+      {others.length ? (
+        <View style={s.stack}>
+          <View style={s.stackHead}>
+            <Txt variant="label" style={{ color: colors.inkSoft }}>ALSO WAITING · {others.length}</Txt>
+            {others.length > MAX_ROWS ? (
+              <Pressable onPress={() => setShowAll((v) => !v)} hitSlop={8}>
+                <Txt variant="caption" style={{ color: colors.gold }}>{showAll ? 'Fewer' : `All ${others.length}`}</Txt>
+              </Pressable>
+            ) : null}
+          </View>
+          {rows.map((w) => {
+            const c = priorityColor[w.priority];
+            return (
+              <Pressable key={w.key} onPress={() => engine.focus(w)} style={({ pressed }) => [s.row, pressed && { opacity: 0.7 }]}>
+                <View style={[s.bar, { backgroundColor: c }]} />
+                <Avatar item={w} size={26} />
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Txt variant="small" numberOfLines={1} style={{ fontWeight: '600' }}>
+                    {w.concealed ? 'Private reminder' : w.title}
+                  </Txt>
+                  <Txt variant="caption" numberOfLines={1}>
+                    {labelOf(w)}{w.from ? ` · ${w.from}` : ''} · {relativeAgo(w.fireAt)}
+                    {w.priority === 'URGENT' || w.priority === 'HIGH' ? ` · ${priorityLabel[w.priority]}` : ''}
+                  </Txt>
+                </View>
+                {w.ring ? (
+                  <Pressable onPress={() => engine.markSeen(w)} hitSlop={8} style={[s.quickSeen, { borderColor: c }]} accessibilityLabel={w.seenLabel || 'Seen'}>
+                    <Icon name="eye-outline" size={15} color={c} />
+                  </Pressable>
+                ) : (
+                  <Icon name="chevron-forward" size={16} color={colors.faint} />
+                )}
+              </Pressable>
+            );
+          })}
+          {more > 0 ? <Txt variant="caption" style={{ marginTop: 4, marginLeft: 14 }}>and {more} more</Txt> : null}
+        </View>
+      ) : null}
     </Animated.View>
   );
 }
@@ -113,9 +227,39 @@ const s = StyleSheet.create({
     shadowOpacity: 0.2,
     elevation: 12,
   },
-  head: { flexDirection: 'row', alignItems: 'flex-start' },
-  flash: { borderRadius: radius.lg, borderWidth: 3 },
-  iconWrap: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  glow: { borderRadius: radius.lg, borderWidth: 3 },
+  head: { flexDirection: 'row', alignItems: 'center' },
+  metaRow: { flexDirection: 'row', alignItems: 'center' },
+  avatar: { alignItems: 'center', justifyContent: 'center' },
+  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+  countPill: { minWidth: 30, height: 22, borderRadius: 11, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
   reveal: { flexDirection: 'row', alignItems: 'center', marginTop: 10, marginLeft: 46 },
   actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
+  // the stack beneath: a little narrower, so it reads as cards under the first one
+  stack: {
+    marginHorizontal: 8,
+    backgroundColor: colors.surfaceAlt,
+    borderBottomLeftRadius: radius.lg,
+    borderBottomRightRadius: radius.lg,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 6,
+    ...shadow,
+    shadowOpacity: 0.12,
+    elevation: 6,
+  },
+  stackHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 6, marginBottom: 2 },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    paddingVertical: 8,
+    paddingRight: 10,
+    paddingLeft: 10,
+    marginTop: 6,
+    overflow: 'hidden',
+  },
+  bar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4 },
+  quickSeen: { width: 32, height: 32, borderRadius: 16, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
 });

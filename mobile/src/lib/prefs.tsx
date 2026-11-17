@@ -95,7 +95,7 @@ const DEFAULTS: Prefs = {
   reminderSound: 'default',
   bargeIn: true,
   ringUntilSeen: true,
-  ringEveryMinutes: 5,
+  ringEveryMinutes: 10,
   ringUrgentEveryMinutes: 1,
   ringForMinutes: 30,
 };

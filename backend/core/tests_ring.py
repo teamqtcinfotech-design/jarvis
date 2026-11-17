@@ -26,8 +26,9 @@ class RingUntilSeenTests(BaseCase):
         self.kiran = services.team_add(self.md, {"name": "Kiran", "title": "Farm Manager", "department": "Farm",
                                                  "username": "kiran", "password": "kiran1"})
         # Time-of-day independent: nobody is in quiet hours while the tests run (one test sets them on purpose).
+        # Rings every 5 minutes here (the default is 10), so a 30-minute story fits in six rings.
         for u in (self.md, self.pa, self.sunil, self.kiran):
-            services.set_prefs(u, {"quietHoursEnabled": False})
+            services.set_prefs(u, {"quietHoursEnabled": False, "ringEveryMinutes": 5})
         self.sunil_client = APIClient()
         self.sunil_client.force_authenticate(self.sunil)
         self.kiran_client = APIClient()
@@ -56,11 +57,12 @@ class RingUntilSeenTests(BaseCase):
         return [d for u, d in self.sent if d.get("type") == kind and (to is None or u == to)]
 
     # ---------------------------------------------------------------- ringing
-    def test_given_work_rings_every_five_minutes_urgent_every_minute_and_low_not_at_all(self):
+    def test_given_work_rings_every_ten_minutes_urgent_every_minute_and_low_not_at_all(self):
+        self.assertEqual(services.pref_defaults()["ringEveryMinutes"], 10)
         _task, alert = self.give()
         self.assertTrue(alert.ring)
         self.assertEqual(alert.rings, 1)  # the alert itself is the first ring
-        self.assertAlmostEqual((alert.next_ring_at - alert.ring_started_at).total_seconds(), 300, delta=2)
+        self.assertAlmostEqual((alert.next_ring_at - alert.ring_started_at).total_seconds(), 300, delta=2)  # 5 here (setUp)
         _t, urgent = self.give("Pay the electricity bill", Priority.URGENT)
         self.assertAlmostEqual((urgent.next_ring_at - urgent.ring_started_at).total_seconds(), 60, delta=2)
         _t, low = self.give("Sort the old files", Priority.LOW)
@@ -84,7 +86,8 @@ class RingUntilSeenTests(BaseCase):
             self.assertEqual(alert.rings, n)
         rings = self.pushes("ring", "sunil")
         self.assertEqual(len(rings), 5)
-        self.assertEqual(rings[-1]["ring_no"], "6")
+        self.assertEqual(rings[-1]["count"], "1")
+        self.assertEqual(json.loads(rings[-1]["items"])[0]["ring_no"], 6)
         self.assertIn("Send the GST file", rings[-1]["body"])
         # 30 minutes: it stops and the MD is asked.
         out = ringing.run(alert.ring_started_at + timedelta(minutes=30, seconds=2))
@@ -97,6 +100,41 @@ class RingUntilSeenTests(BaseCase):
         self.assertEqual(services.alert_question(unseen)["kind"], "unseen")
         self.assertIn("give it to someone else", services.alert_question(unseen)["en"])
         self.assertTrue(TaskEvent.objects.filter(task=task, kind="NOT_SEEN").exists())
+
+    def test_everything_waiting_rings_together_as_one_ting(self):
+        t1, a1 = self.give("Send the GST file")
+        t2, a2 = self.give("Call the auditor", Priority.HIGH, by=self.kiran)
+        self.sent.clear()
+        # a1 is due; a2 (a minute younger, not yet due) rings with it: one push, both counted, clocks aligned.
+        Alert.objects.filter(id=a2.id).update(next_ring_at=a1.next_ring_at + timedelta(minutes=1))
+        out = ringing.run(a1.next_ring_at + timedelta(seconds=1))
+        self.assertEqual((out["rung"], out["pushes"]), (2, 1))
+        push_ = self.pushes("ring", "sunil")[-1]
+        items = json.loads(push_["items"])
+        self.assertEqual(push_["count"], "2")
+        self.assertEqual([i["title"] for i in items][0], "New task from Kiran")  # the HIGH one first
+        self.assertIn("2 waiting for you", push_["title"])
+        self.assertIn("Sir: ", push_["body"])
+        a1.refresh_from_db()
+        a2.refresh_from_db()
+        self.assertEqual((a1.rings, a2.rings), (2, 2))
+        self.assertEqual(a1.next_ring_at, a2.next_ring_at)
+        # An urgent item among them: every minute for all of it; once it is seen, back to the usual interval.
+        _t3, a3 = self.give("Server is down", Priority.URGENT, by=self.kiran)
+        out = ringing.run(a1.next_ring_at + timedelta(seconds=1))
+        self.assertEqual(out["pushes"], 1)
+        a1.refresh_from_db()
+        a3.refresh_from_db()
+        self.assertEqual(a1.next_ring_at, a3.next_ring_at)
+        at = a1.next_ring_at - timedelta(minutes=1)  # the pass that just ran
+        self.assertAlmostEqual((a3.next_ring_at - at).total_seconds(), 60, delta=2)
+        services.mark_seen(self.sunil, Alert.objects.get(id=a3.id))
+        at = a1.next_ring_at + timedelta(seconds=1)
+        out = ringing.run(at)
+        self.assertEqual(out["stopped"], 1)  # a3's ringing stopped on his phones
+        a1.refresh_from_db()
+        self.assertAlmostEqual((a1.next_ring_at - at).total_seconds(), 300, delta=2)
+        self.assertTrue(TaskEvent.objects.filter(task=t1).exists() and TaskEvent.objects.filter(task=t2).exists())
 
     def test_quiet_hours_hold_a_non_urgent_ring_but_not_an_urgent_one(self):
         hour = tu.now_local().hour

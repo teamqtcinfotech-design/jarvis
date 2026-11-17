@@ -158,6 +158,9 @@ export interface ServerAlert {
   seen_at?: string | null;
   /** "Seen" / "देख लिया": the button's word in the person's language. */
   seen_label?: string;
+  /** Who it is from: the name ("Mansi") and the word a line uses ("Sir" for the MD). */
+  from_name?: string;
+  from_word?: string;
 }
 
 export interface Reminder {

@@ -155,7 +155,9 @@ def _deliver(tokens: list[str], data: dict[str, str], urgent: bool) -> list[tupl
         data=data,
         android=messaging.AndroidConfig(priority="high", ttl=TTL_SECONDS),
     )
-    response = messaging.send_each_for_multicast(message)
+    # Our app is the NAMED one ("jarvis-push"); without app= the library looks for a default app that was never
+    # made and raises "The default Firebase app does not exist" (every push failed quietly until 17 Nov 2026).
+    response = messaging.send_each_for_multicast(message, app=_app)
     out = []
     for r in response.responses:
         if r.success:

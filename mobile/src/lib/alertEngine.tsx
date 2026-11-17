@@ -12,7 +12,7 @@
  */
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 
 import { ApiError, api, newIdempotencyKey } from './api';
@@ -72,6 +72,8 @@ export interface EngineItem {
   ring?: boolean;
   /** "Seen" / "देख लिया": the button's word in the person's language. */
   seenLabel?: string;
+  /** Who it is from ("Sir", "Mansi"), for the banner. */
+  from?: string;
 }
 
 /** "while you were away" / "during your meeting" …: one phrase for the whole batch, honest about the reason. */
@@ -140,6 +142,10 @@ interface EngineValue {
   acknowledgeByRef: (refType: 'request' | 'shared_task', refId: string) => Promise<void>;
   current: EngineItem | null;
   queued: number;
+  /** Everything on screen or behind it: the current item first, the rest by priority (for the banner's stack). */
+  waiting: EngineItem[];
+  /** Bring one of the waiting items to the front of the banner. */
+  focus: (item: EngineItem) => void;
   held: EngineItem[];
   heldVisible: boolean;
   setHeldVisible: (v: boolean) => void;
@@ -232,6 +238,7 @@ function fromAlert(a: ServerAlert): EngineItem {
     question: a.question,
     ring: !!a.ring,
     seenLabel: a.seen_label || 'Seen',
+    from: a.from_word || a.from_name || '',
   };
 }
 
@@ -377,7 +384,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   });
 
   const [current, setCurrentState] = useState<EngineItem | null>(null);
-  const [queued, setQueued] = useState(0);
+  const [queued, setQueuedCount] = useState(0);
+  const [queueItems, setQueueItems] = useState<EngineItem[]>([]);
   const [held, setHeldState] = useState<EngineItem[]>([]);
   const [heldVisible, setHeldVisible] = useState(false);
   const [lastSync, setLastSync] = useState<number | null>(null);
@@ -415,6 +423,27 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     setCurrentState(item);
   }, []);
 
+  // The queue lives in a ref (the timers read it); the screen gets a copy whenever its length is reported.
+  const setQueued = useCallback((n: number) => {
+    setQueuedCount(n);
+    setQueueItems([...queueRef.current]);
+  }, []);
+
+  const focus = useCallback(
+    (item: EngineItem) => {
+      if (currentRef.current?.key === item.key) return;
+      queueRef.current = queueRef.current.filter((q) => q.key !== item.key);
+      if (currentRef.current) queueRef.current.unshift(currentRef.current);
+      setQueued(queueRef.current.length);
+      setCurrent(item);
+    },
+    [setCurrent, setQueued],
+  );
+  const waiting = useMemo(() => {
+    const rest = [...queueItems].sort((a, b) => RANK[a.priority] - RANK[b.priority] || a.fireAt - b.fireAt);
+    return current ? [current, ...rest.filter((q) => q.key !== current.key)] : rest;
+  }, [current, queueItems]);
+
   const setHeld = useCallback((items: EngineItem[]) => {
     heldRef.current = items;
     setHeldState(items);
@@ -424,7 +453,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     const next = queueRef.current.shift() ?? null;
     setQueued(queueRef.current.length);
     setCurrent(next);
-  }, [setCurrent]);
+  }, [setCurrent, setQueued]);
 
   // Private details are spoken only while the app is open on screen (and allowed), unless the MD
   // has also allowed it when the phone is locked or the app is in the background.
@@ -468,7 +497,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         });
       }
     },
-    [setCurrent],
+    [setCurrent, setQueued],
   );
 
   const deliver = useCallback(
@@ -513,7 +542,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (!presenter || !presenter(item, spokenFor(item))) speakLine(spokenFor(item), { interrupt: true });
       tell([item]);
     },
-    [setCurrent, setHeld, spokenFor, tell],
+    [setCurrent, setHeld, setQueued, spokenFor, tell],
   );
 
   /** Several things at the same moment: shown one by one, said as ONE sentence. */
@@ -746,7 +775,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       }
       if (currentRef.current && !stays(currentRef.current)) advance();
     },
-    [advance, setHeld],
+    [advance, setHeld, setQueued],
   );
 
   const scheduleOs = useCallback(async (reminders: Reminder[]) => {
@@ -921,7 +950,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       Notifications.cancelScheduledNotificationAsync(id).catch(() => undefined);
       Notifications.dismissNotificationAsync(id).catch(() => undefined);
     },
-    [advance, setHeld],
+    [advance, setHeld, setQueued],
   );
 
   const acknowledge = useCallback(
@@ -1012,7 +1041,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         return null;
       }
     },
-    [advance, setHeld],
+    [advance, setHeld, setQueued],
   );
 
   const complete = useCallback(
@@ -1144,6 +1173,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     acknowledgeByRef,
     current,
     queued,
+    waiting,
+    focus,
     held,
     heldVisible,
     setHeldVisible,

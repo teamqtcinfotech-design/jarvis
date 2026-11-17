@@ -673,10 +673,15 @@ def alert_item(alert: Alert, lang: str = "en") -> dict:
     """lang = the recipient's current language: the spoken line (and the title) come in Hindi when it is Hindi."""
     now = timezone.now()
     snoozed = alert.snoozed_until if alert.snoozed_until and alert.snoozed_until > now else None
+    sender = alert.sender
     return {
         "id": str(alert.id),
         "kind": alert.kind,
         "priority": alert.priority,
+        # Who it is from (a person on the team), for the banner: the name as JARVIS says it, and how it is said in
+        # a line ("Sir" for the MD).
+        "from_name": sender.spoken_name if sender else "",
+        "from_word": giver_words(sender)[0] if sender else "",
         "title": alert_title_hi(alert) if lang == "hi" else alert.title,
         "title_en": alert.title,
         "body": alert.body,
@@ -2307,7 +2312,7 @@ PREF_SCHEMA = {
     # every few minutes until they tap Seen; after a while the sender is told it was not seen. These are the
     # receiver's settings (it is their phone that rings). Quiet hours hold a non-urgent ring until they are over.
     "ringUntilSeen": {"type": "bool", "default": True, "say": "ring until I tap Seen (work and messages from the team)"},
-    "ringEveryMinutes": {"type": "int", "min": 2, "max": 30, "default": 5, "say": "ring again every (minutes) until seen"},
+    "ringEveryMinutes": {"type": "int", "min": 2, "max": 30, "default": 10, "say": "ring again every (minutes) until seen"},
     "ringUrgentEveryMinutes": {"type": "int", "min": 1, "max": 10, "default": 1,
                                "say": "urgent work: ring again every (minutes) until seen"},
     "ringForMinutes": {"type": "int", "min": 5, "max": 240, "default": 30,
