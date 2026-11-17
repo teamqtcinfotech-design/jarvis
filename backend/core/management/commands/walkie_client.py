@@ -255,29 +255,50 @@ class Command(BaseCommand):
         parser.add_argument("--say", default="", help="the sentence to answer with (Windows voice)")
         parser.add_argument("--talk", default="", help="start a talk TO this username (or several, comma separated) as soon as the line is open")
         parser.add_argument("--out", default="", help="folder for the saved incoming .awb files (default: a temp folder)")
+        parser.add_argument("--login", default="", help="ANOTHER server: 'username:password' + --url there (e.g. the live relay); "
+                                                        "--talk then takes user ids, not names")
 
     def handle(self, *args, **opts):
-        user = User.objects.filter(username=opts["who"], is_active=True).first()
-        if user is None:
-            raise CommandError(f"no active user '{opts['who']}'; users: " + ", ".join(User.objects.values_list("username", flat=True)))
         url = opts["url"] or getattr(settings, "JARVIS_WALKIE_URL", "") or "ws://localhost:8001/ws/walkie/"
         if not url.endswith("/walkie/"):
             url = url.rstrip("/") + "/ws/walkie/"
         out_dir = opts["out"] or os.path.join(tempfile.gettempdir(), "jarvis-walkie")
         os.makedirs(out_dir, exist_ok=True)
-        # This person has the walkie-talkie on (else the relay leaves them out of every talk).
-        if not services.get_prefs(user).get("walkieEnabled"):
-            services.set_prefs(user, {"walkieEnabled": True})
-            self.stdout.write(f"switched the walkie-talkie on for {user.spoken_name}")
         talk_to = []
-        for name in [n.strip() for n in opts["talk"].split(",") if n.strip()]:
-            other = User.objects.filter(username=name, is_active=True).first()
-            if other is None:
-                raise CommandError(f"no active user '{name}'")
-            talk_to.append(other.id)
+        if opts["login"]:
+            # Signing in to another server (the live one): its API is the same host as the relay, http(s) instead of ws(s).
+            import urllib.request  # noqa: PLC0415
+            username, _, password = opts["login"].partition(":")
+            api = url.replace("wss://", "https://").replace("ws://", "http://").split("/ws/")[0] + "/api/v1"
+            req = urllib.request.Request(f"{api}/auth/login/", data=json.dumps({"username": username, "password": password}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    token = json.loads(r.read())["access"]
+            except Exception as e:  # noqa: BLE001
+                raise CommandError(f"could not sign in at {api}: {e}") from e
+            req = urllib.request.Request(f"{api}/me/", headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                me = json.loads(r.read())
+            user = User(id=me["id"], username=username, spoken_name=me.get("name") or username)
+            self.stdout.write(f"signed in at {api} as {user.spoken_name} (id {user.id})")
+            talk_to = [int(x) for x in opts["talk"].split(",") if x.strip().isdigit()]
+        else:
+            user = User.objects.filter(username=opts["who"], is_active=True).first()
+            if user is None:
+                raise CommandError(f"no active user '{opts['who']}'; users: " + ", ".join(User.objects.values_list("username", flat=True)))
+            # This person has the walkie-talkie on (else the relay leaves them out of every talk).
+            if not services.get_prefs(user).get("walkieEnabled"):
+                services.set_prefs(user, {"walkieEnabled": True})
+                self.stdout.write(f"switched the walkie-talkie on for {user.spoken_name}")
+            for name in [n.strip() for n in opts["talk"].split(",") if n.strip()]:
+                other = User.objects.filter(username=name, is_active=True).first()
+                if other is None:
+                    raise CommandError(f"no active user '{name}'")
+                talk_to.append(other.id)
+            from rest_framework_simplejwt.tokens import AccessToken  # noqa: PLC0415
+            token = str(AccessToken.for_user(user))
         say_text = opts["say"] or DEFAULT_SAY.format(name=user.spoken_name)
-        from rest_framework_simplejwt.tokens import AccessToken  # noqa: PLC0415
-        token = str(AccessToken.for_user(user))
         line = Line(self, user, url, opts["mode"], say_text, out_dir)
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
