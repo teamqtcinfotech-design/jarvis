@@ -8,6 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { DepartmentsPanel } from '@/components/DepartmentsPanel';
 import { SectionsPanel } from '@/components/SectionsPanel';
 import { WalkiePanel } from '@/components/WalkiePanel';
+import { DevicesPanel, PersonDevices } from '@/components/DevicesPanel';
 import { Button, Card, Chip, Icon, IconButton, Tag, Txt } from '@/components/ui';
 import { useAlertEngine } from '@/lib/alertEngine';
 import { api, currentServer, deviceTokens } from '@/lib/api';
@@ -30,13 +31,14 @@ import { type WakeStatus, wakeSetListening, wakeSetVoice, wakeSettings, wakeStar
  * (`/settings?section=voice`), so nothing needs a long scroll. Nothing technical (server, sync, usage) is shown.
  */
 
-type SectionKey = 'team' | 'departments' | 'sections' | 'walkie' | 'names' | 'voice' | 'alerts' | 'routine' | 'background' | 'memory';
+type SectionKey = 'team' | 'departments' | 'sections' | 'walkie' | 'devices' | 'names' | 'voice' | 'alerts' | 'routine' | 'background' | 'memory';
 
 const SECTIONS: { key: SectionKey; title: string; detail: string; icon: string; mdOnly?: boolean }[] = [
   { key: 'team', title: 'Team', detail: 'Add people, their jobs and logins', icon: 'people-outline', mdOnly: true },
   { key: 'departments', title: 'Departments', detail: 'Groups of people, here or by voice', icon: 'git-network-outline' },
   { key: 'sections', title: 'Sections', detail: 'Folders of work: GST, Franchise…', icon: 'folder-outline' },
   { key: 'walkie', title: 'Walkie-talkie', detail: 'Live voice with the team, quiet time', icon: 'radio-outline' },
+  { key: 'devices', title: 'Devices & lock', detail: 'Where you are signed in, fingerprint', icon: 'finger-print-outline' },
   { key: 'names', title: 'Your name', detail: 'And how JARVIS addresses you', icon: 'person-circle-outline', mdOnly: true },
   { key: 'voice', title: 'Voice & language', detail: 'Hindi or English, JARVIS’s voice', icon: 'mic-outline' },
   { key: 'alerts', title: 'Reminders & alerts', detail: 'Snooze, sound, quiet hours', icon: 'notifications-outline' },
@@ -126,6 +128,7 @@ function SettingsScreen() {
           {open.key === 'departments' ? <DepartmentsPanel /> : null}
           {open.key === 'sections' ? <SectionsPanel /> : null}
           {open.key === 'walkie' ? <WalkiePanel /> : null}
+          {open.key === 'devices' ? <DevicesPanel /> : null}
           {open.key === 'names' ? <NamesSection /> : null}
           {open.key === 'voice' ? <VoiceSection /> : null}
           {open.key === 'alerts' ? <AlertsSection /> : null}
@@ -278,6 +281,8 @@ interface TeamPerson {
   gender: '' | 'male' | 'female';
   active: boolean;
   you?: boolean;
+  /** The number they sign in with ("+91 98765 43210"); the MD sees everyone's, each person their own. */
+  phone?: string;
 }
 
 const GENDERS: { id: '' | 'male' | 'female'; label: string }[] = [
@@ -324,7 +329,7 @@ function TeamSection() {
               </View>
               <View style={{ flex: 1, marginLeft: 12 }}>
                 <Txt variant="heading" style={[{ fontSize: 15 }, !p.active && { color: colors.muted }]}>{p.name}{p.you ? ' (you)' : ''}</Txt>
-                <Txt variant="small" numberOfLines={1}>{[p.title, p.department, `login: ${p.username}`].filter(Boolean).join(' · ')}</Txt>
+                <Txt variant="small" numberOfLines={1}>{[p.title, p.department, p.phone || `login: ${p.username}`].filter(Boolean).join(' · ')}</Txt>
               </View>
               {!p.active ? <Tag label="Off" color={colors.muted} /> : <Icon name={openId === p.id ? 'chevron-up' : 'chevron-down'} size={18} color={colors.faint} />}
             </Pressable>
@@ -345,6 +350,7 @@ function PersonForm({ person, onDone, onCancel }: { person?: TeamPerson; onDone:
   const [gender, setGender] = useState<'' | 'male' | 'female'>(person?.gender ?? '');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [phone, setPhone] = useState(person?.phone ?? '');
   const [busy, setBusy] = useState('');
   const [note, setNote] = useState('');
   const save = async (extra: Record<string, unknown> = {}, label = 'save') => {
@@ -352,9 +358,10 @@ function PersonForm({ person, onDone, onCancel }: { person?: TeamPerson; onDone:
     setNote('');
     try {
       if (isNew) {
-        await api('/team/', { method: 'POST', body: { name, title, department, gender, username: username.trim().toLowerCase(), password } });
+        await api('/team/', { method: 'POST', body: { name, title, department, gender, phone, username: username.trim().toLowerCase(), password } });
       } else {
         const body: Record<string, unknown> = { name, title, department, gender, ...extra };
+        if (phone !== (person.phone ?? '')) body.phone = phone;
         if (password) body.password = password;
         await api(`/team/${person.id}/`, { method: 'PATCH', body });
       }
@@ -372,6 +379,8 @@ function PersonForm({ person, onDone, onCancel }: { person?: TeamPerson; onDone:
       <TextInput value={name} onChangeText={setName} style={s.formInput} autoCapitalize="words" maxLength={40} placeholder="Sunil" placeholderTextColor={colors.faint} />
       <Txt variant="label" style={s.formLabel}>Job</Txt>
       <TextInput value={title} onChangeText={setTitle} style={s.formInput} autoCapitalize="words" maxLength={80} placeholder="Accountant, Farm Manager, Director…" placeholderTextColor={colors.faint} />
+      <Txt variant="label" style={s.formLabel}>Mobile number (they sign in with it)</Txt>
+      <TextInput value={phone} onChangeText={setPhone} style={s.formInput} keyboardType="phone-pad" maxLength={18} placeholder="98765 43210" placeholderTextColor={colors.faint} />
       <Txt variant="label" style={s.formLabel}>Department (optional)</Txt>
       <TextInput value={department} onChangeText={setDepartment} style={s.formInput} autoCapitalize="words" maxLength={80} placeholder="Accounts, Farm, Social Media…" placeholderTextColor={colors.faint} />
       <Txt variant="label" style={s.formLabel}>So JARVIS says he or she correctly</Txt>
@@ -404,6 +413,7 @@ function PersonForm({ person, onDone, onCancel }: { person?: TeamPerson; onDone:
       {!isNew && person.active && person.role !== 'MD' ? (
         <Txt variant="caption" style={{ marginTop: 6 }}>Switched off, they cannot sign in; their tasks stay and come back if you switch them on again.</Txt>
       ) : null}
+      {!isNew ? <PersonDevices userId={person.id} /> : null}
     </View>
   );
 }

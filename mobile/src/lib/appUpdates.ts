@@ -86,7 +86,7 @@ export function runningUpdateCode(): string {
   return Updates.isEnabled && !Updates.isEmbeddedLaunch && Updates.updateId ? Updates.updateId.slice(0, 8) : '';
 }
 
-async function ensureDeviceId(): Promise<string> {
+export async function ensureDeviceId(): Promise<string> {
   let id = await SecureStore.getItemAsync(K_DEVICE).catch(() => null);
   if (!id) {
     id = Crypto.randomUUID().replace(/-/g, '');

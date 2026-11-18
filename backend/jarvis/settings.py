@@ -116,7 +116,7 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework_simplejwt.authentication.JWTAuthentication"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["core.sessions.SessionAuthentication"],  # the token AND its session (core/sessions.py)
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "EXCEPTION_HANDLER": "core.views.exception_handler",
@@ -210,6 +210,9 @@ JARVIS_WALKIE_URL = os.environ.get("JARVIS_WALKIE_URL", "").rstrip("/")
 FIREBASE_SERVICE_ACCOUNT_FILE = os.environ.get("FIREBASE_SERVICE_ACCOUNT_FILE", "")
 FIREBASE_SERVICE_ACCOUNT_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON", "")
 JARVIS_PUSH_ENABLED = env_bool("JARVIS_PUSH_ENABLED", True)
+# Sign in by username + password (the old screen, the console). Phones sign in by phone number (an SMS code through
+# Firebase, Nov 2026); set this to false once every phone runs the phone sign-in, and only the OTP remains.
+JARVIS_PASSWORD_LOGIN = env_bool("JARVIS_PASSWORD_LOGIN", True)
 
 # TaskPanel connector (public_html/taskPanel integration API, signed server-to-server).
 # "mock" = built-in contract double with the same API shape; "live" = real TaskPanel.

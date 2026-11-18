@@ -199,7 +199,13 @@ export function AlertBanner() {
         ) : null}
 
         <View style={s.actions}>
-          {isRequest ? (
+          {item.question?.kind === 'signout' ? (
+            // "Signed in on another phone — not you?": the sign-out of that phone is one tap away.
+            <>
+              <Button title="It's me" kind="ghost" compact onPress={() => engine.answerQuestion(item, item.question!, false).catch(() => undefined)} />
+              <Button title="Sign it out" kind="danger" compact icon="log-out-outline" onPress={() => engine.answerQuestion(item, item.question!, true).catch(() => undefined)} style={{ marginLeft: 6 }} />
+            </>
+          ) : isRequest ? (
             <>
               <Button title={later} kind="ghost" compact onPress={() => engine.snooze(item).catch(() => undefined)} />
               <Button title="Decline" kind="danger" compact onPress={() => engine.decideRequest(item, false)} style={{ marginLeft: 6 }} />

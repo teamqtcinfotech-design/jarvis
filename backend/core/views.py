@@ -12,13 +12,13 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView, exception_handler as drf_exception_handler
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from . import ai_brain, ai_usage, assistant, conversation, datacards, lang, push, services, xai
+from . import ai_brain, ai_usage, assistant, conversation, datacards, lang, push, services, sessions, xai
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
-    Alert, IntegrationCommand, PrivateTask, ReminderAck, Status, TaskRequest,
+    Alert, IntegrationCommand, Priority, PrivateTask, ReminderAck, Session, Status, TaskRequest, User,
 )
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .permissions import IsMD, IsMDOrPA, IsPA
@@ -71,13 +71,125 @@ class LoginView(TokenObtainPairView):
 
 
 class LogoutView(APIView):
+    """Sign out: this phone's session ends now (every token of it is refused from here on), the refresh token is
+    blacklisted too, and its push tokens go."""
+
     def post(self, request):
         token = request.data.get("refresh", "")
         try:
             RefreshToken(token).blacklist()
         except TokenError:
             pass
+        session = sessions.session_of(request)
+        if session is not None:
+            sessions.revoke(session, request.user, "signed_out")
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PhoneLoginView(APIView):
+    """Sign in by phone number: the app verified the number with an SMS code through Firebase and sends its proof
+    (ID token); the server checks it, finds the account with that number, and starts a session for this phone."""
+    permission_classes = []
+    authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        proof = str(data.get("id_token") or "").strip()
+        if not proof:
+            return error("invalid", "The sign-in proof is missing.", 422)
+        try:
+            phone = sessions.verify_firebase_phone(proof)
+        except ServiceError as err:
+            return error(err.code, err.message, err.status)
+        user = User.objects.filter(phone=phone, is_active=True).first()
+        if user is None:
+            services.audit(None, "auth.phone_unknown", "phone", sessions.phone_label(phone))
+            return error("not_on_team", "This number is not on the team. Ask the MD to add it on the Team page.", 403)
+        session = sessions.start_session(user, request, name=str(data.get("device_name") or ""),
+                                         device_id=str(data.get("device_id") or ""), how="phone")
+        sessions.notify_new_sign_in(user, session)
+        tokens = sessions.tokens_for(session)
+        from .serializers import login_user  # noqa: PLC0415
+        return Response({**tokens, "user": login_user(user, request)})
+
+
+class SessionRefreshView(TokenRefreshView):
+    """The usual token refresh, with the session kept: a refresh token from before sessions existed gets one now
+    (named "Earlier sign-in"); a refresh token whose session was signed out is refused."""
+
+    def post(self, request, *args, **kwargs):
+        raw = str((request.data or {}).get("refresh") or "")
+        try:
+            old = RefreshToken(raw)
+        except TokenError:
+            return error("invalid", "Please sign in again.", 401)
+        sid = old.get(sessions.SID)
+        if sid:
+            if not Session.objects.filter(id=sid, revoked_at__isnull=True).exists():
+                return error("signed_out", "This phone was signed out. Please sign in again.", 401)
+            return super().post(request, *args, **kwargs)
+        user = User.objects.filter(id=old.get("user_id"), is_active=True).first()
+        if user is None:
+            return error("invalid", "Please sign in again.", 401)
+        session = sessions.start_session(user, request, name="Earlier sign-in", how="password")
+        try:
+            old.blacklist()
+        except Exception:  # noqa: BLE001 — blacklisting is best effort; the old token is replaced below
+            pass
+        return Response(sessions.tokens_for(session))
+
+
+class SessionsView(APIView):
+    """Where am I signed in: this person's phones, this one first; POST signs out every other phone."""
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request):
+        current = sessions.session_of(request)
+        rows = Session.objects.filter(user=request.user).order_by("revoked_at", "-last_seen_at")[:30]
+        items = [sessions.session_item(s, current) for s in rows]
+        items.sort(key=lambda i: (not i["this_phone"], not i["active"]))
+        return Response({"results": items, "this_session": str(current.id) if current else None})
+
+    def post(self, request):
+        current = sessions.session_of(request)
+        n = sessions.revoke_all(request.user, keep=current, by=request.user, why="other_phone")
+        return Response({"signed_out": n})
+
+
+class SessionRevokeView(APIView):
+    """Sign one phone out: the person's own, or any of the team's when the MD does it."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, session_id):
+        session = Session.objects.select_related("user").filter(id=session_id).first()
+        if session is None or (session.user_id != request.user.id and not request.user.is_md):
+            raise Http404
+        current = sessions.session_of(request)
+        if current is not None and current.id == session.id:
+            return error("this_phone", "That is this phone. Use Sign out instead.", 422)
+        why = "md" if session.user_id != request.user.id else "other_phone"
+        done = sessions.revoke(session, request.user, why)
+        if done and session.user_id != request.user.id:
+            at = tu.fmt_time(tu.now_local())
+            Alert.objects.create(recipient=session.user, kind=Alert.Kind.INFO, priority=Priority.NORMAL,
+                                 title=f"Signed out of {session.name or 'a phone'}",
+                                 body=f"{services.md_address()} signed your account out of {session.name or 'a phone'} at {at}.",
+                                 ref_type="session", ref_id=str(session.id))
+        return Response({"signed_out": done, "session": sessions.session_item(session, current)})
+
+
+class TeamSessionsView(APIView):
+    """The MD: where one person on the team is signed in."""
+    permission_classes = [IsMD]
+
+    def get(self, request, user_id):
+        person = User.objects.filter(id=user_id).first()
+        if person is None:
+            raise Http404
+        rows = Session.objects.filter(user=person).order_by("revoked_at", "-last_seen_at")[:30]
+        return Response({"results": [sessions.session_item(s, None) for s in rows], "person": services.person_item(person, request.user)})
 
 
 def walkie_url(request) -> str:
@@ -109,6 +221,8 @@ class MeView(APIView):
             "address_hi": services.address_hi_of(u),
             # Where this phone's walkie-talkie line goes (the relay), with the login token added by the app.
             "walkie_url": walkie_url(request),
+            "phone": sessions.phone_label(u.phone) if u.phone else "",       # the number this person signs in with
+            "session_id": str(sessions.session_of(request).id) if sessions.session_of(request) else None,
             "language": lang.current(u),  # the language JARVIS is speaking to this person right now ("hi" / "en")
             "features": {
                 "ai": ai_brain.ai_available(),
@@ -547,7 +661,8 @@ class PushTokenView(APIView):
     def post(self, request):
         token = str((request.data or {}).get("token") or "")
         try:
-            push.register_device(request.user, token, str((request.data or {}).get("platform") or "android"))
+            push.register_device(request.user, token, str((request.data or {}).get("platform") or "android"),
+                                 session=sessions.session_of(request))
         except ValueError as err:
             return error("invalid", str(err), 422)
         services.audit(request.user, "push.register", "user", request.user.id)
@@ -570,9 +685,14 @@ class DeviceTokenView(APIView):
     throttle_scope = "login"
 
     def post(self, request):
-        refresh = RefreshToken.for_user(request.user)
+        session = sessions.session_of(request)
+        if session is not None:
+            tokens = sessions.tokens_for(session)  # the same phone, the same session: signing it out stops both
+        else:
+            refresh = RefreshToken.for_user(request.user)
+            tokens = {"access": str(refresh.access_token), "refresh": str(refresh)}
         services.audit(request.user, "auth.device_token", "user", request.user.id)
-        return Response({"access": str(refresh.access_token), "refresh": str(refresh)})
+        return Response(tokens)
 
 
 # ------------------------------------------------------------------ assistant

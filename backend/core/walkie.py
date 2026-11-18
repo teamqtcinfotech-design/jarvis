@@ -368,6 +368,10 @@ async def user_for_token(token: str):
             data = AccessToken(token)
         except TokenError:
             return None
+        if data.get("sid"):
+            from .sessions import session_from_token  # noqa: PLC0415
+            if session_from_token(data) is None:
+                return None  # that phone was signed out: no line for it
         return User.objects.filter(id=data.get("user_id"), is_active=True).first()
     return await sync_to_async(read)()
 

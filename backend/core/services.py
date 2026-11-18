@@ -167,9 +167,13 @@ def team(active: bool = True) -> list[User]:
 def person_item(u: User, viewer: User | None = None) -> dict:
     """One person as the phones show them: name, job, department(s)."""
     depts = [d.name for d in u.departments.all() if d.active] if not (u.is_md or u.is_pa or u.is_mg) else []
-    return {"id": u.id, "name": u.spoken_name, "username": u.username, "role": u.role, "title": u.title_label,
-            "department": u.department or (depts[0] if depts else ""), "departments": depts, "gender": u.gender,
-            "active": u.is_active, **({"you": True} if viewer is not None and viewer.id == u.id else {})}
+    out = {"id": u.id, "name": u.spoken_name, "username": u.username, "role": u.role, "title": u.title_label,
+           "department": u.department or (depts[0] if depts else ""), "departments": depts, "gender": u.gender,
+           "active": u.is_active, **({"you": True} if viewer is not None and viewer.id == u.id else {})}
+    if viewer is not None and (viewer.is_md or viewer.id == u.id):
+        from .sessions import phone_label  # noqa: PLC0415
+        out["phone"] = phone_label(u.phone) if u.phone else ""   # the number they sign in with: the MD's and their own
+    return out
 
 
 def role_label(user: User) -> str:
@@ -3216,15 +3220,35 @@ def team_add(md: User, data: dict) -> User:
         raise ServiceError("taken", f"The username {username} is already used. Please pick another.", 409)
     if User.objects.filter(is_active=True).count() >= TEAM_LIMIT:
         raise ServiceError("team_full", f"JARVIS holds at most {TEAM_LIMIT} people.", 409)
+    phone = _clean_phone(data.get("phone"), required=False)
     person = User.objects.create_user(
         username=username, password=password, role=User.Role.TM, display_name=name, first_name=name,
         job_title=_clean_text(data.get("title"), 80), department=_clean_text(data.get("department"), 80),
-        gender=_clean_gender(data.get("gender")),
+        gender=_clean_gender(data.get("gender")), phone=phone,
     )
     if person.department:
         _join_department(md, person, person.department)
     audit(md, "team.add", "user", person.id, f"{username} ({person.job_title})")
     return person
+
+
+def _clean_phone(raw, *, required: bool, except_user: User | None = None) -> str:
+    """The number a person signs in with, in international form; it must not be anyone else's."""
+    from .sessions import normalize_phone  # noqa: PLC0415
+    text = str(raw or "").strip()
+    if not text:
+        if required:
+            raise ServiceError("invalid", "Please give the person's phone number (they sign in with it).", 422)
+        return ""
+    phone = normalize_phone(text)
+    if not phone:
+        raise ServiceError("invalid", "That does not look like a phone number. Use the 10-digit number, or +91 and the number.", 422)
+    taken = User.objects.filter(phone=phone)
+    if except_user is not None:
+        taken = taken.exclude(id=except_user.id)
+    if taken.exists():
+        raise ServiceError("taken", "That phone number is already on another account.", 409)
+    return phone
 
 
 def _join_department(md: User, person: User, name: str) -> None:
@@ -3256,6 +3280,10 @@ def team_update(md: User, user_id, data: dict) -> User:
         if key in data:
             setattr(person, field, _clean_text(data.get(key), limit))
             fields.append(field)
+    if "phone" in data:
+        person.phone = _clean_phone(data.get("phone"), required=False, except_user=person)
+        fields.append("phone")
+        audit(md, "team.phone", "user", person.id, person.phone[-4:] if person.phone else "cleared")
     if "department" in data and not (person.is_md or person.is_pa or person.is_mg):
         # The text typed is the person's department now: in it (made if new), and out of the others.
         from . import sections as _sections  # local import: sections builds on this module

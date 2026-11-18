@@ -87,22 +87,72 @@ async function rawFetch(path: string, init: RequestInit & { timeoutMs?: number }
   }
 }
 
-export async function login(server: string, username: string, password: string): Promise<SessionUser> {
-  serverUrl = normalizeServer(server);
-  const res = await rawFetch('/auth/login/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ username: username.trim(), password }),
-  });
+/** This phone, as the server lists it under "where am I signed in": its model and its own random id. */
+export interface DeviceInfo {
+  device_name: string;
+  device_id: string;
+}
+
+async function finishLogin(res: Response): Promise<SessionUser> {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const msg = res.status === 401 ? 'Username or password is incorrect.' : body?.message ?? 'Login failed.';
+    const msg = res.status === 401 ? (body?.message ?? 'Sign-in was refused.') : body?.message ?? 'Sign-in failed.';
     throw new ApiError(res.status, body?.code ?? 'login_failed', msg, body);
   }
   await SecureStore.setItemAsync(K_SERVER, serverUrl);
   await storeTokens(body.access, body.refresh);
-  await SecureStore.setItemAsync(K_USER, JSON.stringify(body.user));
-  return body.user as SessionUser;
+  const user = { ...body.user, session_id: body.session_id } as SessionUser;
+  await SecureStore.setItemAsync(K_USER, JSON.stringify(user));
+  return user;
+}
+
+/** Sign in by username and password (the older way; the server may have it switched off). */
+export async function login(server: string, username: string, password: string, device?: DeviceInfo): Promise<SessionUser> {
+  serverUrl = normalizeServer(server);
+  const res = await rawFetch('/auth/login/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ username: username.trim(), password, ...(device ?? {}) }),
+  });
+  return finishLogin(res);
+}
+
+/** Sign in by phone number: Firebase's proof that this phone holds the number (lib/wake otpStart / otpConfirm). */
+export async function loginWithPhone(server: string, idToken: string, device: DeviceInfo): Promise<SessionUser> {
+  serverUrl = normalizeServer(server);
+  const res = await rawFetch('/auth/phone/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ id_token: idToken, ...device }),
+  });
+  return finishLogin(res);
+}
+
+export interface SessionRow {
+  id: string;
+  name: string;
+  how: 'phone' | 'password';
+  signed_in_at: string;
+  last_seen_at: string;
+  this_phone: boolean;
+  active: boolean;
+  revoked_at: string | null;
+  revoked_why: string;
+}
+
+/** Where this account is signed in (this phone first). */
+export async function sessions(): Promise<SessionRow[]> {
+  return (await api<{ results: SessionRow[] }>('/auth/sessions/')).data.results;
+}
+
+/** Sign one phone out, now. */
+export async function revokeSession(id: string) {
+  await api(`/auth/sessions/${id}/revoke/`, { method: 'POST', body: {} });
+}
+
+/** Sign out every phone but this one. */
+export async function revokeOtherSessions(): Promise<number> {
+  return (await api<{ signed_out: number }>('/auth/sessions/', { method: 'POST', body: {} })).data.signed_out;
 }
 
 export async function logout() {

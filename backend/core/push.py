@@ -81,13 +81,21 @@ def _messaging():
     return messaging
 
 
+def firebase_app():
+    """The Firebase app (service account) this server holds, for anything beyond pushes — checking a phone sign-in's
+    proof (core/sessions.py). None when Firebase is not configured or could not start."""
+    _messaging()
+    return _app
+
+
 # ------------------------------------------------------------------ devices
-def register_device(user, token: str, platform: str = "android") -> PushDevice:
+def register_device(user, token: str, platform: str = "android", session=None) -> PushDevice:
     token = (token or "").strip()
     if not token or len(token) > 512:
         raise ValueError("A device token is required.")
     # A token belongs to one phone; if another account signs in on that phone, it moves to that account.
-    device, _ = PushDevice.objects.update_or_create(token=token, defaults={"user": user, "platform": platform[:16], "failures": 0})
+    device, _ = PushDevice.objects.update_or_create(token=token, defaults={"user": user, "platform": platform[:16], "failures": 0,
+                                                                            "session": session})
     extra = PushDevice.objects.filter(user=user).order_by("-updated_at")[MAX_DEVICES_PER_USER:]
     if extra:
         PushDevice.objects.filter(id__in=[d.id for d in extra]).delete()

@@ -25,6 +25,8 @@ dependencies {
   implementation "com.microsoft.onnxruntime:onnxruntime-android:1.19.2"
   // Live push: alerts reach the phone the moment the server creates them (configured by the app's google-services.json).
   implementation "com.google.firebase:firebase-messaging:24.1.0"
+  // Sign in by phone number: Firebase sends and checks the SMS code on the phone (PhoneOtp.kt).
+  implementation "com.google.firebase:firebase-auth:23.1.0"
   // The walkie-talkie line (a WebSocket kept open); React Native ships the same library, this only names it.
   implementation "com.squareup.okhttp3:okhttp:4.12.0"
 }

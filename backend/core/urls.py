@@ -1,5 +1,4 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
 
 from . import updateviews, views
 
@@ -11,9 +10,14 @@ urlpatterns = [
     path("updates/apk/<str:name>", updateviews.apk),
     path("updates/hello/", updateviews.UpdateHelloView.as_view()),
     path("auth/login/", views.LoginView.as_view()),
-    path("auth/refresh/", TokenRefreshView.as_view()),
+    path("auth/phone/", views.PhoneLoginView.as_view()),
+    path("auth/refresh/", views.SessionRefreshView.as_view()),
     path("auth/logout/", views.LogoutView.as_view()),
     path("auth/device-token/", views.DeviceTokenView.as_view()),
+    # Where am I signed in (this person's phones), sign one out, sign the others out; the MD: anyone's
+    path("auth/sessions/", views.SessionsView.as_view()),
+    path("auth/sessions/<uuid:session_id>/revoke/", views.SessionRevokeView.as_view()),
+    path("team/<int:user_id>/sessions/", views.TeamSessionsView.as_view()),
     path("me/", views.MeView.as_view()),
     path("me/prefs/", views.MePrefsView.as_view()),
     path("me/habits/", views.MeHabitsView.as_view()),

@@ -10,6 +10,7 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-n
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAlertEngine } from '@/lib/alertEngine';
+import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
 import { greeting, timeOf } from '@/lib/format';
 import { addressOf, mdWord } from '@/lib/names';
@@ -116,7 +117,10 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     else if (key === 'briefing') router.push('/briefing');
     else if (key === 'held') engine.setHeldVisible(true);
     else if (key === 'messages') report('messages', 'Messages');  // the kept record: received and sent, with Seen
-    else router.push({ pathname: '/lists/[section]', params: { section: key } });
+    else if (key === 'private') {
+      // The personal list sits behind the fingerprint (when the lock is on).
+      unlock('Personal list').then((ok) => ok && router.push({ pathname: '/lists/[section]', params: { section: key } })).catch(() => undefined);
+    } else router.push({ pathname: '/lists/[section]', params: { section: key } });
   };
   const tick = () => Haptics.selectionAsync().catch(() => undefined); // a small tap he can feel
   // While JARVIS is up, the page behind goes soft (a real blur on Android 12 and later).

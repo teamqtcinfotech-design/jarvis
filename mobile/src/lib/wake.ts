@@ -90,6 +90,12 @@ type Native = {
   walkieRefresh?: () => void;
   walkieStatus?: () => string;
   consumePendingWalkie?: () => string | null;
+  // sign in by phone (2.7.0 and later)
+  otpSupported?: () => boolean;
+  otpStart?: (phone: string) => Promise<OtpResult>;
+  otpConfirm?: (code: string) => Promise<OtpResult>;
+  otpAwaitAuto?: () => Promise<OtpResult>;
+  otpCancel?: () => void;
   addListener: ((event: 'wake' | 'push' | 'barge', listener: () => void) => { remove: () => void }) &
     ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void }) &
     ((event: 'walkie', listener: (e: WalkieEvent) => void) => { remove: () => void });
@@ -348,6 +354,41 @@ export function walkieConsumePending(): string | null {
     return native?.consumePendingWalkie?.() ?? null;
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------- sign in by phone (an SMS code through Firebase)
+export const otpSupported = native !== null && typeof native.otpStart === 'function';
+
+export interface OtpResult {
+  status: 'sent' | 'verified';
+  id_token?: string;
+  auto?: boolean;
+}
+
+/** Sends the code to +91… Resolves "sent" (type the code) or "verified" (the phone read it by itself). */
+export function otpStart(phone: string): Promise<OtpResult> {
+  if (!native?.otpStart) return Promise.reject(new Error('Phone sign-in needs the new app.'));
+  return native.otpStart(phone);
+}
+
+/** The typed code: resolves "verified" with the proof for the server. */
+export function otpConfirm(code: string): Promise<OtpResult> {
+  if (!native?.otpConfirm) return Promise.reject(new Error('Phone sign-in needs the new app.'));
+  return native.otpConfirm(code);
+}
+
+/** Waits for the phone to read the code by itself (resolves like otpConfirm); use alongside the typed path. */
+export function otpAwaitAuto(): Promise<OtpResult> {
+  if (!native?.otpAwaitAuto) return new Promise(() => undefined);
+  return native.otpAwaitAuto();
+}
+
+export function otpCancel() {
+  try {
+    native?.otpCancel?.();
+  } catch {
+    // ignore
   }
 }
 

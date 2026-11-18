@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -59,6 +60,13 @@ class JarvisWakeModule : Module() {
             TtsEngine.callback = null
             WalkieEngine.listener = null
         }
+
+        // ---------------------------------------------------------------- sign in by phone (an SMS code)
+        Function("otpSupported") { true }
+        AsyncFunction("otpStart") { phone: String, promise: Promise -> PhoneOtp.start(appContext.currentActivity, phone, promise) }
+        AsyncFunction("otpConfirm") { code: String, promise: Promise -> PhoneOtp.confirm(code, promise) }
+        AsyncFunction("otpAwaitAuto") { promise: Promise -> PhoneOtp.awaitAuto(promise) }
+        Function("otpCancel") { PhoneOtp.cancel() }
 
         // ---------------------------------------------------------------- walkie-talkie
         /** The person's switch and the relay's address (from /me/): the line opens when both are set. */

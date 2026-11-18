@@ -13,7 +13,23 @@ interface SessionValue {
   user: SessionUser | null;
   server: string;
   signIn: (server: string, username: string, password: string) => Promise<void>;
+  /** Sign in by phone number: Firebase's proof from lib/wake otpStart / otpConfirm. */
+  signInWithPhone: (server: string, idToken: string) => Promise<void>;
   signOut: () => Promise<void>;
+}
+
+/** This phone as the server lists it: its model and its own random id (the one app updates use). */
+export async function thisDevice(): Promise<apiClient.DeviceInfo> {
+  const Device = await import('expo-device');
+  const { ensureDeviceId } = await import('./appUpdates');
+  const name = `${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim().slice(0, 80) || 'Phone';
+  let id = '';
+  try {
+    id = await ensureDeviceId();
+  } catch {
+    id = '';
+  }
+  return { device_name: name, device_id: id };
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -60,7 +76,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         .then((r) => {
           if (cancelled || !r.data?.username) return;
           const next: SessionUser = { username: r.data.username, role: r.data.role, name: r.data.name, address: r.data.address,
-            address_hi: r.data.address_hi, language: r.data.language, walkie_url: r.data.walkie_url ?? '' };
+            address_hi: r.data.address_hi, language: r.data.language, walkie_url: r.data.walkie_url ?? '',
+            phone: r.data.phone ?? '', session_id: r.data.session_id ?? null };
           setReplyLang(next.language); // the language JARVIS is speaking to this person, as the server sees it
           setUser((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
           apiClient.storeUser(next).catch(() => undefined);
@@ -77,7 +94,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, [signedIn]);
 
   const signIn = useCallback(async (srv: string, username: string, password: string) => {
-    const u = await apiClient.login(srv, username, password);
+    const u = await apiClient.login(srv, username, password, await thisDevice());
+    setServer(apiClient.currentServer());
+    setUser(u);
+  }, []);
+
+  const signInWithPhone = useCallback(async (srv: string, idToken: string) => {
+    const u = await apiClient.loginWithPhone(srv, idToken, await thisDevice());
     setServer(apiClient.currentServer());
     setUser(u);
   }, []);
@@ -97,7 +120,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <SessionContext.Provider value={{ ready, user, server, signIn, signOut }}>
+    <SessionContext.Provider value={{ ready, user, server, signIn, signInWithPhone, signOut }}>
       {children}
     </SessionContext.Provider>
   );

@@ -18,6 +18,10 @@ export interface SessionUser {
   language?: 'hi' | 'en';
   /** Where this phone's walkie-talkie line goes (the relay), from the server. */
   walkie_url?: string;
+  /** The number this person signs in with ("+91 98765 43210"), when one is set. */
+  phone?: string;
+  /** This phone's sign-in (session) on the server: the one row "Devices" marks as this phone. */
+  session_id?: string | null;
 }
 
 export interface TaskItem {
@@ -224,7 +228,9 @@ export interface Reminder {
 export interface AlertQuestion {
   /** promise / unseen / reassign take free words ("kal shaam tak", "Sunil ko de do"): the server reads the answer
    *  (POST /alerts/<id>/answer/). The others are a yes or a no, carried out by the app. */
-  kind: 'accept' | 'done' | 'seen' | 'move' | 'promise' | 'unseen' | 'reassign';
+  kind: 'accept' | 'done' | 'seen' | 'move' | 'promise' | 'unseen' | 'reassign' | 'signout';
+  /** signout: the sign-in (session) on another phone that "Sign it out" ends. */
+  session?: string;
   /** Appended to the spoken line; empty when the line itself already asks (a check-in). */
   en: string;
   hi: string;

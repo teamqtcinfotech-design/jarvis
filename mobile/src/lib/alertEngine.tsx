@@ -1127,6 +1127,19 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         }
         return;
       }
+      if (question.kind === 'signout') {
+        // "Signed in on another phone — not you?": yes signs that phone out at once; no = it was them.
+        clearKey(item);
+        try {
+          if (yes && question.session) await api(`/auth/sessions/${question.session}/revoke/`, { method: 'POST', body: {} });
+          if (item.alertId) await api(`/alerts/${item.alertId}/ack/`, { method: 'POST', body: { seen: true } });
+          if (yes) sayTwin(`Signed that phone out, ${address}.`, `वो फ़ोन साइन आउट कर दिया, ${addressHi}।`, { interrupt: true });
+        } catch (e) {
+          const msg = e instanceof ApiError ? e.message : "I couldn't reach the server.";
+          sayTwin(`Sorry ${address}, ${msg}`, `माफ़ कीजिए ${addressHi}, ${msg}`, { interrupt: true });
+        }
+        return;
+      }
       // 'seen': yes = whoever gave the task (or sent the message) is told it was seen; no = it simply leaves the screen.
       clearKey(item);
       try {

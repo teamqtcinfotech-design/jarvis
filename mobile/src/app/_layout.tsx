@@ -6,6 +6,7 @@ import { Pressable, Text, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AlertBanner } from '@/components/AlertBanner';
+import { AppLock } from '@/components/AppLock';
 import { HeldSheet } from '@/components/HeldSheet';
 import { UpdateKeeper } from '@/components/UpdateKeeper';
 import { AlertEngineProvider } from '@/lib/alertEngine';
@@ -40,6 +41,7 @@ function Shell() {
               <AlertBanner />
               <HeldSheet />
               <UpdateKeeper />
+              <AppLock />
             </View>
           </WalkieProvider>
         </ConversationProvider>

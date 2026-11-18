@@ -30,11 +30,15 @@ class User(AbstractUser):
     # "male" / "female" / "" (not said): set by the MD on the Team page, never guessed from a name. Only used for
     # "he / she" and the Hindi verb forms when JARVIS speaks ABOUT the person.
     gender = models.CharField(max_length=6, blank=True, default="")
+    # The phone number this person signs in with (an OTP by SMS; Nov 2026), in international form (+91…). Only the
+    # MD sets it, on the Team page. Empty = this person cannot sign in by phone yet.
+    phone = models.CharField(max_length=20, blank=True, default="", db_index=True)
 
     class Meta:
         constraints = [
             # This is a private, single-executive app: exactly one MD account can exist.
             models.UniqueConstraint(fields=["role"], condition=Q(role="MD"), name="single_md_account"),
+            models.UniqueConstraint(fields=["phone"], condition=~Q(phone=""), name="unique_phone_number"),
         ]
 
     @property
@@ -544,6 +548,32 @@ class Alert(models.Model):
                    models.Index(fields=["next_ring_at"], name="core_alert_ring_idx")]
 
 
+class Session(models.Model):
+    """One sign-in on one phone (Nov 2026). Every token JARVIS issues names its session (the "sid" claim); a request
+    whose session has been signed out is refused at once, whatever the token says. "Where am I signed in?" is this
+    table; "sign that phone out" sets revoked_at. The background part of the app shares the app's session."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="sessions")
+    device_id = models.CharField(max_length=64, blank=True, default="")   # the phone's own random id (AppDevice)
+    name = models.CharField(max_length=80, blank=True, default="")        # "Xiaomi M2101K7BI"
+    how = models.CharField(max_length=12, default="phone")                # "phone" (OTP) or "password"
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now_add=True)
+    last_ip = models.CharField(max_length=45, blank=True, default="")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    revoked_why = models.CharField(max_length=20, blank=True, default="")  # "signed_out", "other_phone", "md", "replaced"
+
+    class Meta:
+        ordering = ["-last_seen_at"]
+        indexes = [models.Index(fields=["user", "revoked_at"])]
+
+    @property
+    def active(self) -> bool:
+        return self.revoked_at is None
+
+
 class PushDevice(models.Model):
     """A phone that receives live push (Firebase Cloud Messaging) for one user. The token moves with the login."""
 
@@ -551,6 +581,8 @@ class PushDevice(models.Model):
     token = models.CharField(max_length=512, unique=True)
     platform = models.CharField(max_length=16, default="android")
     failures = models.PositiveSmallIntegerField(default=0)
+    # The sign-in this token belongs to: signing that phone out drops its pushes with it.
+    session = models.ForeignKey(Session, null=True, blank=True, on_delete=models.SET_NULL, related_name="push_devices")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

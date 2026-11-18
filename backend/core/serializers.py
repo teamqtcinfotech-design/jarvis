@@ -6,17 +6,37 @@ from .models import Kind, Priority, Status
 TIME_FORMATS = ["%H:%M", "%H:%M:%S"]
 
 
+def login_user(user, request) -> dict:
+    """The profile that comes with a sign-in (by phone or by password)."""
+    from . import services  # noqa: PLC0415  (how this person is addressed comes with the login)
+    from .sessions import phone_label  # noqa: PLC0415
+    from .views import walkie_url  # noqa: PLC0415  (views import this module; resolved at call time)
+
+    return {"username": user.username, "role": user.role, "name": user.spoken_name,
+            "address": services.address_of(user), "address_hi": services.address_hi_of(user),
+            "phone": phone_label(user.phone) if user.phone else "",
+            "walkie_url": walkie_url(request) if request is not None else ""}
+
+
 class LoginSerializer(TokenObtainPairSerializer):
+    """Sign in by username and password: kept for the phones that still run the old sign-in screen and for the
+    console; switched off with JARVIS_PASSWORD_LOGIN=false once everyone signs in by phone. Starts a session."""
+
     def validate(self, attrs):
-        data = super().validate(attrs)
+        from . import sessions  # noqa: PLC0415
+        from rest_framework.exceptions import AuthenticationFailed  # noqa: PLC0415
+
+        if not sessions.password_login_allowed():
+            raise AuthenticationFailed({"code": "phone_only", "message": "Please sign in with your phone number."}, code="phone_only")
+        super().validate(attrs)
         user = self.user
-        from . import services  # how this person is addressed ("Sir", "Ma'am", a name) comes with the login
-
-        from .views import walkie_url  # noqa: PLC0415  (views import this module; resolved at call time)
-
-        data["user"] = {"username": user.username, "role": user.role, "name": user.spoken_name,
-                        "address": services.address_of(user), "address_hi": services.address_hi_of(user),
-                        "walkie_url": walkie_url(self.context["request"]) if self.context.get("request") else ""}
+        request = self.context.get("request")
+        body = request.data if request is not None and isinstance(request.data, dict) else {}
+        session = sessions.start_session(user, request, name=str(body.get("device_name") or ""),
+                                         device_id=str(body.get("device_id") or ""), how="password")
+        sessions.notify_new_sign_in(user, session)
+        data = sessions.tokens_for(session)
+        data["user"] = login_user(user, request)
         return data
 
 
