@@ -1375,47 +1375,46 @@ class SmartBrainTests(BaseCase):
                     spoken_reply_hi="सर, अमन के साथ मीटिंग पाँच बजे। सेव कर दूँ?", **extra)
 
     # ---------------------------------------------------------------- who is this person?
-    def test_unknown_person_is_questioned_then_remembered_for_the_speaker_only(self):
+    def test_unknown_person_is_saved_first_mentioned_softly_and_remembered_for_the_speaker_only(self):
+        # 18 Nov 2026: a stranger never blocks the intention. The meeting is booked, then one soft word about Aman.
         from core.models import Contact
         day = _workday()
         first = self.interpret(self.md_client, "Aman ke saath 5 baje meeting book karo", self._aman(day))
-        self.assertTrue(first["needs_clarification"])
-        self.assertIn("I don't know any Aman", first["question"])
-        self.assertEqual(first["spoken_reply"], first["question"])
-        self.assertEqual(first["speak_lang"], "hi")          # asked in his language
-        self.assertIn("Aman", first["speak_text"])
+        self.assertFalse(first["needs_clarification"])
+        self.assertTrue(first["booked"])
+        self.assertIn("I don't know Aman yet", first["spoken_reply"])
+        self.assertEqual(first["speak_lang"], "hi")          # said in his language
+        self.assertIn("Aman को मैं अभी नहीं जानता", first["speak_text"])
         self.assertEqual(first["people"], ["Aman"])
         self.assertEqual(Contact.objects.count(), 0)
-        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 1)  # nothing booked with a stranger
-        # He explains who Aman is: remembered, and the meeting carries on.
-        history = [{"role": "user", "text": "Aman ke saath 5 baje meeting book karo"}, {"role": "jarvis", "text": first["question"]}]
-        second = self.interpret(self.md_client, "bahar ka hai, hamara vendor", self._aman(
-            day, new_contacts=[{"name": "aman", "note": "vendor"}]), previous=first["transcript"], history=history)
-        self.assertFalse(second["needs_clarification"])
-        self.assertEqual(second["action"], "answer")
-        self.assertTrue(second["booked"])
+        self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 2)  # booked, stranger or not
+        # He explains who Aman is: remembered.
+        history = [{"role": "user", "text": "Aman ke saath 5 baje meeting book karo"}, {"role": "jarvis", "text": first["spoken_reply"]}]
+        second = self.interpret(self.md_client, "bahar ka hai, hamara vendor", _cmd(
+            intent="unknown", new_contacts=[{"name": "aman", "note": "vendor"}]), history=history)
         self.assertEqual(second["contacts_saved"], ["Aman"])
         self.assertEqual([(c["name"], c["note"]) for c in services.list_contacts(self.md)], [("Aman", "vendor")])
-        # Next time nobody is asked, and the model is told who Aman is.
+        # Next time nothing is said about him, and the model is told who Aman is.
         with mock.patch("core.ai_brain.interpret", return_value=self._aman(day)) as fake:
             third = self.md_client.post("/api/v1/assistant/interpret/", {"text": "Aman ko kal call karna hai"}, format="json").json()
-        self.assertFalse(third["needs_clarification"])
+        self.assertNotIn("don't know", third["spoken_reply"])
         self.assertEqual(fake.call_args.args[1]["contacts"], [{"name": "Aman", "who": "vendor"}])
         # Sir's contact is his alone: Mansi's JARVIS still does not know Aman, and her context has no trace of him.
         self.assertEqual(services.list_contacts(self.pa), [])
         self.assertNotIn("vendor", json.dumps(services.ai_context(self.pa), default=str))
+        # A request for Sir with a stranger in it: Sir's business, nothing asked of her.
         pa = self.interpret(self.pa_client, "Sir ke liye Aman ke saath meeting", _cmd(
             intent="request_for_md", title="Meeting with Aman", kind="MEETING", people=["Aman"]))
-        self.assertIn("I don't know any Aman", pa["question"])
+        self.assertFalse(pa["needs_clarification"])
 
-    def test_asked_once_then_taken_as_a_contact_even_if_the_model_forgets(self):
+    def test_mentioned_once_then_known_from_his_own_item(self):
         day = _workday()
         first = self.interpret(self.md_client, "Aman ke saath meeting", self._aman(day))
-        history = [{"role": "user", "text": "Aman ke saath meeting"}, {"role": "jarvis", "text": first["question"]}]
-        second = self.interpret(self.md_client, "haan wahi", self._aman(day), previous=first["transcript"], history=history)
-        self.assertFalse(second["needs_clarification"])      # never the same question twice
-        self.assertEqual([c["name"] for c in services.list_contacts(self.md)], ["Aman"])
-        self.assertTrue(any("Aman" in w for w in second["warnings"]))
+        self.assertIn("I don't know Aman yet", first["spoken_reply"])
+        history = [{"role": "user", "text": "Aman ke saath meeting"}, {"role": "jarvis", "text": first["spoken_reply"]}]
+        second = self.interpret(self.md_client, "aur Aman ko call bhi karna hai", self._aman(day), history=history)
+        self.assertNotIn("don't know", second["spoken_reply"])      # never the same word twice
+        self.assertEqual(services.resolve_person(self.md, "Aman")["status"], "known")  # his saved meeting names him
 
     def test_known_people_pass_and_near_names_are_offered(self):
         day = _workday()
@@ -1426,17 +1425,18 @@ class SmartBrainTests(BaseCase):
                 intent="create_task", title="Review Meeting", kind="MEETING", due_date=day.isoformat(), due_time="15:00",
                 people=people, spoken_reply="Sir, review meeting at 3 PM. Shall I save it?"))
             self.assertFalse(d["needs_clarification"], people)
-        # Two people with that name on the staff: which one?
+        # Two people with that name on the staff: the meeting is his, with "Ramesh" as he said it; nothing to ask.
         d = self.interpret(self.md_client, "Ramesh ke saath meeting", _cmd(
             intent="create_task", title="Meeting with Ramesh", kind="MEETING", due_date=day.isoformat(), due_time="15:00",
             people=["Ramesh"]))
-        self.assertEqual(d["question"], "Sir, which Ramesh: Ramesh Kumar from Accounts or Ramesh Yadav from Logistics?")
-        # A near miss gets the closest known name offered.
+        self.assertFalse(d["needs_clarification"])
+        # A near miss gets the closest known name offered, softly, after the save.
         d = self.interpret(self.md_client, "Kavit ke saath meeting", _cmd(
             intent="create_task", title="Meeting with Kavit", kind="MEETING", due_date=day.isoformat(), due_time="15:00",
             people=["Kavit"]))
-        self.assertIn("I don't know any Kavit", d["question"])
-        self.assertIn("did you mean Kavita Singh from Franchise", d["question"])
+        self.assertFalse(d["needs_clarification"])
+        self.assertIn("I don't know Kavit yet", d["spoken_reply"])
+        self.assertIn("did you mean Kavita Singh from Franchise", d["spoken_reply"])
         # The person who must DO the work is the delegation step's question, not a second one here.
         d = self.interpret(self.md_client, "Ramesh ko bolo Sharma ji ko call kare", _cmd(
             intent="assign_to_staff", staff_name="Ramesh", title="Call Sharma ji", people=["Ramesh", "Sharma ji"]))
@@ -1450,10 +1450,12 @@ class SmartBrainTests(BaseCase):
         day = _workday()
         cmd = _cmd(intent="create_task", title="Meeting with Mehta", kind="MEETING", due_date=day.isoformat(),
                    due_time="15:00", people=["Mehta"])
-        self.assertFalse(self.interpret(self.md_client, "Mehta ke saath meeting", cmd)["needs_clarification"])
+        d = self.interpret(self.md_client, "Mehta ke saath meeting", cmd)
+        self.assertFalse(d["needs_clarification"])
+        self.assertNotIn("don't know", d["spoken_reply"])   # known to him from his own meeting
         with mock.patch("core.ai_brain.interpret", return_value={**cmd, "intent": "request_for_md"}):
             r = self.pa_client.post("/api/v1/assistant/interpret/", {"text": "Sir ke liye Mehta ke saath meeting"}, format="json")
-        self.assertIn("I don't know any Mehta", r.json()["question"])
+        self.assertFalse(r.json()["needs_clarification"])    # Sir's business: nothing asked, nothing hinted
         self.assert_no_secret(r)
 
     # ---------------------------------------------------------------- whose task is it?
@@ -1478,13 +1480,12 @@ class SmartBrainTests(BaseCase):
         # "Sir ki cab book karni hai" is HER job (the model judged it so, and she named Sir).
         d = self.interpret(self.pa_client, "Sir ki cab book karni hai kal", _cmd(intent="create_task", title="Book Cab for Sir"))
         self.assertTrue(SharedTask.objects.filter(title="Book Cab for Sir", origin=SharedTask.Origin.SELF).exists())
-        # A stranger AND nobody named as the owner: one combined question.
+        # A stranger AND nobody named as the owner: her own (nothing asked about either).
         d = self.interpret(self.pa_client, "Aman ke saath meeting book karo", _cmd(
             intent="needs_destination", title="Meeting with Aman", kind="MEETING", people=["Aman"],
             needs_clarification=True, clarification_question="Priya, is this for Sir, for you, or for someone in the team?"))
         self.assertEqual(d["action"], "own_task")
-        self.assertIn("I don't know any Aman", d["question"])
-        self.assertNotIn("is this for Sir", d["question"])
+        self.assertNotIn("don't know", d.get("question") or "")   # the stranger is never the question
         # Offline parser: her words decide, and the answer said last wins (no question loop).
         d = self.interpret(self.pa_client, "mere liye", _cmd(intent="create_task", kind="MEETING", title="Meeting", engine="rules"),
                            previous="Sir ke office mein meeting")
@@ -2552,10 +2553,10 @@ class TwoThingsInOneBreathTests(BaseCase):
 
     def test_a_question_about_one_item_comes_first_and_the_rest_wait(self):
         cmd = self.two_meetings()
-        cmd["more_items"][0]["people"] = ["Aman"]  # nobody JARVIS knows
+        cmd["title"] = ""  # the first thing has no words to save: JARVIS has to ask what it should say
         d = self.interpret(self.md_client, "4 baje meeting aur 8 baje Aman ke saath", cmd)
         self.assertTrue(d["needs_clarification"])
-        self.assertIn("I don't know any Aman", d["question"])
+        self.assertIn("what should the task say", d["question"])
         self.assertEqual(len(d["batch"]), 1)  # kept, waiting behind the question
         self.assertEqual(d["spoken_reply"], d["question"])
 
@@ -2853,7 +2854,11 @@ class PlainReminderTests(BaseCase):
         d = self.interpret(self.md_client, "kal 4 baje Aman ke saath meeting",
                            _cmd(intent="meet_with_pa", title="Meeting with Aman", kind="MEETING", due_date=day, due_time="16:00",
                                 people=["Aman"], engine="ai"))
-        self.assertIn(d["action"], {"private_task", "choose_destination"})
+        # His own meeting (booked at once when clear, "answer"), or his own card: never a meeting with the PA.
+        self.assertIn(d["action"], {"private_task", "choose_destination", "answer"})
+        self.assertFalse(SharedTask.objects.filter(title="Meeting with Aman").exists())
+        # (personal titles are randomised in the database: compare in Python)
+        self.assertTrue(any(t.title == "Meeting with Aman" for t in PrivateTask.objects.filter(owner=self.md)) or d["action"] != "answer")
 
 
 class MeetingJugglingTests(BaseCase):
@@ -3135,12 +3140,16 @@ class DirectBookingTests(BaseCase):
         self.assertIn("Board review", d["spoken_reply"])
         self.assertEqual(PrivateTask.objects.count(), before)
 
-    def test_a_stranger_is_asked_about_first(self):
+    def test_a_stranger_is_booked_then_mentioned_softly(self):
+        # 18 Nov 2026: the intention comes first. A clear meeting with a name JARVIS does not know is booked, and
+        # the stranger is mentioned once afterwards — never a question that stops the booking.
         before = PrivateTask.objects.count()
         d = self.interpret(self.md_client, "parson 4 baje Zubin ke saath meeting kar do",
                            self._meeting(title="Meeting with Zubin", people=["Zubin"]))
-        self.assertTrue(d["needs_clarification"])
-        self.assertEqual(PrivateTask.objects.count(), before)
+        self.assertFalse(d["needs_clarification"])
+        self.assertTrue(d["booked"])
+        self.assertEqual(PrivateTask.objects.count(), before + 1)
+        self.assertIn("I don't know Zubin yet", d["spoken_reply"])
 
     def test_a_rough_reading_never_books_by_itself(self):
         before = PrivateTask.objects.count()

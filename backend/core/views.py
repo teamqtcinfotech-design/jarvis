@@ -812,8 +812,12 @@ class ReminderSnoozeView(APIView):
                 return error("nothing", "Nothing was said recently that could be snoozed.", status.HTTP_422_UNPROCESSABLE_ENTITY)
         else:
             return error("invalid", "Say which reminder or alert.", status.HTTP_422_UNPROCESSABLE_ENTITY)
+        # A snooze moves the reminder, never the deadline: said when the two part ways, and after the third "later".
+        notes = services.snooze_notes(request.user, what.get("key") or "", until) if what.get("kind") == "reminder" else {}
         return Response({"until": until.isoformat(), "until_label": services.moment_label(until),
-                         "until_label_hi": services.moment_label_hi(until), **what})
+                         "until_label_hi": services.moment_label_hi(until), **what,
+                         "past_deadline": bool(notes.get("past_deadline")), "snoozes": notes.get("snoozes", 0),
+                         "note": notes.get("note", ""), "note_hi": notes.get("note_hi", "")})
 
 
 class AlertListView(APIView):

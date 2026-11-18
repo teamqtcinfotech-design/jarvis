@@ -639,11 +639,18 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       expectingRef.current = false;
       const target = pq?.item ?? currentAlert;
       push('jarvis', d.spoken_reply);
-      const done = target
+      const done: Promise<{ note: string; noteHi: string } | null> = target
         ? snooze(target, undefined, d.snooze_until || undefined)
-        : api('/reminders/snooze/', { method: 'POST', body: { last: true, until: d.snooze_until || undefined } }).then(() => null);
+        : api<{ note?: string; note_hi?: string }>('/reminders/snooze/', { method: 'POST', body: { last: true, until: d.snooze_until || undefined } })
+          .then((r) => ({ note: r.data.note ?? '', noteHi: r.data.note_hi ?? '' }));
       done
-        .then(() => say(speakText, { interrupt: true, lang, fallback: d.spoken_reply }))
+        .then((back) => {
+          // The time it comes back, then the server's word when a snooze goes past the deadline (the deadline stays)
+          // or when this is the third "later" on the same task.
+          const note = back?.note ? ` ${lang === 'hi' && back.noteHi ? back.noteHi : back.note}` : '';
+          if (note) push('jarvis', note.trim());
+          say(speakText + note, { interrupt: true, lang, fallback: d.spoken_reply + note });
+        })
         .catch(() => sayOwn(`Sorry ${address}, I couldn't set that.`, `माफ़ कीजिए ${addressHi}, वो सेट नहीं हो पाया।`, { interrupt: true }));
       return;
     }

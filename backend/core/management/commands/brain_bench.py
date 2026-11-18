@@ -109,6 +109,12 @@ BENCH = [
     ("pa", "walkie 1 ghante ke liye shaant", {"intent": "set_setting", "setting_key": "walkieQuiet", "setting_value": "60"}),
     ("md", "walkie band karo", {"intent": "set_setting", "setting_key": "walkieEnabled"}),
     ("md", "{mg} ko walkie pe bolo ki report bhej de", {"intent": "screen_action", "screen_action": "open_walkie", "recipients": ["{mg}"]}),
+    # --- the month report (Nov 2026): completed work counted from the history, for a named month
+    ("md", "November mein maine kaunse tasks complete kiye", {"intent": "query", "view_kind": "done", "view_from": "2026-11-01", "view_to": "2026-11-30"}),
+    ("pa", "is mahine kitne kaam poore hue", {"intent": "query", "view_kind": ["done", "stats"], "view_from": "{month_start}"}),
+    ("md", "{mg} ne pichhle mahine kya kya complete kiya", {"intent": "query", "view_kind": ["done", "tasks"], "view_who": "{mg}", "view_from": "{last_month_start}", "view_to": "{last_month_end}"}),
+    # --- a stranger inside work for someone else is part of the instruction, never a question
+    ("md", "Nikki ko bolo ki Aman ko bole mujhe call kare abhi", {"intent": "assign_to_person", "recipients": ["Nikki"]}),
 ]
 
 
@@ -147,8 +153,12 @@ class Command(BaseCommand):
             return
         today = tu.today_local()
         from datetime import timedelta
+        month_start = today.replace(day=1)
+        last_month_end = month_start - timedelta(days=1)
         dates = {"today": today.isoformat(), "tomorrow": (today + timedelta(days=1)).isoformat(),
-                 "yesterday": (today - timedelta(days=1)).isoformat(), "week_end": (today + timedelta(days=6)).isoformat()}
+                 "yesterday": (today - timedelta(days=1)).isoformat(), "week_end": (today + timedelta(days=6)).isoformat(),
+                 "month_start": month_start.isoformat(), "last_month_start": last_month_end.replace(day=1).isoformat(),
+                 "last_month_end": last_month_end.isoformat()}
         users = {"md": User.objects.filter(role=User.Role.MD, is_active=True).first(),
                  "pa": User.objects.filter(role=User.Role.PA, is_active=True).first()}
         dates["pa"] = users["pa"].spoken_name if users["pa"] else "PA"  # the PA's real name in the sentences

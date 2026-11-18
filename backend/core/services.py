@@ -590,6 +590,18 @@ def close_task_alerts(task) -> int:
 
 ALERT_FRESH_FOR = timedelta(hours=24)   # older than this it is history, never news
 ALERT_LIST_FOR = timedelta(days=7)      # and older than this it is not even listed
+ALERT_KEEP_FOR = timedelta(days=7)      # and then it is deleted (alerts are news; the work itself lives in the tasks)
+
+
+def cleanup_alerts(now: datetime | None = None) -> int:
+    """Delete alert-feed entries older than a week. Alerts are temporary news ("Mansi completed a task", a ring,
+    a follow-up); the task, its history (TaskEvent) and its reminders are never touched by this, so a task due in
+    three months survives every cleanup. Run by the worker once a day; returns how many were deleted."""
+    cutoff = (now or timezone.now()) - ALERT_KEEP_FOR
+    deleted, _ = Alert.objects.filter(created_at__lt=cutoff).delete()
+    if deleted:
+        log.info("alert cleanup: %d entr%s older than %d days deleted", deleted, "y" if deleted == 1 else "ies", ALERT_KEEP_FOR.days)
+    return deleted
 
 
 def alert_question(alert: Alert) -> dict | None:
@@ -754,6 +766,38 @@ def moment_label_hi(at: datetime) -> str:
 def snooze_reminder(user: User, key: str, until: datetime) -> None:
     """This reminder comes back at `until`, as a fresh announcement (the list serves it under a new key)."""
     ReminderSnooze.objects.update_or_create(user=user, key=key[:200], defaults={"until": until})
+
+
+NUDGE_AFTER_SNOOZES = 3  # the third "later" on the same task earns a suggestion (never a silent change of date)
+
+
+def snooze_notes(user: User, key: str, until: datetime) -> dict:
+    """What a snooze does NOT do, said plainly: the deadline stays where it is (so a "later" past the deadline is
+    pointed out), and the third "later" on the same task suggests a new day or marking it blocked. Returns
+    {"past_deadline": bool, "snoozes": n, "note": en, "note_hi": hi} — notes empty when there is nothing to say."""
+    out = {"past_deadline": False, "snoozes": 0, "note": "", "note_hi": ""}
+    parts = (key or "").split(":")
+    if len(parts) < 3 or parts[0] not in ("private", "shared"):
+        return out
+    scope, task_id = parts[0], parts[1]
+    task = (private_qs(user).filter(id=task_id).first() if scope == "private"
+            else visible_shared_qs(user).filter(id=task_id).first())
+    if task is None:
+        return out
+    prefix = f"{scope}:{task_id}:"
+    out["snoozes"] = ReminderSnooze.objects.filter(user=user, key__startswith=prefix).count()
+    deadline = task.due_at or (tu.combine_local(task.due_date, time(23, 59)) if task.due_date else None)
+    notes_en, notes_hi = [], []
+    if deadline is not None and until > deadline and not task.is_closed:
+        out["past_deadline"] = True
+        when, when_hi = (tu.fmt_time(deadline), tu.fmt_time_hi(deadline)) if task.due_at else (tu.fmt_day(task.due_date), tu.fmt_day_hi(task.due_date))
+        notes_en.append(f"That is after its deadline ({when}); the deadline itself stays.")
+        notes_hi.append(f"ये इसकी डेडलाइन ({when_hi}) के बाद है; डेडलाइन वही रहेगी।")
+    if out["snoozes"] >= NUDGE_AFTER_SNOOZES:
+        notes_en.append(f"You have put this off {out['snoozes']} times. Shall I move it to another day, or mark it blocked?")
+        notes_hi.append(f"आपने इसे {out['snoozes']} बार टाला है। किसी और दिन रख दूँ, या ब्लॉक्ड मार्क कर दूँ?")
+    out["note"], out["note_hi"] = " ".join(notes_en), " ".join(notes_hi)
+    return out
 
 
 def snooze_alert(user: User, alert_id, until: datetime) -> Alert:
@@ -2013,6 +2057,10 @@ def _log_changes(actor: User, task: SharedTask, old_status: str, old_due) -> Non
     if task.status != old_status:
         kind = _STATUS_EVENT[task.status]
         extra = {"reason": task.hold_reason} if kind == TaskEvent.Kind.HOLD and task.hold_reason else {}
+        if kind == TaskEvent.Kind.DONE:
+            # The deadline it had when it was finished, so a later move never changes whether it was on time.
+            extra["due"] = (task.due_at or task.due_date).isoformat() if (task.due_at or task.due_date) else ""
+            extra["due_kind"] = task.due_kind
         log_event(task, kind, actor, **extra)
     if (task.due_at, task.due_date) != tuple(old_due) and task.status != Status.CANCELLED:
         log_event(task, TaskEvent.Kind.MOVED, actor,

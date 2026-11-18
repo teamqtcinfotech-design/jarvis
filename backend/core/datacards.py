@@ -6,11 +6,12 @@ The phone only draws; nothing here changes data.
 """
 from datetime import date, datetime, time, timedelta
 
+from django.db.models import Q
 from django.utils import timezone
 
 from . import scheduling, services
 from . import timeutils as tu
-from .models import Kind, PrivateTask, SharedTask, Status
+from .models import Kind, PrivateTask, SharedTask, Status, TaskEvent
 
 VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
               "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person",
@@ -329,40 +330,199 @@ def _performance_view(user) -> dict:
     }
 
 
-def _done_view(user, include_private: bool) -> dict:
-    """Everything finished in the last 14 days, newest first."""
-    now = timezone.now()
-    since = now - timedelta(days=14)
-    items = []
-    if include_private:
-        for t in PrivateTask.objects.filter(owner=user, status=Status.COMPLETED, completed_at__gte=since):
-            items.append((t.completed_at, t.title, "You", "private", str(t.id), t.version))
-    shared = services.visible_shared_qs(user).filter(status=Status.COMPLETED, completed_at__gte=since)
-    for t in shared:
-        if t.staff_id:
-            who = t.staff.name
-        elif t.assignee_user_id == user.id:
-            who = "You"
-        elif t.assignee_type == SharedTask.Assignee.MD:
-            who = services.md_address()
-        else:
-            who = t.assignee_user.spoken_name if t.assignee_user_id else "Team"
-        items.append((t.completed_at, t.title, who, "shared", str(t.id), t.version))
-    items.sort(key=lambda x: x[0], reverse=True)
+_MONTH_HI = ["जनवरी", "फ़रवरी", "मार्च", "अप्रैल", "मई", "जून", "जुलाई", "अगस्त", "सितंबर", "अक्टूबर", "नवंबर", "दिसंबर"]
+
+
+def _period_words(start: date, end: date) -> tuple[str, str]:
+    """"November 2026" / "नवंबर 2026" for a whole month, else "1 Nov – 15 Nov 2026"."""
+    if start.day == 1 and (end + timedelta(days=1)).day == 1 and start.month == end.month:
+        return start.strftime("%B %Y"), f"{_MONTH_HI[start.month - 1]} {start.year}"
+    return f"{tu.fmt_day(start)} – {tu.fmt_day(end)}", f"{tu.fmt_day_hi(start)} – {tu.fmt_day_hi(end)}"
+
+
+def _who_of(user, task: SharedTask) -> str:
+    if task.staff_id:
+        return task.staff.name
+    if task.assignee_user_id == user.id:
+        return "You"
+    if task.assignee_type == SharedTask.Assignee.MD:
+        return services.md_address()
+    return task.assignee_user.spoken_name if task.assignee_user_id else "Team"
+
+
+def _lateness(due_raw: str, due_kind: str, at: datetime) -> tuple[str, bool]:
+    """("On time" | "Late 2 d" | "No deadline", late?) for a completion at `at` against the deadline it had then."""
+    if not due_raw:
+        return "No deadline", False
+    try:
+        if due_kind == "TIMED" or "T" in due_raw:
+            due_at = datetime.fromisoformat(due_raw)
+            if timezone.is_naive(due_at):
+                due_at = timezone.make_aware(due_at)
+            late_by = at - due_at
+            if late_by.total_seconds() <= 0:
+                return "On time", False
+            hours = int(late_by.total_seconds() // 3600)
+            return (f"Late {late_by.days} d" if late_by.days else f"Late {max(hours, 1)} h"), True
+        due_day = date.fromisoformat(due_raw[:10])
+        done_day = tu.to_local(at).date()
+        if done_day <= due_day:
+            return "On time", False
+        return f"Late {(done_day - due_day).days} d", True
+    except ValueError:
+        return "", False
+
+
+def _done_view(user, include_private: bool, p: dict | None = None) -> dict:
+    """What was finished: the last 14 days by default, or a period ("November mein maine kya complete kiya").
+
+    Counted from the task history, not from today's status: a task done, reopened and done again in the month
+    counts once; one done in November and reopened in December still shows for November; "At period end" says how
+    many were still completed when the period closed. Cancelled ones are counted apart and never as completed.
+    `who` narrows to one person's work ("me" = the speaker's own list), `from_whom` "me" to work the speaker gave.
+    Only work the speaker may see (services.visible_shared_qs) and, when include_private, their own personal tasks."""
+    p = p or {}
+    start, end = p.get("from"), p.get("to")
+    period = bool(start or end)
     today = tu.today_local()
+    if period:
+        end = end or today
+        start = start or (end - timedelta(days=29))
+        start_dt = tu.combine_local(start, time(0, 0))
+        end_dt = tu.combine_local(end + timedelta(days=1), time(0, 0))
+    else:
+        end_dt = timezone.now()
+        start_dt = end_dt - timedelta(days=14)
+    who = (p.get("who") or "").strip().lower()
+    from_whom = (p.get("from_whom") or "").strip().lower()
+
+    qs = services.visible_shared_qs(user)
+    if who in ("me", "my", "mine", "mera", "mere", "self"):
+        qs = qs.filter(Q(assignee_user=user) | Q(assignee_type=SharedTask.Assignee.MD)) if user.is_md else qs.filter(assignee_user=user)
+    elif who and who not in ("all", "everyone", "team", "staff", "sab"):
+        found = services.find_people(who)
+        if len(found["people"]) == 1:
+            qs = qs.filter(assignee_user=found["people"][0])
+        elif who in ("sir", "md", services.md_address().lower()):
+            qs = qs.filter(assignee_type=SharedTask.Assignee.MD)
+    if from_whom in ("me", "mine", "maine"):
+        qs = qs.filter(created_by=user)
+    elif from_whom in ("sir", "md"):
+        qs = qs.filter(created_by__role="MD")
+    task_ids = list(qs.values_list("id", flat=True))
+
+    # One row per task finished in the period: its first completion in the period, with the deadline it had then.
+    done_events = (TaskEvent.objects.filter(task_id__in=task_ids, kind=TaskEvent.Kind.DONE, at__gte=start_dt, at__lt=end_dt)
+                   .select_related("task", "task__assignee_user", "task__staff").order_by("at"))
+    firsts: dict = {}
+    for e in done_events:
+        firsts.setdefault(e.task_id, e)
+    cancelled_ids = set(TaskEvent.objects.filter(task_id__in=task_ids, kind=TaskEvent.Kind.CANCELLED, at__gte=start_dt, at__lt=end_dt)
+                        .exclude(task_id__in=list(firsts)).values_list("task_id", flat=True))
+    # The state each finished task was in when the period closed, and whether it was reopened at any time after.
+    later = (TaskEvent.objects.filter(task_id__in=list(firsts), kind__in=[TaskEvent.Kind.DONE, TaskEvent.Kind.REOPENED, TaskEvent.Kind.CANCELLED])
+             .order_by("at").values_list("task_id", "kind", "at"))
+    at_end: dict = {}
+    reopened_after: set = set()
+    for task_id, kind, at in later:
+        if at < end_dt:
+            at_end[task_id] = kind
+        if kind == TaskEvent.Kind.REOPENED and at > firsts[task_id].at:
+            reopened_after.add(task_id)
+
+    items = []  # (when, row)
+    for task_id, e in firsts.items():
+        t = e.task
+        data = e.data or {}
+        due_raw = data.get("due")
+        if due_raw is None:  # an older step without the deadline recorded: the deadline the task has now
+            due_val = t.original_due_at or t.due_at or t.original_due_date or t.due_date
+            due_raw = due_val.isoformat() if due_val else ""
+        outcome, late = _lateness(due_raw, data.get("due_kind") or t.due_kind, e.at)
+        still_done = at_end.get(task_id) == TaskEvent.Kind.DONE
+        note = "Reopened later" if task_id in reopened_after else ""
+        if not still_done:
+            note = {TaskEvent.Kind.REOPENED: "Reopened before period end", TaskEvent.Kind.CANCELLED: "Cancelled later"}.get(at_end.get(task_id), note)
+        due_label = tu.fmt_day(date.fromisoformat(due_raw[:10])) if due_raw else "—"
+        items.append((e.at, {"id": str(t.id), "scope": "shared", "title": t.title, "who": _who_of(user, t), "kind": t.kind,
+                             "status": "Done" if still_done else "Done, then reopened" if at_end.get(task_id) == TaskEvent.Kind.REOPENED else "Done",
+                             "when": tu.fmt_time(e.at), "day": tu.fmt_day(tu.to_local(e.at).date()), "due": due_label,
+                             "outcome": outcome + (f" · {note}" if note else ""), "late": late, "still_done": still_done,
+                             "priority": t.priority, "progress": 100, "private": False, "overdue": False, "version": t.version,
+                             "hold_reason": ""}))
+    if include_private and (not who or who in ("me", "my", "mine", "mera", "mere", "self")) and not from_whom:
+        for t in PrivateTask.objects.filter(owner=user, status=Status.COMPLETED, completed_at__gte=start_dt, completed_at__lt=end_dt):
+            due_val = t.due_at or t.due_date
+            outcome, late = _lateness(due_val.isoformat() if due_val else "", t.due_kind, t.completed_at)
+            items.append((t.completed_at, {"id": str(t.id), "scope": "private", "title": t.title, "who": "You", "kind": t.kind,
+                                           "status": "Done", "when": tu.fmt_time(t.completed_at),
+                                           "day": tu.fmt_day(tu.to_local(t.completed_at).date()),
+                                           "due": tu.fmt_day(due_val.date() if isinstance(due_val, datetime) else due_val) if due_val else "—",
+                                           "outcome": outcome, "late": late, "still_done": True, "priority": t.priority,
+                                           "progress": 100, "private": True, "overdue": False, "version": t.version, "hold_reason": ""}))
+    items.sort(key=lambda x: x[0], reverse=True)
+    rows = [r for _, r in items[:200]]
+    completed = len(items)
+    still = sum(1 for _, r in items if r["still_done"])
+    late_n = sum(1 for _, r in items if r["late"])
+
+    if period:
+        words, words_hi = _period_words(start, end)
+        title, subtitle = f"Completed · {words}", f"{completed} finished" if completed else f"Nothing finished in {words}"
+    else:
+        words, words_hi = "the last 14 days", "पिछले 14 दिन"
+        title, subtitle = "Completed", "Last 14 days" if rows else "Nothing finished in the last 14 days"
+    view = _table("done", title, rows, [("day", "Day"), ("title", "What"), ("who", "Who"), ("due", "Deadline"), ("outcome", "Outcome")],
+                  subtitle=subtitle)
     week_ago = today - timedelta(days=7)
-    rows = [{"id": i[4], "scope": i[3], "title": i[1], "who": i[2], "kind": "", "status": "Done",
-             "when": tu.fmt_time(i[0]), "day": tu.fmt_day(tu.to_local(i[0]).date()), "priority": "NORMAL",
-             "progress": 100, "private": i[3] == "private", "overdue": False, "version": i[5], "hold_reason": ""} for i in items[:60]]
-    done_today = sum(1 for i in items if tu.to_local(i[0]).date() == today)
-    done_week = sum(1 for i in items if tu.to_local(i[0]).date() >= week_ago)
-    title = "Completed"
-    view = _table("done", title, rows, [("day", "Day"), ("when", "At"), ("title", "What"), ("who", "Who")],
-                  subtitle="Last 14 days" if rows else "Nothing finished in the last 14 days")
-    view["stats"] = [{"label": "Today", "value": done_today, "tone": "success", "icon": "checkmark-done-outline"},
-                     {"label": "This week", "value": done_week, "tone": "accent", "icon": "calendar-outline"},
-                     {"label": "14 days", "value": len(items), "tone": "info", "icon": "stats-chart-outline"}]
+    if period:
+        view["stats"] = [{"label": "Completed", "value": completed, "tone": "success", "icon": "checkmark-done-outline"},
+                         {"label": "At period end", "value": still, "tone": "accent", "icon": "flag-outline"},
+                         {"label": "Late", "value": late_n, "tone": "warn" if late_n else "muted", "icon": "time-outline"},
+                         {"label": "Cancelled", "value": len(cancelled_ids), "tone": "muted", "icon": "close-circle-outline"}]
+    else:
+        view["stats"] = [{"label": "Today", "value": sum(1 for w, _ in items if tu.to_local(w).date() == today), "tone": "success", "icon": "checkmark-done-outline"},
+                         {"label": "This week", "value": sum(1 for w, _ in items if tu.to_local(w).date() >= week_ago), "tone": "accent", "icon": "calendar-outline"},
+                         {"label": "14 days", "value": completed, "tone": "info", "icon": "stats-chart-outline"}]
+    view["period"] = {"from": start.isoformat() if period else None, "to": end.isoformat() if period else None,
+                      "words": words, "words_hi": words_hi, "completed": completed, "at_end": still, "late": late_n,
+                      "cancelled": len(cancelled_ids), "reopened": sum(1 for _, r in items if "Reopened" in r["outcome"])}
     return view
+
+
+def _done_report(user, include_private: bool, p: dict) -> dict:
+    """The completed card with its spoken line: for a period the count comes from the history ("in November you
+    completed 4 tasks, 3 on time; 1 reopened later; 1 cancelled"), otherwise the usual last-14-days card."""
+    view = _done_view(user, include_private, p)
+    address, address_hi = _addr(user)
+    by = {s["label"]: s["value"] for s in view["stats"]}
+    rows = view["rows"]
+    per = view["period"]
+    if per["from"]:
+        one_person = bool(rows) and rows[0]["who"] != "You" and all(r["who"] == rows[0]["who"] for r in rows)
+        whose_en = f"{rows[0]['who']} completed" if one_person else "you completed"
+        whose_hi = f"{rows[0]['who']} ने" if one_person else "आपने"
+        if not rows:
+            return _summ(view, address, address_hi, f"nothing was completed in {per['words']}" + (f"; {per['cancelled']} cancelled." if per["cancelled"] else "."),
+                         f"{per['words_hi']} में कुछ पूरा नहीं हुआ" + (f"; {per['cancelled']} कैंसल हुए।" if per["cancelled"] else "।"))
+        n = per["completed"]
+        en = f"in {per['words']} {whose_en} {n} task{'s' if n != 1 else ''}, {n - per['late']} on time"
+        hi = f"{per['words_hi']} में {whose_hi} {n} काम पूरे किए, {n - per['late']} समय पर"
+        if per["reopened"]:
+            en += f"; {per['reopened']} reopened later"
+            hi += f"; {per['reopened']} बाद में फिर खुले"
+        if per["cancelled"]:
+            en += f"; {per['cancelled']} cancelled"
+            hi += f"; {per['cancelled']} कैंसल"
+        firsts = ", ".join(r["title"] for r in rows[:3])
+        en += f". The list is on your screen: {firsts}" + (f" and {n - 3} more." if n > 3 else ".")
+        hi += f"। लिस्ट स्क्रीन पर है: {firsts}" + (f" और {n - 3} और।" if n > 3 else "।")
+        return _summ(view, address, address_hi, en, hi)
+    if not rows:
+        return _summ(view, address, address_hi, "nothing was finished in the last 14 days.", "पिछले 14 दिन में कुछ पूरा नहीं हुआ।")
+    en = f"{by['Today']} finished today, {by['This week']} this week; latest {rows[0]['title']}" + (f" by {rows[0]['who']}." if rows[0]["who"] not in ("You", "") else ".")
+    hi = f"आज {by['Today']} पूरे हुए, इस हफ़्ते {by['This week']}; सबसे ताज़ा {rows[0]['title']}।"
+    return _summ(view, address, address_hi, en, hi)
 
 
 def _closed_items(user, include_private: bool, statuses: tuple, since: datetime | None):
@@ -612,6 +772,8 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         if p["group"] and listviews.section_of(p) is not None:
             return listviews.tasks_view(user, p, include_private, missing=missing)  # a section is work, not people
         return listviews.people_view(user, p, missing=missing)
+    if kind == "done" or (kind == "tasks" and p.get("filter") == "done" and (p.get("from") or p.get("to"))):
+        return _done_report(user, include_private, p)  # "Mansi ne pichhle mahine kya complete kiya", however the model files it
     if kind == "history":
         view = _history_view(user, include_private, p)
         address, address_hi = _addr(user)
@@ -799,15 +961,6 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         late_people = [r["title"] for r in rows if r["late"]]
         en = f"last 30 days: {by['Assigned']} given, {by['Done']} done, {by['On time']} on time" + (f"; late: {', '.join(late_people[:3])}." if late_people else "; nobody is late.")
         hi = f"पिछले 30 दिन: {by['Assigned']} दिए, {by['Done']} पूरे, {by['On time']} समय पर" + (f"; लेट: {', '.join(late_people[:3])}।" if late_people else "; कोई लेट नहीं है।")
-        return _summ(view, address, address_hi, en, hi)
-    if kind == "done":
-        view = _done_view(user, include_private)
-        by = {s["label"]: s["value"] for s in view["stats"]}
-        rows = view["rows"]
-        if not rows:
-            return _summ(view, address, address_hi, "nothing was finished in the last 14 days.", "पिछले 14 दिन में कुछ पूरा नहीं हुआ।")
-        en = f"{by['Today']} finished today, {by['This week']} this week; latest {rows[0]['title']}" + (f" by {rows[0]['who']}." if rows[0]["who"] not in ("You", "") else ".")
-        hi = f"आज {by['Today']} पूरे हुए, इस हफ़्ते {by['This week']}; सबसे ताज़ा {rows[0]['title']}।"
         return _summ(view, address, address_hi, en, hi)
     if kind == "cancelled":
         view = _cancelled_view(user, include_private)

@@ -11,7 +11,7 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.db.models import Q
 
-from .crypto import EncryptedTextField
+from .crypto import DeterministicEncryptedTextField, EncryptedTextField
 
 
 class User(AbstractUser):
@@ -284,10 +284,12 @@ class SharedTask(TaskFields):
         FAILED = "FAILED", "Not assigned"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    title = models.CharField(max_length=200)
-    notes = models.TextField(blank=True, default="")
-    description = models.TextField(blank=True, default="")  # full spoken instruction, kept as-is for TaskPanel
-    announcement = models.TextField(blank=True, default="")
+    # Every word of the work is encrypted at rest (Nov 2026): the title in the deterministic form, so a lookup by
+    # exact title still works; notes, the spoken instruction and the announcement randomised. See core/crypto.py.
+    title = DeterministicEncryptedTextField()
+    notes = EncryptedTextField(blank=True, default="")
+    description = EncryptedTextField(blank=True, default="")  # full spoken instruction, kept as-is for TaskPanel
+    announcement = EncryptedTextField(blank=True, default="")
     assignee_type = models.CharField(max_length=5, choices=Assignee.choices)
     # The JARVIS account this is for (assignee_type MD or USER); empty for TaskPanel staff work.
     assignee_user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT,

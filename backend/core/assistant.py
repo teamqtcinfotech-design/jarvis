@@ -1012,10 +1012,18 @@ def _person_label(name: str) -> str:
     return name.title() if name == name.lower() else name
 
 
+# Work or a message FOR SOMEONE ELSE: the names inside the instruction are that person's business ("Nikki ko bolo
+# Aman ko bole mujhe call kare" — Nikki knows Aman). JARVIS never questions them; the item is saved as said.
+_FOR_SOMEONE_ELSE = {"delegation", "team_delegation", "person_task", "person_meeting", "message", "md_request",
+                     "pa_task", "pa_meeting", "mg_task"}
+
+
 def _check_people(user: User, cmd: dict, draft: dict, address: str, history: list | None) -> None:
-    """Every person named must be someone JARVIS knows for this speaker: staff, the PA, a saved contact, or a
-    name already in their own tasks. Otherwise ask who they are (once), offer the nearest known name, and
-    remember the answer. Whatever the speaker explains about a person is saved as a contact straight away."""
+    """The people an item is WITH or ABOUT never stop it from being saved. What the speaker explains about a person
+    ("Aman hamara vendor hai") is remembered as a contact at once. For the speaker's own item, a name JARVIS does not
+    know for them yet is mentioned softly after the save ("I don't know Aman yet; tell me who that is when you have a
+    moment") — asked once, never as a gate; if they carry on without answering, the name is kept as an outside
+    contact so it is not asked again. For an item given to someone else nothing is asked at all."""
     saved = []
     for c in (cmd.get("new_contacts") or [])[:3]:
         if isinstance(c, dict) and str(c.get("name") or "").strip():
@@ -1025,9 +1033,8 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
             except services.ServiceError:
                 pass
     # The person doing the work (or getting the message) is resolved by its own step, which asks its own "which
-    # Rahul?" question; the people it is WITH or ABOUT are checked here.
-    doers = {services.norm_person(n) for n in _recipients_of(cmd)} \
-        if draft["action"] in {"delegation", "person_task", "person_meeting", "message"} else set()
+    # Rahul?" question; the people it is WITH or ABOUT are looked at here.
+    doers = {services.norm_person(n) for n in _recipients_of(cmd)} if draft["action"] in _FOR_SOMEONE_ELSE else set()
     doers |= {services.norm_person(a.get("name") or "") for a in (draft.get("assignees") or []) if isinstance(a, dict)}
     names: list[str] = []
     for n in (cmd.get("people") or [])[:4]:
@@ -1036,48 +1043,64 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
             names.append(n.strip())
     draft["people"] = names
     draft["contacts_saved"] = saved
-    # A question the server itself built (which staff member, nobody in that team, no PA yet) is answered first.
-    model_question = (cmd.get("clarification_question") or "").strip()
-    if draft["needs_clarification"] and draft["action"] != "choose_destination" and draft["question"] != model_question:
+    draft["unknown_people"] = []
+    if draft["action"] in _FOR_SOMEONE_ELSE:
+        if saved:
+            draft["warnings"] = list(draft.get("warnings") or []) + [f"Saved as a contact: {', '.join(saved)}"]
         return
     last_jarvis = " ".join(str(t.get("text", "")) for t in (history or [])[-3:] if t.get("role") == "jarvis").lower()
-    address_hi = services.address_hi_of(user)
-    sir, sir_hi = services.md_address(), services.md_address_hi()
     for name in names:
         label = _person_label(name)
         found = services.resolve_person(user, name)
-        if found["status"] == "known":
-            continue
-        if found["status"] == "ambiguous":
-            if f"which {label}".lower() in last_jarvis:
-                continue  # asked already; the answer is in the sentence now, do not ask in a loop
-            draft["needs_clarification"] = True
-            draft["question"] = f"{address}, which {label}: {' or '.join(found['options'])}?"
-            draft["question_hi"] = f"{address_hi}, कौन से {label}: {' या '.join(found['options'])}?"
-            return
-        if f"don't know any {label}".lower() in last_jarvis or f"किसी {label} को नहीं जानता".lower() in last_jarvis:
-            # Asked once already and the speaker carried on: take the name as an outside contact and move on.
+        if found["status"] in ("known", "ambiguous"):
+            continue  # two contacts with one name change nothing about what is saved
+        if f"don't know {label}".lower() in last_jarvis or f"{label} को मैं अभी नहीं जानता".lower() in last_jarvis:
+            # Mentioned last time and the speaker carried on: an outside contact from now on, not asked again.
             try:
                 services.add_contact(user, label, "")
                 saved.append(label)
             except services.ServiceError:
                 pass
             continue
-        hint = f" Or did you mean {found['suggestions'][0]}?" if found["suggestions"] else ""
-        hint_hi = f" या आपका मतलब {found['suggestions'][0]} था?" if found["suggestions"] else ""
-        whose = whose_hi = ""
-        if draft["action"] == "choose_destination":
-            whose = (" And should I keep this for you, or give it to someone on the team?" if user.is_md
-                     else f" And is this for {sir}, for you, or for someone on the team?")
-            whose_hi = (" और इसे आपके लिए रखूँ, या टीम में किसी को दूँ?" if user.is_md
-                        else f" और ये {sir_hi} के लिए है, आपके लिए, या टीम में किसी के लिए?")
-        draft["needs_clarification"] = True
-        draft["question"] = f"{address}, I don't know any {label}. Is {label} on the staff, or an outside contact?{hint}{whose}"
-        draft["question_hi"] = (f"{address_hi}, मैं किसी {label} को नहीं जानता। क्या {label} स्टाफ़ में हैं, "
-                                f"या बाहर के कॉन्टैक्ट?{hint_hi}{whose_hi}")
-        return
+        draft["unknown_people"].append({"name": label, "suggestion": found["suggestions"][0] if found["suggestions"] else ""})
     if saved:
         draft["warnings"] = list(draft.get("warnings") or []) + [f"Saved as a contact: {', '.join(saved)}"]
+
+
+def _save_contacts(user: User, cmd: dict, draft: dict) -> list[str]:
+    """"Aman hamara vendor hai" said on its own (an answer to the soft word, or just mentioned): remembered now."""
+    saved = []
+    for c in (cmd.get("new_contacts") or [])[:3]:
+        if isinstance(c, dict) and str(c.get("name") or "").strip():
+            try:
+                services.add_contact(user, str(c["name"]), str(c.get("note") or ""))
+                saved.append(_person_label(str(c["name"])))
+            except services.ServiceError:
+                pass
+    if saved:
+        draft["contacts_saved"] = saved
+        draft["warnings"] = list(draft.get("warnings") or []) + [f"Saved as a contact: {', '.join(saved)}"]
+        if not draft.get("spoken_reply") or draft["action"] in ("unknown", "answer") and not draft.get("needs_clarification"):
+            names = ", ".join(saved)
+            draft["spoken_reply"] = f"Noted: {names}."
+            draft["reply_en"], draft["reply_hi"] = draft["spoken_reply"], f"नोट कर लिया: {names}।"
+    return saved
+
+
+def _mention_unknown_people(draft: dict) -> None:
+    """After a save: the soft word about a person JARVIS does not know yet, in the reply's language."""
+    unknown = draft.get("unknown_people") or []
+    if not unknown or draft["needs_clarification"] or not draft.get("spoken_reply"):
+        return
+    if not (draft.get("booked") or draft["action"] in SAVE_ACTIONS):
+        return
+    names = ", ".join(u["name"] for u in unknown)
+    hint = next((u["suggestion"] for u in unknown if u["suggestion"]), "")
+    en = f" I don't know {names} yet; tell me who that is when you have a moment." + (f" Or did you mean {hint}?" if hint else "")
+    hi = f" {names} को मैं अभी नहीं जानता; जब समय हो, बता दीजिए कौन हैं।" + (f" या आपका मतलब {hint} था?" if hint else "")
+    draft["spoken_reply"] = draft["spoken_reply"].rstrip() + en
+    draft["speak_text"] = (draft.get("speak_text") or "").rstrip() + (hi if draft.get("speak_lang") == "hi" else en)
+    draft["warnings"] = list(draft.get("warnings") or []) + [f"Not known yet: {names}"]
 
 
 def _rebuilt(pending: dict, new: dict) -> dict:
@@ -1959,9 +1982,12 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 _say(draft, f"Sorry {address}, I didn't catch that. Please say it again or type it.",
                      f"माफ़ कीजिए {address_hi}, समझ नहीं आया। फिर से बोलिए या टाइप कर दीजिए।")
 
-    # Does JARVIS know the people named? Never book something with a name nobody recognises.
+    # The people named: what the speaker explains about someone is remembered; a stranger in the speaker's own item
+    # is mentioned softly after the save; an item for someone else is never questioned (see _check_people).
     if (draft["action"] in TASK_ACTIONS or draft["action"] == "choose_destination") and not is_reminder:
         _check_people(user, cmd, draft, address, history)
+    else:
+        _save_contacts(user, cmd, draft)
     if is_reminder:
         draft["title"] = draft["title"] or "Reminder"
         if not (draft["due_date"] and draft["due_time"]) and not draft["needs_clarification"]:
@@ -2162,4 +2188,5 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             draft["speak_text"], draft["speak_lang"] = f"एक सेकंड {address_hi}, देख रहा हूँ।", "hi"
         elif draft["action"] == "end":
             draft["speak_text"], draft["speak_lang"] = f"ठीक है {address_hi}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।", "hi"
+    _mention_unknown_people(draft)
     return draft

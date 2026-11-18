@@ -152,7 +152,7 @@ interface EngineValue {
   acknowledge: (item: EngineItem) => Promise<void>;
   acknowledgeAllHeld: () => Promise<void>;
   /** "Later": in `minutes`, at `until` (ISO), or the person's usual snooze. Resolves to when it comes back. */
-  snooze: (item: EngineItem, minutes?: number, until?: string) => Promise<{ until: string; label: string; labelHi: string } | null>;
+  snooze: (item: EngineItem, minutes?: number, until?: string) => Promise<{ until: string; label: string; labelHi: string; note: string; noteHi: string } | null>;
   complete: (item: EngineItem) => Promise<void>;
   decideRequest: (item: EngineItem, accept: boolean) => Promise<void>;
   reveal: () => void;
@@ -1020,7 +1020,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
    * time it comes back, as the server says it ("at 4:25 PM"), or null when only the phone could keep it.
    */
   const snooze = useCallback(
-    async (item: EngineItem, minutes?: number, until?: string): Promise<{ until: string; label: string; labelHi: string } | null> => {
+    async (item: EngineItem, minutes?: number, until?: string): Promise<{ until: string; label: string; labelHi: string; note: string; noteHi: string } | null> => {
       followups.current.delete(item.key);
       queueRef.current = queueRef.current.filter((q) => q.key !== item.key);
       setQueued(queueRef.current.length);
@@ -1031,9 +1031,11 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (item.source === 'reminder') body.key = item.key;
       else if (item.alertId) body.alert_id = item.alertId;
       try {
-        const res = await api<{ until: string; until_label: string; until_label_hi?: string }>('/reminders/snooze/', { method: 'POST', body });
+        const res = await api<{ until: string; until_label: string; until_label_hi?: string; note?: string; note_hi?: string }>('/reminders/snooze/', { method: 'POST', body });
         dataChanged.emit();
-        return { until: res.data.until, label: res.data.until_label, labelHi: res.data.until_label_hi ?? '' };
+        // The server's word on what the snooze does not do: "after its deadline; the deadline stays", the nudge after
+        // the third "later". Spoken after the time it comes back.
+        return { until: res.data.until, label: res.data.until_label, labelHi: res.data.until_label_hi ?? '', note: res.data.note ?? '', noteHi: res.data.note_hi ?? '' };
       } catch {
         // Offline: this phone keeps it itself until the server can be reached again.
         const at = until ? Date.parse(until) : Date.now() + (minutes ?? prefsRef.current.snoozeMinutes) * 60_000;

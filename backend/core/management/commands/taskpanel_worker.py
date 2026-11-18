@@ -15,7 +15,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 
-from core import followups, reminderpush, ringing
+from core import followups, reminderpush, ringing, services
 from core import timeutils as tu
 from core.taskpanel import dispatcher, sync
 
@@ -36,10 +36,18 @@ class Command(BaseCommand):
             f"TaskPanel worker started ({settings.TASKPANEL_MODE} mode). Ctrl+C to stop."))
         last_pull = last_dir = 0.0
         last_follow = -1e9  # first cycle runs the follow-up check straight away
+        cleaned_on = None   # the local date the alert cleanup last ran (once a day, in the small hours)
         while not stop["flag"]:
             close_old_connections()
             now = time.monotonic()
             try:
+                # Alerts older than a week go, once a day between 3 and 4 in the morning (tasks are never touched).
+                local = tu.now_local()
+                if cleaned_on != local.date() and local.hour == 3:
+                    cleaned_on = local.date()
+                    gone = services.cleanup_alerts()
+                    if gone:
+                        self.stdout.write(f"{local:%H:%M:%S}  alert cleanup: {gone} old entr{'y' if gone == 1 else 'ies'} deleted")
                 # Reminders at their exact moment: pushed to the phones as soon as they come due (every cycle).
                 pushed = reminderpush.run()
                 if pushed:

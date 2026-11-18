@@ -60,6 +60,22 @@ Without it push is off and the phones fall back to a half-minute check.
 | Change MD's task | edits directly | proposes → MD approves |
 | MD calendar | full | "Busy 11–12" only |
 
+**Work tasks (the team, Nov 2026):** everyone sees only their own list and what they gave or received; the MD sees all
+work. Personal items are their owner's alone — not the MD's, not anyone's. This holds on every screen and for every
+voice question ("Mansi ke tasks batao" from Nikki returns nothing of Mansi's), see `tests_tasks_core.py`.
+
+**Encryption — the exact promise.** Every task's words (title, notes, the spoken instruction, the announcement) and
+every personal item are encrypted at rest with a key kept in `backend/.env`, outside the database (`core/crypto.py`).
+A database dump, a backup or anyone with database access reads nothing. The *running* JARVIS server can read them:
+it must, to remind, brief, file, answer and sync staff work to TaskPanel (where staff tasks are kept in plain text by
+that system). Titles use a deterministic form so an exact lookup still works; what that gives away is only that two
+tasks share a title. Alerts (7-day news) and pending requests are not encrypted. Nothing here protects against a
+compromised server or phone.
+
+**Alerts expire, tasks stay.** The alert feed is news: entries older than 7 days are deleted once a day (worker,
+3 AM). Tasks, their history (`TaskEvent`) and their reminders are never touched by that; a month's completed-task
+report is computed from the history and works long after the alerts are gone.
+
 ## Smart alerts
 
 Speak when he is with the phone · vibrate silently with generic text during a meeting / face down / quiet hours (urgent only) ·
