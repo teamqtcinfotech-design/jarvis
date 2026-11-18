@@ -10,7 +10,7 @@
  *    work or a message from the team: those stay until Seen.
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { Animated, Pressable, StyleSheet, View } from 'react-native';
+import { Animated, PanResponder, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { type EngineItem, useAlertEngine } from '@/lib/alertEngine';
@@ -21,6 +21,10 @@ import { colors, kindIcon, priorityColor, priorityLabel, radius, shadow } from '
 import { Button, Icon, Txt } from './ui';
 
 const MAX_ROWS = 3;
+// The banner sits UNDER the screen's own top bar (menu, title, settings), never over it: those stay tappable.
+const BELOW_TOP_BAR = 54;
+// After this long the card folds into a slim pill by itself, so the screen underneath is usable; a tap unfolds it.
+const FOLD_AFTER_MS = 7000;
 
 /** "Incoming task" / "New task" / "Message" / "Update" / "Urgent reminder". */
 function labelOf(item: EngineItem): string {
@@ -79,6 +83,26 @@ export function AlertBanner() {
   const urgent = item?.priority === 'URGENT';
   const others = useMemo(() => engine.waiting.filter((w) => w.key !== item?.key), [engine.waiting, item?.key]);
   const [showAll, setShowAll] = useState(false);
+  // Folded = the slim pill (who, what, how many more); unfolded = the full card. A new item unfolds; after a few
+  // seconds it folds by itself; a swipe up folds it at once; a tap on the pill unfolds it again.
+  const [folded, setFolded] = useState(false);
+  const [foldedKey, setFoldedKey] = useState('');
+  if (item && item.key !== foldedKey) {
+    setFoldedKey(item.key);
+    setFolded(false);
+  }
+  useEffect(() => {
+    if (!item || folded) return undefined;
+    const t = setTimeout(() => setFolded(true), FOLD_AFTER_MS);
+    return () => clearTimeout(t);
+  }, [item, folded]);
+  const pan = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dy) > 12 && Math.abs(g.dy) > Math.abs(g.dx),
+    onPanResponderRelease: (_e, g) => {
+      if (g.dy < -30) setFolded(true);     // swipe up: out of the way
+      else if (g.dy > 30) setFolded(false); // swipe down: the whole card
+    },
+  }), []);
 
   useEffect(() => {
     Animated.spring(slide, { toValue: item ? 0 : -320, useNativeDriver: true, friction: 9 }).start();
@@ -104,10 +128,34 @@ export function AlertBanner() {
   const title = item.concealed ? (item.priority === 'URGENT' ? 'Urgent private reminder' : 'Private reminder') : item.title;
   const rows = showAll ? others : others.slice(0, MAX_ROWS);
   const more = others.length - rows.length;
+  const quick = () => (item.ring ? engine.markSeen(item) : item.source === 'reminder' || isRequest ? setFolded(false) : engine.acknowledge(item));
+
+  if (folded) {
+    // The pill: one line under the top bar, the screen free beneath. Tap = the full card; the eye = Seen / Got it.
+    return (
+      <Animated.View style={[s.wrap, { top: insets.top + BELOW_TOP_BAR, transform: [{ translateY: slide }] }]} pointerEvents="box-none" {...pan.panHandlers}>
+        <Pressable onPress={() => setFolded(false)} style={({ pressed }) => [s.pill, { borderColor: color }, pressed && { opacity: 0.85 }]} accessibilityLabel="Show what is waiting">
+          <Avatar item={item} size={24} />
+          {item.ring ? <View style={{ marginLeft: 8 }}><RingDot color={color} /></View> : null}
+          <Txt variant="small" numberOfLines={1} style={{ flex: 1, marginLeft: item.ring ? 2 : 8, fontWeight: '600', color: colors.text }}>
+            {item.from ? `${item.from} · ` : ''}{item.concealed ? 'Private reminder' : item.title}
+          </Txt>
+          {others.length ? (
+            <View style={[s.countPill, { backgroundColor: color, marginLeft: 6 }]}>
+              <Txt variant="caption" style={{ color: colors.white, fontWeight: '700' }}>+{others.length}</Txt>
+            </View>
+          ) : null}
+          <Pressable onPress={quick} hitSlop={8} style={[s.pillAct, { borderColor: color }]} accessibilityLabel={item.ring ? item.seenLabel || 'Seen' : 'Open'}>
+            <Icon name={item.ring ? 'eye-outline' : 'chevron-down'} size={15} color={color} />
+          </Pressable>
+        </Pressable>
+      </Animated.View>
+    );
+  }
 
   return (
-    <Animated.View style={[s.wrap, { top: insets.top + 8, transform: [{ translateY: slide }] }]} pointerEvents="box-none">
-      <View style={[s.card, { borderLeftColor: color }]}>
+    <Animated.View style={[s.wrap, { top: insets.top + BELOW_TOP_BAR, transform: [{ translateY: slide }] }]} pointerEvents="box-none">
+      <View style={[s.card, { borderLeftColor: color }]} {...pan.panHandlers}>
         {urgent ? (
           <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, s.glow, { borderColor: color, opacity: glow }]} />
         ) : null}
@@ -134,6 +182,9 @@ export function AlertBanner() {
               <Txt variant="caption" style={{ color: colors.white, fontWeight: '700' }}>+{others.length}</Txt>
             </View>
           ) : null}
+          <Pressable onPress={() => setFolded(true)} hitSlop={10} style={s.fold} accessibilityLabel="Fold away">
+            <Icon name="chevron-up" size={18} color={colors.faint} />
+          </Pressable>
         </View>
 
         <Txt variant="heading" numberOfLines={3} style={{ marginTop: 10 }}>{title}</Txt>
@@ -233,6 +284,23 @@ const s = StyleSheet.create({
   avatar: { alignItems: 'center', justifyContent: 'center' },
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   countPill: { minWidth: 30, height: 22, borderRadius: 11, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+  fold: { marginLeft: 6, width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    maxWidth: '100%',
+    backgroundColor: colors.surface,
+    borderRadius: 24,
+    borderWidth: 1.5,
+    paddingLeft: 6,
+    paddingRight: 6,
+    paddingVertical: 6,
+    ...shadow,
+    shadowOpacity: 0.18,
+    elevation: 10,
+  },
+  pillAct: { width: 30, height: 30, borderRadius: 15, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
   reveal: { flexDirection: 'row', alignItems: 'center', marginTop: 10, marginLeft: 46 },
   actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
   // the stack beneath: a little narrower, so it reads as cards under the first one
