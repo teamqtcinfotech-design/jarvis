@@ -526,10 +526,9 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
    */
   const presentItem = useCallback(
     (raw: EngineItem) => {
-      // Ring until seen: opening it from its notification IS seeing it. The ringing stops and the sender is told;
-      // a message then needs no question, work still asks "Shall I tell Sir when you'll do it?".
-      const item = raw.ring ? { ...raw, ring: false, question: raw.question?.kind === 'seen' ? null : raw.question } : raw;
-      if (raw.ring && raw.alertId) api(`/alerts/${raw.alertId}/seen/`, { method: 'POST', body: {} }).catch(() => undefined);
+      // Ring until seen: being brought to the screen is NOT seeing it (18 Nov 2026: Seen is only ever the person's
+      // own act — the Seen button, "dekh liya" by voice, or opening the task). It keeps ringing until then.
+      const item = raw;
       handled.current.add(item.key);
       snoozed.current.delete(item.key);
       followups.current.delete(item.key);

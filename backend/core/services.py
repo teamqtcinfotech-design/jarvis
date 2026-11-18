@@ -809,12 +809,17 @@ def snooze_notes(user: User, key: str, until: datetime) -> dict:
 
 
 def snooze_alert(user: User, alert_id, until: datetime) -> Alert:
+    """"Later" on an alert: out of sight until `until`, then announced afresh. On something that rings until seen
+    this is NOT seen (18 Nov 2026: Seen is only the person's own word or tap): the ringing pauses until then and
+    starts again; the sender is told nothing, and the "not seen yet" clock keeps running honestly."""
     alert = Alert.objects.get(id=alert_id, recipient=user)
-    if alert.ring and alert.seen_at is None:
-        mark_seen(user, alert)  # "later" means they have seen it: the ringing stops, the sender is told
     alert.snoozed_until = until
     alert.delivered_at = None  # announced afresh when it comes back
-    alert.save(update_fields=["snoozed_until", "delivered_at"])
+    fields = ["snoozed_until", "delivered_at"]
+    if alert.ring and alert.seen_at is None and alert.next_ring_at is not None:
+        alert.next_ring_at = max(alert.next_ring_at, until)  # the next ting comes when it comes back
+        fields.append("next_ring_at")
+    alert.save(update_fields=fields)
     return alert
 
 

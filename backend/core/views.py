@@ -1017,10 +1017,13 @@ class AlertAckView(APIView):
         told = None
         said = request.data.get("seen") if isinstance(request.data, dict) else None
         # "Shall I tell Sunil you've seen it?" — yes: whoever gave the task or sent the message learns it was seen;
-        # no: seen, but nobody is told. "Got it" on something that rings until seen counts as Seen (and tells).
-        tell = said in (True, "true", 1, "1") if said is not None else bool(alert.ring)
-        if alert.seen_at is None and (alert.ring or tell):  # seen before (an answer, a Start): nothing more to say
-            told = services.mark_seen(request.user, alert, tell=tell)
+        # no: seen, but nobody is told. Seen is only ever the person's own answer: a plain "Got it" / a dismissed
+        # notification / a cleared list never counts as Seen (18 Nov 2026), and something that rings until seen
+        # cannot be put away by it — it keeps ringing until the Seen button or the word.
+        if said is not None and alert.seen_at is None:
+            told = services.mark_seen(request.user, alert, tell=said in (True, "true", 1, "1"))
+        if alert.ring and alert.seen_at is None:
+            return Response({"acknowledged": None, "still_ringing": True, "told": None, "told_to": "", "told_to_hi": ""})
         if not alert.acknowledged_at:
             alert.acknowledged_at = timezone.now()
             alert.save(update_fields=["acknowledged_at"])

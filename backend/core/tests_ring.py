@@ -175,17 +175,25 @@ class RingUntilSeenTests(BaseCase):
         self.assertEqual((listed["ring"], listed["ringing"]), (False, False))
         self.assertIsNotNone(listed["seen_at"])
 
-    def test_got_it_on_a_ringing_message_is_seen_and_no_means_nobody_is_told(self):
+    def test_only_the_persons_own_word_is_seen_and_no_means_nobody_is_told(self):
         services.send_message_to(self.md, [self.sunil, self.kiran], "Office closed tomorrow")
         a1 = Alert.objects.get(recipient=self.sunil, ref_type="message")
         a2 = Alert.objects.get(recipient=self.kiran, ref_type="message")
         self.assertTrue(a1.ring and a2.ring)
-        self.sunil_client.post(f"/api/v1/alerts/{a1.id}/ack/", {}, format="json")  # "Got it"
-        self.kiran_client.post(f"/api/v1/alerts/{a2.id}/ack/", {"seen": False}, format="json")  # "no, don't tell"
+        # A plain "Got it" (the list cleared, the notification swiped) is not Seen: it keeps ringing (18 Nov 2026).
+        r = self.sunil_client.post(f"/api/v1/alerts/{a1.id}/ack/", {}, format="json")
+        self.assertTrue(r.json()["still_ringing"])
+        # Kiran's own answer "no, don't tell": seen, and nobody is told.
+        self.kiran_client.post(f"/api/v1/alerts/{a2.id}/ack/", {"seen": False}, format="json")
         a1.refresh_from_db()
         a2.refresh_from_db()
-        self.assertIsNotNone(a1.seen_at)
+        self.assertIsNone(a1.seen_at)
         self.assertIsNotNone(a2.seen_at)
+        self.assertFalse(Alert.objects.filter(recipient=self.md, ref_type="seen").exists())
+        # Sunil's own "yes": seen, and Sir is told — once.
+        self.sunil_client.post(f"/api/v1/alerts/{a1.id}/ack/", {"seen": True}, format="json")
+        a1.refresh_from_db()
+        self.assertIsNotNone(a1.seen_at)
         told = Alert.objects.filter(recipient=self.md, ref_type="seen")
         self.assertEqual([t.ref_id for t in told], [str(a1.id)])
         self.assertIsNone(services.alert_question(a1))  # seen: no more "shall I tell Sir you've seen it?"
@@ -351,9 +359,34 @@ class RingUntilSeenTests(BaseCase):
         task2.refresh_from_db()
         self.assertEqual(tu.to_local(task2.promise_at).hour, 10)
 
-    def test_later_on_a_ringing_alert_counts_as_seen(self):
+    def test_later_on_a_ringing_alert_is_not_seen_it_only_pauses_the_ringing(self):
+        # 18 Nov 2026: Seen is only ever the person's own act. "Later" pauses the ringing until then; the sender is
+        # told nothing, and the honest "not seen yet" clock keeps running.
         _task, alert = self.give()
-        services.snooze_alert(self.sunil, alert.id, timezone.now() + timedelta(minutes=15))
+        later = timezone.now() + timedelta(minutes=15)
+        services.snooze_alert(self.sunil, alert.id, later)
+        alert.refresh_from_db()
+        self.assertIsNone(alert.seen_at)
+        self.assertFalse(Alert.objects.filter(recipient=self.md, ref_type="seen").exists())
+        self.assertTrue(alert.ring)
+        self.assertGreaterEqual(alert.next_ring_at, later)          # quiet until it comes back, then it rings again
+        self.assertEqual(ringing.run(timezone.now())["rung"], 0)
+        self.assertGreaterEqual(ringing.run(later + timedelta(seconds=1))["rung"], 1)
+
+    def test_a_plain_got_it_or_a_cleared_list_never_counts_as_seen(self):
+        _task, alert = self.give()
+        client = APIClient()
+        client.force_authenticate(self.sunil)
+        r = client.post(f"/api/v1/alerts/{alert.id}/ack/", {}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["still_ringing"])
+        alert.refresh_from_db()
+        self.assertIsNone(alert.seen_at)
+        self.assertIsNone(alert.acknowledged_at)                       # it stays, and keeps ringing
+        self.assertFalse(Alert.objects.filter(recipient=self.md, ref_type="seen").exists())
+        # His own word ("yes, tell Sir I've seen it") is what counts.
+        r = client.post(f"/api/v1/alerts/{alert.id}/ack/", {"seen": True}, format="json")
+        self.assertEqual(r.status_code, 200)
         alert.refresh_from_db()
         self.assertIsNotNone(alert.seen_at)
         self.assertTrue(Alert.objects.filter(recipient=self.md, ref_type="seen").exists())
