@@ -15,7 +15,7 @@ from .models import Kind, PrivateTask, SharedTask, Status, TaskEvent
 
 VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
               "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person",
-              "department", "departments", "section"]
+              "department", "departments", "section", "messages"]
 
 _PROGRESS = {Status.OPEN: 0, Status.IN_PROGRESS: 50, Status.BLOCKED: 50, Status.COMPLETED: 100, Status.CANCELLED: 0}
 _REMOTE_PROGRESS = {"todo": 0, "working": 50, "waiting": 50, "done": 100}
@@ -525,6 +525,105 @@ def _done_report(user, include_private: bool, p: dict) -> dict:
     return _summ(view, address, address_hi, en, hi)
 
 
+def _messages_view(user, p: dict) -> dict:
+    """Messages this person sent or received, kept for good (core.models.Message): inbox, sent or both, with one
+    other person ("Mansi ne kya message bheja tha" / "maine Nikki ko kya kaha tha"), a period, and words. Only the
+    messages the person was part of exist for them at all; nobody reads a message between two others."""
+    from .models import Message, MessageReceipt  # noqa: PLC0415
+    box = (p.get("filter") or "").lower()            # "inbox" | "sent" | "" (both)
+    who = (p.get("who") or "").strip()
+    words = [w.lower() for w in (p.get("words") or "").split() if len(w) > 1]
+    start, end = p.get("from"), p.get("to")
+    other = None
+    if who and who.lower() not in listviews_me():
+        found = services.find_people(who)
+        if len(found["people"]) == 1:
+            other = found["people"][0]
+        elif who.lower() in ("sir", "md", services.md_address().lower()):
+            other = services.get_md()
+    sent = Message.objects.filter(sender=user).prefetch_related("receipts__recipient")
+    received = MessageReceipt.objects.filter(recipient=user).select_related("message__sender")
+    if other is not None:
+        sent = sent.filter(receipts__recipient=other).distinct()
+        received = received.filter(message__sender=other)
+    if start:
+        s = tu.combine_local(start, time(0, 0))
+        sent, received = sent.filter(sent_at__gte=s), received.filter(message__sent_at__gte=s)
+    if end:
+        e = tu.combine_local(end + timedelta(days=1), time(0, 0))
+        sent, received = sent.filter(sent_at__lt=e), received.filter(message__sent_at__lt=e)
+    items = []
+    if box in ("", "inbox"):
+        for r in received.order_by("-message__sent_at")[:300]:
+            m = r.message
+            items.append((m.sent_at, {"id": str(m.id), "scope": "message", "box": "inbox", "title": m.text, "who": f"From {_person_name(m.sender)}",
+                                      "day": tu.fmt_day(tu.to_local(m.sent_at).date()), "when": tu.fmt_time(m.sent_at), "kind": "MESSAGE",
+                                      "status": "Seen" if r.seen_at else "New", "seen": r.seen_at.isoformat() if r.seen_at else "",
+                                      "priority": m.priority, "progress": 100 if r.seen_at else 0, "private": False, "overdue": False,
+                                      "version": None, "hold_reason": ""}))
+    if box in ("", "sent"):
+        for m in sent.order_by("-sent_at")[:300]:
+            rs = list(m.receipts.all())
+            names = ", ".join(_person_name(r.recipient) for r in rs)
+            seen = [r for r in rs if r.seen_at]
+            status = ("Seen" if len(seen) == len(rs) else f"Seen by {len(seen)} of {len(rs)}" if seen else "Not seen yet") if rs else ""
+            items.append((m.sent_at, {"id": str(m.id), "scope": "message", "box": "sent", "title": m.text, "who": f"To {names}",
+                                      "day": tu.fmt_day(tu.to_local(m.sent_at).date()), "when": tu.fmt_time(m.sent_at), "kind": "MESSAGE",
+                                      "status": status, "seen": max((r.seen_at for r in seen), default=None).isoformat() if seen else "",
+                                      "priority": m.priority, "progress": 100 if seen and len(seen) == len(rs) else 0, "private": False,
+                                      "overdue": False, "version": None, "hold_reason": ""}))
+    if words:
+        items = [(w, r) for w, r in items if all(x in r["title"].lower() for x in words)]
+    items.sort(key=lambda x: x[0], reverse=True)
+    rows = [r for _, r in items[:200]]
+    label = {"inbox": "Messages received", "sent": "Messages sent", "": "Messages"}[box]
+    if other is not None:
+        label += f" · {_person_name(other)}"
+    if start or end:
+        words_en, _ = _period_words(start or end, end or start)
+        label += f" · {words_en}"
+    view = _table("messages", label, rows, [("day", "Day"), ("when", "At"), ("who", "With"), ("title", "Message"), ("status", "Seen")],
+                  subtitle=f"{len(rows)} message{'s' if len(rows) != 1 else ''}" if rows else "No messages")
+    unseen = sum(1 for r in rows if r["box"] == "inbox" and r["status"] == "New")
+    view["stats"] = [{"label": "Received", "value": sum(1 for r in rows if r["box"] == "inbox"), "tone": "accent", "icon": "mail-outline"},
+                     {"label": "Sent", "value": sum(1 for r in rows if r["box"] == "sent"), "tone": "info", "icon": "send-outline"},
+                     {"label": "Unread", "value": unseen, "tone": "warn" if unseen else "muted", "icon": "mail-unread-outline"}]
+    view["other"] = _person_name(other) if other is not None else ""
+    return view
+
+
+def _person_name(u) -> str:
+    return services.md_address() if u is not None and u.is_md else (u.spoken_name if u is not None else "someone")
+
+
+def listviews_me() -> set:
+    from . import listviews  # noqa: PLC0415
+    return set(listviews._ME) | {"my", "mine", "mera", "mere"}
+
+
+def _messages_report(user, p: dict) -> dict:
+    view = _messages_view(user, p)
+    address, address_hi = _addr(user)
+    rows = view["rows"]
+    if not rows:
+        what = f"from {view['other']}" if view["other"] and (p.get("filter") or "") != "sent" else f"to {view['other']}" if view["other"] else ""
+        return _summ(view, address, address_hi, f"there are no messages {what}.".replace("  ", " "), f"{view['other'] + ' के साथ ' if view['other'] else ''}कोई मैसेज नहीं है।")
+    n = len(rows)
+    last = rows[0]
+    en = (f"{n} message{'s' if n != 1 else ''}" + (f" with {view['other']}" if view["other"] else "")
+          + f"; the latest, {last['day']} {last['when']}, {last['who'].lower()}: {last['title']}")
+    hi = (f"{n} मैसेज" + (f" {view['other']} के साथ" if view["other"] else "")
+          + f"; सबसे नया, {last['day']} {last['when']}: {last['title']}")
+    unseen = next((s["value"] for s in view["stats"] if s["label"] == "Unread"), 0)
+    if unseen:
+        en += f". {unseen} not seen yet."
+        hi += f"। {unseen} अभी देखे नहीं।"
+    else:
+        en += "."
+        hi += "।"
+    return _summ(view, address, address_hi, en, hi)
+
+
 def _closed_items(user, include_private: bool, statuses: tuple, since: datetime | None):
     """(when, item dict) for everything this person may see with one of these statuses, newest first."""
     items = []
@@ -774,6 +873,8 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         return listviews.people_view(user, p, missing=missing)
     if kind == "done" or (kind == "tasks" and p.get("filter") == "done" and (p.get("from") or p.get("to"))):
         return _done_report(user, include_private, p)  # "Mansi ne pichhle mahine kya complete kiya", however the model files it
+    if kind == "messages":
+        return _messages_report(user, p)
     if kind == "history":
         view = _history_view(user, include_private, p)
         address, address_hi = _addr(user)

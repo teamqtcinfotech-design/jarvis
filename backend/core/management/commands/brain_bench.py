@@ -115,6 +115,10 @@ BENCH = [
     ("md", "{mg} ne pichhle mahine kya kya complete kiya", {"intent": "query", "view_kind": ["done", "tasks"], "view_who": "{mg}", "view_from": "{last_month_start}", "view_to": "{last_month_end}"}),
     # --- a stranger inside work for someone else is part of the instruction, never a question
     ("md", "Nikki ko bolo ki Aman ko bole mujhe call kare abhi", {"intent": "assign_to_person", "recipients": ["Nikki"]}),
+    # --- messages kept for good
+    ("md", "{mg} ne kya message bheja tha", {"intent": "query", "view_kind": "messages", "view_who": "{mg}"}),
+    ("md", "maine kal {pa} ko kya kaha tha", {"intent": "query", "view_kind": "messages", "view_who": "{pa}", "view_filter": "sent", "view_from": Y, "view_to": Y}),
+    ("pa", "mere messages dikhao", {"intent": "query", "view_kind": "messages"}),
 ]
 
 

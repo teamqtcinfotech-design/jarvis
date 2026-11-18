@@ -37,6 +37,8 @@ from .models import (
     IntegrationCommand,
     Kind,
     Memory,
+    Message,
+    MessageReceipt,
     Priority,
     PrivateTask,
     ReminderAck,
@@ -569,7 +571,13 @@ def mark_alerts_told(user: User, ids: list) -> int:
     clean = [str(i)[:64] for i in ids if i][:100]
     if not clean:
         return 0
-    return Alert.objects.filter(recipient=user, id__in=clean, delivered_at__isnull=True).update(delivered_at=timezone.now())
+    now = timezone.now()
+    told = Alert.objects.filter(recipient=user, id__in=clean, delivered_at__isnull=True)
+    message_ids = list(told.filter(ref_type="message").values_list("ref_id", flat=True))
+    n = told.update(delivered_at=now)
+    if message_ids:
+        MessageReceipt.objects.filter(message_id__in=message_ids, recipient=user, delivered_at__isnull=True).update(delivered_at=now)
+    return n
 
 
 def mark_reminders_told(user: User, keys: list) -> int:
@@ -788,7 +796,7 @@ def snooze_notes(user: User, key: str, until: datetime) -> dict:
     out["snoozes"] = ReminderSnooze.objects.filter(user=user, key__startswith=prefix).count()
     deadline = task.due_at or (tu.combine_local(task.due_date, time(23, 59)) if task.due_date else None)
     notes_en, notes_hi = [], []
-    if deadline is not None and until > deadline and not task.is_closed:
+    if deadline is not None and until > deadline + timedelta(minutes=1) and not task.is_closed:  # the same minute is not "after"
         out["past_deadline"] = True
         when, when_hi = (tu.fmt_time(deadline), tu.fmt_time_hi(deadline)) if task.due_at else (tu.fmt_day(task.due_date), tu.fmt_day_hi(task.due_date))
         notes_en.append(f"That is after its deadline ({when}); the deadline itself stays.")
@@ -1867,6 +1875,10 @@ def mark_seen(user: User, alert: Alert, *, tell: bool = True) -> Alert | None:
         alert.delivered_at = alert.delivered_at or now
         Alert.objects.filter(id=alert.id).update(seen_at=alert.seen_at, delivered_at=alert.delivered_at)
         Alert.objects.filter(ref_type="unseen", ref_id=str(alert.id), acknowledged_at__isnull=True).update(acknowledged_at=now)
+        if alert.ref_type == "message":
+            # The kept record of the message says this person saw it (the alert itself expires).
+            MessageReceipt.objects.filter(message_id=alert.ref_id, recipient=user, seen_at__isnull=True) \
+                .update(seen_at=now, delivered_at=alert.delivered_at)
         task = task_of(alert)
         if task is not None and task.assignee_user_id == user.id and task.seen_at is None:
             SharedTask.objects.filter(id=task.id).update(seen_at=now)  # not a change to the task: no new version
@@ -2809,7 +2821,7 @@ def message_recipient(sender: User, to: str = "") -> User | None:
 
 
 def send_message_to(sender: User, people: list[User], text: str, *, when=None,
-                    priority: str = Priority.NORMAL) -> list[Alert]:
+                    priority: str = Priority.NORMAL, kind: str = "message") -> list[Alert]:
     """A message (never a task: nothing to tick off) to one or more people on the team, delivered now or held until
     `when` (out of sight until then, announced at that moment). Each person gets their own alert, from the sender,
     and is asked once it is spoken whether to tell the sender it was seen. Returns the alerts made."""
@@ -2822,17 +2834,22 @@ def send_message_to(sender: User, people: list[User], text: str, *, when=None,
     from_en, from_hi = giver_words(sender)
     priority = priority if priority in Priority.values else Priority.NORMAL
     since = timezone.now() - timedelta(minutes=3)
+    people = [p for p in people
+              if not Alert.objects.filter(recipient=p, ref_type="message", body=text, created_at__gte=since).exists()]
+    if not people:
+        return []  # the same message, sent moments ago (heard twice): not sent twice
+    # The message itself is kept for good (Message + a receipt per person); the alerts below are its news.
+    message = Message.objects.create(sender=sender, text=text, priority=priority, kind=kind, deliver_at=when)
     made = []
     for person in people:
-        if Alert.objects.filter(recipient=person, ref_type="message", body=text, created_at__gte=since).exists():
-            continue  # the same message, sent moments ago (heard twice): not sent twice
+        MessageReceipt.objects.create(message=message, recipient=person)
         to_addr, to_addr_hi = address_of(person), address_hi_of(person)
         made.append(Alert.objects.create(
             recipient=person, sender=sender, kind=Alert.Kind.INFO, priority=priority,
             title=f"Message from {from_en}"[:200], body=text,
             spoken_text=f"{to_addr}, a message from {from_en}: {text}",
             spoken_text_hi=f"{to_addr_hi}, {from_hi} का संदेश: {text}",
-            ref_type="message", ref_id=str(uuid.uuid4()), snoozed_until=when,
+            ref_type="message", ref_id=str(message.id), snoozed_until=when,
             question={"kind": "seen", "en": f"Shall I tell {from_en} you've seen it?",
                       "hi": f"{from_hi} को बता दूँ कि आपने देख लिया?"},
             **ring_fields(person, priority, start=when),

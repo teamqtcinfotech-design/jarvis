@@ -25,7 +25,7 @@ _STAFF = {"staff", "team", "all staff", "the staff", "the team", "employees", "s
           "my staff", "my team"}
 _ALL = {"all", "everyone", "everybody", "sab", "sabka", "sab log", "all of us"}
 _TEAM_WORDS = re.compile(r"\b(team|department|dept|waale|wale|walon|waalon|log|ka|ke|ki)\b")
-_FILTERS = {"open", "done", "late", "on_leave", "personal", "official"}
+_FILTERS = {"open", "done", "late", "on_leave", "personal", "official", "inbox", "sent"}
 _TYPES = {"TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"}
 _FROM_WHOM = {"sir", "pa", "me", "staff"}
 _PRIORITIES = {"urgent", "high", "important"}

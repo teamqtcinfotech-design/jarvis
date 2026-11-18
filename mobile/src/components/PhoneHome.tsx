@@ -115,6 +115,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     if (key === 'settings') router.push('/settings');
     else if (key === 'briefing') router.push('/briefing');
     else if (key === 'held') engine.setHeldVisible(true);
+    else if (key === 'messages') report('messages', 'Messages');  // the kept record: received and sent, with Seen
     else router.push({ pathname: '/lists/[section]', params: { section: key } });
   };
   const tick = () => Haptics.selectionAsync().catch(() => undefined); // a small tap he can feel
@@ -141,6 +142,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         { kind: 'people', label: 'My team', icon: 'people-outline' },
         { kind: 'done', label: 'Completed', icon: 'checkmark-done-outline' },
         { kind: 'late', label: 'Late items', icon: 'alert-circle-outline' },
+        { kind: 'messages', label: 'Messages', icon: 'chatbubbles-outline' },
         { kind: 'pa', label: `With ${paName}`, icon: 'person-outline' },
       ]
     : [

@@ -464,6 +464,37 @@ class TaskRequest(models.Model):
         ordering = ["-created_at"]
 
 
+class Message(models.Model):
+    """A message between people on the team, kept for good: who sent it, to whom, when, and when each person saw it.
+    The alert that rings and speaks it is the news of it and expires; this record does not. The words are encrypted
+    at rest like a task's."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="messages_sent")
+    text = EncryptedTextField()
+    priority = models.CharField(max_length=6, choices=Priority.choices, default=Priority.NORMAL)
+    kind = models.CharField(max_length=8, default="message")  # "message", or "list" (a card sent as a message)
+    sent_at = models.DateTimeField(auto_now_add=True)
+    deliver_at = models.DateTimeField(null=True, blank=True)  # held until then ("kal subah bolna"), else at once
+
+    class Meta:
+        ordering = ["-sent_at"]
+        indexes = [models.Index(fields=["sender", "sent_at"])]
+
+
+class MessageReceipt(models.Model):
+    """One person's copy of a message: when it reached their phone and when they saw it."""
+
+    message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name="receipts")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="messages_received")
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    seen_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["message", "recipient"], name="unique_message_receipt")]
+        indexes = [models.Index(fields=["recipient", "seen_at"])]
+
+
 class Alert(models.Model):
     """Server-side alert feed (new requests, decisions, staff progress)."""
 

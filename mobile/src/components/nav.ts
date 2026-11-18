@@ -31,6 +31,7 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
           { key: 'busy', label: `When ${md} is busy`, icon: 'time-outline' },
         ]),
     { key: 'staff', label: 'Given to staff', icon: 'briefcase-outline', count: open(data?.delegated) },
+    { key: 'messages', label: 'Messages', icon: 'chatbubbles-outline', detail: 'Received and sent, kept for good' },
     { key: 'held', label: 'Held alerts', icon: 'notifications-outline', count: engine.held.length, tone: colors.danger, detail: 'Kept quiet while you were busy' },
     { key: 'updates', label: 'Updates', icon: 'newspaper-outline', count: engine.news?.length, detail: 'Small news, decisions and nudges' },
     { key: 'cancelled', label: 'Cancelled', icon: 'close-circle-outline', detail: 'Last 30 days · restore from here' },
@@ -43,4 +44,5 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
 export const VIEW_FOR_KEY: Record<string, string> = {
   today: 'today', late: 'late', upcoming: 'upcoming', nodate: 'nodate', private: 'private', requests: 'requests',
   pa: 'pa', mg: 'pa', given: 'pa', md_tasks: 'pa', team: 'pa', busy: 'busy', staff: 'staff', cancelled: 'cancelled',
+  messages: 'messages',
 };
