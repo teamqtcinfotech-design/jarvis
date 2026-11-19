@@ -1314,8 +1314,9 @@ class SchedulingTests(BaseCase):
         self.assertNotIn(SECRET, json.dumps(r))
         r = self.turn(self.pa_client, "haan", _cmd(intent="confirm_pending"))
         self.assertEqual(r["action"], "saved")
-        req = TaskRequest.objects.filter(requested_by=self.pa).latest("created_at")
-        self.assertEqual(req.payload["due_time"], "17:00")
+        # Straight onto Sir's list, at the free time she agreed to.
+        task = SharedTask.objects.filter(created_by=self.pa, assignee_type="MD").latest("created_at")
+        self.assertEqual(tu.to_local(task.due_at).time(), time(17, 0))
         self.assert_no_secret(self.pa_client.get("/api/v1/alerts/"))
 
     def test_a_task_for_mansi_is_given_even_when_she_is_busy(self):
@@ -1467,14 +1468,14 @@ class SmartBrainTests(BaseCase):
         d = self.interpret(self.pa_client, "Neha ke saath 3 baje meeting book karo", _cmd(intent="request_for_md", **base))
         self.assertTrue(d["booked"])          # her own meeting, clear and free: booked at once
         self.assertTrue(SharedTask.objects.filter(title="Meeting with Neha", origin=SharedTask.Origin.SELF).exists())
-        self.assertFalse(TaskRequest.objects.filter(requested_by=self.pa).exists())
+        self.assertFalse(SharedTask.objects.filter(created_by=self.pa, assignee_type="MD").exists())
         d = self.interpret(self.pa_client, "kal bank jaana hai", _cmd(intent="create_task", title="Go to the Bank"))
         self.assertTrue(d["booked"])          # her own work, clear: saved at once on her list
         self.assertTrue(SharedTask.objects.filter(title="Go to the Bank", origin=SharedTask.Origin.SELF, assignee_user=self.pa).exists())
-        # She said it: for Sir -> a request he accepts; her own -> her own list.
+        # She said it: for Sir -> straight onto his list; her own -> her own list.
         d = self.interpret(self.pa_client, "Sir ke liye Neha ke saath 3 baje meeting", _cmd(intent="request_for_md", **base))
         self.assertTrue(d["booked"])
-        self.assertTrue(TaskRequest.objects.filter(requested_by=self.pa).exists())
+        self.assertTrue(SharedTask.objects.filter(created_by=self.pa, assignee_type="MD", assignee_user=self.md).exists())
         d = self.interpret(self.pa_client, "mujhe Neha ko file deni hai", _cmd(intent="create_task", title="Give Neha the File"))
         self.assertIn("your own work", d["spoken_reply"])
         # "Sir ki cab book karni hai" is HER job (the model judged it so, and she named Sir).
@@ -1493,9 +1494,10 @@ class SmartBrainTests(BaseCase):
         d = self.interpret(self.pa_client, "Sir ke liye", _cmd(intent="create_task", kind="MEETING", title="Meeting", engine="rules"),
                            previous="mera ek meeting hai")
         self.assertEqual(d["action"], "md_request")
-        # Sir's side is unchanged: his own meeting is his personal item, nothing for him is ever a "request".
+        # Sir's side is unchanged: his own meeting is his personal item, nothing for him is ever a "request". (At
+        # 4 PM: 3 PM is taken by the meeting Priya just put on his list.)
         before = PrivateTask.objects.filter(owner=self.md).count()
-        d = self.interpret(self.md_client, "Neha ke saath 3 baje meeting", _cmd(intent="create_task", **base))
+        d = self.interpret(self.md_client, "Neha ke saath 4 baje meeting", _cmd(intent="create_task", **{**base, "due_time": "16:00"}))
         self.assertTrue(d["booked"])  # clear and free: his personal meeting, booked at once
         self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before + 1)
         self.assertFalse(TaskRequest.objects.filter(requested_by=self.md).exists())
@@ -3080,7 +3082,7 @@ class WhoseMeetingTests(BaseCase):
             d = self.interpret(self.pa_client, "kal Neha ke saath meeting book kar do", self._cmd(intent, hour))
             self.assertTrue(d.get("booked"), (intent, d["spoken_reply"]))
         self.assertEqual(SharedTask.objects.filter(title="Meeting with Neha", origin=SharedTask.Origin.SELF).count(), 3)
-        self.assertFalse(TaskRequest.objects.filter(requested_by=self.pa).exists())
+        self.assertFalse(SharedTask.objects.filter(assignee_type="MD").exists())
 
     def test_two_meetings_in_one_breath_are_saved_together_for_the_pa(self):
         day = (tu.today_local() + timedelta(days=1)).isoformat()
@@ -3100,11 +3102,11 @@ class WhoseMeetingTests(BaseCase):
             self.assertTrue(d.get("booked"), (intent, d["spoken_reply"]))
         self.assertEqual(SharedTask.objects.filter(title="Meeting with Neha", origin=SharedTask.Origin.SELF).count(), 3)
 
-    def test_the_mds_meeting_is_a_request(self):
+    def test_the_mds_meeting_goes_on_her_list(self):
         for text in ("kal 3 baje Ma'am ki Neha ke saath meeting book kar do", "कल 3 बजे मैम की नेहा के साथ मीटिंग"):
             d = self.interpret(self.pa_client, text, self._cmd("needs_destination"))
-            self.assertTrue(d.get("booked"), text)  # clear: sent to the MD as a request at once
-        self.assertEqual(TaskRequest.objects.filter(requested_by=self.pa).count(), 1)  # the same one twice is sent once
+            self.assertTrue(d.get("booked"), text)  # clear: straight onto the MD's list at once
+        self.assertEqual(SharedTask.objects.filter(created_by=self.pa, assignee_type="MD").count(), 1)  # the same one twice is saved once
 
 
 class DirectBookingTests(BaseCase):
@@ -3356,7 +3358,7 @@ class ManagerTests(BaseCase):
                         _cmd(intent="request_for_md", title="Bank meeting", kind="MEETING",
                              due_date=(tu.today_local() + timedelta(days=1)).isoformat(), due_time="11:00", engine="ai"))
         self.assertEqual(req["action"], "saved", req)
-        self.assertTrue(TaskRequest.objects.filter(requested_by=self.mg).exists())
+        self.assertTrue(SharedTask.objects.filter(created_by=self.mg, assignee_type="MD", title="Bank meeting").exists())
 
     def test_alerts_go_to_whoever_is_named(self):
         self.interpret(self.md_client, "Mansi ko alert bhejo ki meeting 5 baje hai",
@@ -3512,13 +3514,18 @@ class TeamTests(BaseCase):
         r = self.kiran_client.patch(f"/api/v1/shared-tasks/{task.id}/", {"expected_version": task.version + 1, "title": "x"}, format="json")
         self.assertEqual(r.status_code, 403)
 
-    def test_work_for_the_md_from_a_colleague_is_a_request(self):
+    def test_work_for_the_md_from_a_colleague_lands_on_his_list(self):
         d = self.interpret(self.sunil_client, "Sir ke liye kal 11 baje bank meeting",
                            _cmd(intent="assign_to_person", staff_name="Sir", recipients=["Sir"], title="Bank Meeting", kind="MEETING",
                                 due_date=(tu.today_local() + timedelta(days=1)).isoformat(), due_time="11:00"))
         self.assertTrue(d["booked"], d["spoken_reply"])
-        self.assertTrue(TaskRequest.objects.filter(requested_by=self.sunil).exists())
-        self.assertFalse(SharedTask.objects.filter(assignee_type="MD").exists())  # nothing on his list until he accepts
+        task = SharedTask.objects.get(assignee_type="MD", created_by=self.sunil)
+        self.assertEqual((task.assignee_user, task.origin), (self.md, "GIVEN"))
+        self.assertFalse(TaskRequest.objects.filter(requested_by=self.sunil).exists())  # nothing waits for an acceptance
+        # It rings on his phone until he sees it, and it is in his day and in Sunil's "given by you".
+        self.assertTrue(Alert.objects.filter(recipient=self.md, kind="TASK_ASSIGNED", ref_id=str(task.id), ring=True).exists())
+        self.assertIn("Bank Meeting", json.dumps(self.md_client.get("/api/v1/today/").json()["upcoming"]))
+        self.assertIn("Bank Meeting", json.dumps(self.sunil_client.get("/api/v1/today/").json()["given_tasks"]))
 
     def test_a_message_to_a_group_and_a_meeting_with_a_colleague(self):
         d = self.interpret(self.md_client, "sab ko bata do kal office band rahega",

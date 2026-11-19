@@ -26,7 +26,7 @@ const SAVE_LABEL: Partial<Record<DraftAction, string>> = {
   delegation: 'Assign',
   pa_task: 'Give to PA',
   pa_meeting: 'Save meeting',
-  md_request: 'Send to Sir',
+  md_request: 'Give',
   pa_self_task: 'Save',
   mg_task: 'Give',
   person_task: 'Give',
@@ -106,7 +106,7 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
   const when = draft.due_date ? `${dayLabel(draft.due_date)}${draft.due_time ? ` · ${timeLabel(draft.due_time)}` : ''}` : 'No date';
   const saveLabel = draft.batch?.length ? `Save all ${draft.batch.length + 1}`
     : draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}`
-    : draft.action === 'md_request' ? `Send to ${md}` : SAVE_LABEL[draft.action] ?? 'Confirm';
+    : draft.action === 'md_request' ? `Give to ${md}` : SAVE_LABEL[draft.action] ?? 'Confirm';
   const isMessage = draft.action === 'message';
   const forPeople = draft.assignees?.length ? draft.assignees.map((a) => a.name).join(', ') : '';
   const canSave = !waitingForAnswer && (isTask ? !!draft.title.trim() : draft.action === 'remember' ? !!draft.memory_text

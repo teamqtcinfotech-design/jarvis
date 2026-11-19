@@ -99,11 +99,16 @@ def run_item(user: User, p: dict) -> dict:
                 "hi": f"आपके अपने काम में सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else ""),
                 "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title}
     if action == "md_request":
-        req = services.create_md_request(user, {k: v for k, v in data.items() if k != "description"})
+        # Work for the MD from anyone else: straight onto his list (ringing until he sees it), like work for anyone.
+        md = services.get_md()
+        if md is None or md.id == user.id:
+            raise ServiceError("no_person", "I don't know who should get this.", 422)
+        task = services.create_person_task(user, md, data)
         sir, sir_hi, he = services.md_address(), services.md_address_hi(), services.md_pronouns()[0]
-        return {"en": f"Sent to {sir}, {address}. I'll tell you when {he} answers.",
-                "hi": f"{sir_hi} को भेज दिया, {address_hi}। जवाब आते ही बताऊँगा।",
-                "undo": [{"type": "request", "id": str(req.id)}], "title": p.get("title", "")}
+        when = f" for {due_en}" if due_en else ""
+        return {"en": f"Done, {address}: it's on {sir}'s list{when}. I'll tell you when {he} has seen it, and when it's done.",
+                "hi": f"हो गया, {address_hi}: {sir_hi} की लिस्ट में डाल दिया" + (f", {due_hi}" if due_hi else "") + "। देख लेने पर और पूरा होने पर बताऊँगा।",
+                "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [md.spoken_name]}
     if action in {"person_task", "person_meeting"}:
         people = _people_of(user, p)
         if not people:
@@ -116,12 +121,8 @@ def run_item(user: User, p: dict) -> dict:
                     services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
                 refs.append({"type": "shared" if not user.is_md else "private", "id": str(task.id)})
                 continue
-            if person.is_md and not user.is_md:
-                req = services.create_md_request(user, {k: v for k, v in data.items() if k != "description"})
-                refs.append({"type": "request", "id": str(req.id)})
-                names.append(person)
-                continue
-            # One person: a note composed in the giver's words; a group: the plain line (no waiting on the AI per person).
+            # One person (the MD included): a note composed in the giver's words; a group: the plain line (no waiting
+            # on the AI per person).
             task = services.create_person_task(user, person, data, meeting=meeting, compose_note=len(people) == 1)
             refs.append({"type": "shared", "id": str(task.id)})
             names.append(person)

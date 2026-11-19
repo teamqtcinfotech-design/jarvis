@@ -25,7 +25,9 @@ log = logging.getLogger("jarvis.conversation")
 STATE_TTL = timedelta(minutes=10)
 MAX_HISTORY = 8
 CONFIRMABLE = TASK_ACTIONS | {"message", "accept_request", "decline_request", "complete", "remember", "change_task", "delete_task", "organise"}
-AI_DONE_OK = {"private_task", "md_request", "remember", "accept_request", "decline_request", "complete", "own_task"}
+# Where the model's own "done" line may be spoken. Work for the MD is not among them: the server's line says where it
+# went ("it's on Sir's list"), which the model may still call a request.
+AI_DONE_OK = {"private_task", "remember", "accept_request", "decline_request", "complete", "own_task"}
 EMPTY = {"history": [], "pending": None, "choices": None, "offer": None,
          "last_view": None,  # the list JARVIS showed last (see services.remember_last_view); kept, not used here
          "last_done": None,  # what JARVIS saved a moment ago, for "undo" (see actions.remember_done); kept, not used here
@@ -82,7 +84,7 @@ def _heading(p: dict) -> str:
         "message": f"Message to {pa}",
         "delegation": f"Task for {(p.get('staff') or {}).get('name', 'a staff member')}",
         "team_delegation": f"Task for {(p.get('team') or {}).get('label', 'the team')}",
-        "md_request": f"Request to {services.md_address()}", "pa_self_task": "Your own task",
+        "md_request": f"Task for {services.md_address()}", "pa_self_task": "Your own task",
         "accept_request": "Accept request", "decline_request": "Decline request",
         "complete": "Mark as done", "remember": "Remember this", "choose_destination": "Where should this go?",
         "change_task": "Change task", "delete_task": "Delete task", "organise": p.get("title") or "Change the team",

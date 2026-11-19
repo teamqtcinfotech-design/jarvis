@@ -1,6 +1,7 @@
 /**
  * Phone: the home is a dashboard. Greeting, "next up", stat tiles, reports he can open and download, today's
- * items with progress, the latest answer. The orb floats in the bottom-right corner and opens the talk layer.
+ * items with progress, what is coming up this week, the latest messages, the latest updates, the latest answer.
+ * The orb floats in the bottom-right corner and opens the talk layer.
  */
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -12,11 +13,11 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
-import { greeting, timeOf } from '@/lib/format';
+import { greeting, relativeAgo, timeOf } from '@/lib/format';
 import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
-import type { SessionUser, TaskItem } from '@/lib/types';
+import type { MessageBrief, ServerAlert, SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { useWalkie } from '@/lib/walkie';
 
@@ -47,6 +48,51 @@ const inWords = (ms: number) => {
   const h = Math.floor(m / 60);
   return `in ${h} h${m % 60 ? ` ${m % 60} min` : ''}`;
 };
+
+/** One of the latest messages on the home screen: who, the words, when, and whether it was seen. */
+function MessageRow({ m, last, onPress }: { m: MessageBrief; last: boolean; onPress: () => void }) {
+  const unseen = m.box === 'inbox' && !m.seen;
+  const seenWord = m.box === 'inbox'
+    ? (m.seen ? 'Seen' : 'New')
+    : m.seen ? 'Seen' : m.seen_count ? `Seen by ${m.seen_count} of ${m.to_count}` : 'Not seen yet';
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [s.msgRow, !last && s.rowLine, pressed && { opacity: 0.8 }]}>
+      <View style={[s.msgIcon, { backgroundColor: unseen ? colors.accentSoft : colors.surfaceAlt }]}>
+        <Icon name={m.box === 'inbox' ? 'mail-outline' : 'send-outline'} size={15} color={unseen ? colors.accent : colors.inkSoft} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Txt variant="small" numberOfLines={1} style={{ flex: 1, color: colors.inkSoft, fontWeight: '600' }}>
+            {m.box === 'inbox' ? `From ${m.who}` : `To ${m.who}`}
+          </Txt>
+          <Txt variant="caption" style={{ marginLeft: 8 }}>{relativeAgo(Date.parse(m.at))}</Txt>
+        </View>
+        <Txt variant="body" numberOfLines={2} style={[{ marginTop: 1 }, unseen && { fontWeight: '600' }]}>{m.text}</Txt>
+        <Txt variant="caption" style={{ marginTop: 2, color: unseen ? colors.accent : m.seen ? colors.success : colors.warn }}>{seenWord}</Txt>
+      </View>
+    </Pressable>
+  );
+}
+
+/** One of the latest updates (news, decisions, nudges) on the home screen. */
+function UpdateRow({ a, last, onPress }: { a: ServerAlert; last: boolean; onPress: () => void }) {
+  const icon = a.kind === 'REQUEST_DECIDED' ? 'checkmark-circle-outline' : a.kind === 'STAFF_UPDATE' ? 'briefcase-outline'
+    : a.kind === 'TASK_ASSIGNED' ? 'clipboard-outline' : 'information-circle-outline';
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [s.msgRow, !last && s.rowLine, pressed && { opacity: 0.8 }]}>
+      <View style={[s.msgIcon, { backgroundColor: colors.surfaceAlt }]}>
+        <Icon name={icon} size={15} color={colors.inkSoft} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Txt variant="small" numberOfLines={1} style={{ flex: 1, color: colors.inkSoft, fontWeight: '600' }}>{a.title}</Txt>
+          <Txt variant="caption" style={{ marginLeft: 8 }}>{relativeAgo(Date.parse(a.created_at))}</Txt>
+        </View>
+        {a.body ? <Txt variant="body" numberOfLines={2} style={{ marginTop: 1 }}>{a.body}</Txt> : null}
+      </View>
+    </Pressable>
+  );
+}
 
 function Tile({ icon, label, value, toneKey, onPress }: { icon: string; label: string; value: number | string; toneKey: string; onPress: () => void }) {
   const c = tone[toneKey] ?? tone.muted;
@@ -105,6 +151,12 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   // Today means today: late items from earlier days are a separate chip, not rows that crowd out the day.
   const todayList = data ? data.today.filter((t) => t.status !== 'COMPLETED').slice(0, 6) : [];
   const lateCount = data?.overdue.length ?? 0;
+  // The rest of the week, the latest messages (received and sent) and the latest updates, each a short strip with
+  // "See all"; the full lists are one tap away.
+  const comingUp = data ? data.upcoming.filter((t) => t.status !== 'COMPLETED').slice(0, 4) : [];
+  const messages = (data?.messages ?? []).slice(0, 3);
+  const unread = data?.messages_unseen ?? 0;
+  const updates = engine.news.slice(0, 3);
   // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
   const voiceItem = conv.itemToOpen && data
     ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.team_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
@@ -228,7 +280,12 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           <Tile icon="today-outline" label="Today" value={data?.today.length ?? '–'} toneKey="accent" onPress={() => select('today')} />
           <Tile icon="alert-circle-outline" label="Late" value={data?.overdue.length ?? '–'} toneKey={data?.overdue.length ? 'danger' : 'muted'} onPress={() => select('late')} />
           <Tile icon="checkmark-done-outline" label="Done today" value={data?.completed_today ?? '–'} toneKey="success" onPress={() => report('done', 'Completed')} />
-          <Tile icon="hand-left-outline" label={isMD ? 'Need your OK' : `Waiting for ${md}`} value={pending} toneKey={pending ? 'warn' : 'muted'} onPress={() => select('requests')} />
+          {pending ? (
+            // A request from before work went straight onto the MD's list, still waiting: shown until it is settled.
+            <Tile icon="hand-left-outline" label={isMD ? 'Need your OK' : `Waiting for ${md}`} value={pending} toneKey="warn" onPress={() => select('requests')} />
+          ) : (
+            <Tile icon={unread ? 'mail-unread-outline' : 'chatbubbles-outline'} label={unread ? 'Unread messages' : 'Messages'} value={data ? unread : '–'} toneKey={unread ? 'accent' : 'muted'} onPress={() => select('messages')} />
+          )}
         </View>
 
         {/* Reports */}
@@ -270,6 +327,79 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           <View style={s.empty}>
             <Icon name="sunny-outline" size={20} color={colors.faint} />
             <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{data ? 'Nothing planned for today. Say “kal 11 baje…” to add something.' : 'Loading…'}</Txt>
+          </View>
+        )}
+
+        {/* Coming up: the rest of the week */}
+        <View style={s.sectionHead}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Txt variant="label">Coming up</Txt>
+            {data?.upcoming.length ? <Txt variant="caption" style={{ marginLeft: 8 }}>{data.upcoming.length} this week</Txt> : null}
+          </View>
+          <Pressable onPress={() => select('upcoming')} hitSlop={8}>
+            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
+          </Pressable>
+        </View>
+        {comingUp.length ? (
+          <View style={s.listCard}>
+            {comingUp.map((t, i) => (
+              <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} showStaffStatus={t.assignee?.type !== 'MD'} flat last={i === comingUp.length - 1} />
+            ))}
+          </View>
+        ) : (
+          <View style={s.empty}>
+            <Icon name="calendar-outline" size={20} color={colors.faint} />
+            <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{data ? 'Nothing more this week.' : 'Loading…'}</Txt>
+          </View>
+        )}
+
+        {/* Messages: the latest received and sent, kept for good */}
+        <View style={s.sectionHead}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Txt variant="label">Messages</Txt>
+            {unread ? (
+              <View style={s.countChip}>
+                <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>{unread} unread</Txt>
+              </View>
+            ) : null}
+          </View>
+          <Pressable onPress={() => select('messages')} hitSlop={8}>
+            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
+          </Pressable>
+        </View>
+        {messages.length ? (
+          <View style={s.listCard}>
+            {messages.map((m, i) => <MessageRow key={`${m.box}-${m.id}`} m={m} last={i === messages.length - 1} onPress={() => select('messages')} />)}
+          </View>
+        ) : (
+          <View style={s.empty}>
+            <Icon name="chatbubbles-outline" size={20} color={colors.faint} />
+            <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{data ? 'No messages yet. Say “Mansi ko bolo…” to send one.' : 'Loading…'}</Txt>
+          </View>
+        )}
+
+        {/* Updates: small news, decisions and nudges */}
+        <View style={s.sectionHead}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Txt variant="label">Updates</Txt>
+            {engine.news.length ? (
+              <View style={s.countChip}>
+                <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>{engine.news.length} new</Txt>
+              </View>
+            ) : null}
+          </View>
+          <Pressable onPress={() => select('updates')} hitSlop={8}>
+            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
+          </Pressable>
+        </View>
+        {updates.length ? (
+          <View style={s.listCard}>
+            {updates.map((a, i) => <UpdateRow key={a.id} a={a} last={i === updates.length - 1} onPress={() => select('updates')} />)}
+          </View>
+        ) : (
+          <View style={s.empty}>
+            <Icon name="newspaper-outline" size={20} color={colors.faint} />
+            <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>Nothing new. Decisions, progress and nudges collect here.</Txt>
           </View>
         )}
 
@@ -357,4 +487,8 @@ const s = StyleSheet.create({
   report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 16 },
   listCard: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 4, ...shadow },
   empty: { alignItems: 'center', paddingVertical: 22, paddingHorizontal: 16, borderRadius: radius.lg, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.line },
+  countChip: { marginLeft: 10, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: colors.accentSoft },
+  msgRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 12, paddingHorizontal: 10 },
+  rowLine: { borderBottomWidth: 1, borderBottomColor: colors.line },
+  msgIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', marginRight: 10, marginTop: 2 },
 });

@@ -107,8 +107,11 @@ export function questionFor(item: EngineItem, isMD: boolean, md: { en: string; h
   if (item.concealed) return null;
   if (item.question !== undefined) return item.question;
   if (item.alertKind === 'NEW_REQUEST' && isMD && item.requestId) return { kind: 'accept', en: 'Accept it?', hi: 'मंज़ूर करूँ?' };
-  if (item.alertKind === 'TASK_ASSIGNED' && !isMD && item.alertId) {
-    return { kind: 'seen', en: `Shall I tell ${md.en} you've seen it?`, hi: `${md.hi} को बता दूँ कि आपने देख लिया?` };
+  if (item.alertKind === 'TASK_ASSIGNED' && item.alertId) {
+    // Work given by anyone to anyone (the MD included): the fallback names the MD as the giver, as the old server did.
+    const giver = isMD ? (item.from || 'the sender') : md.en;
+    const giverHi = isMD ? (item.from || 'भेजने वाले') : md.hi;
+    return { kind: 'seen', en: `Shall I tell ${giver} you've seen it?`, hi: `${giverHi} को बता दूँ कि आपने देख लिया?` };
   }
   if (item.source === 'reminder' && item.ref && item.kind !== 'MEETING') {
     if (item.label === 'checkin') return { kind: 'done', en: '', hi: '' }; // its own line already asks

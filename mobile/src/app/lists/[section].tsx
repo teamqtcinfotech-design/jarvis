@@ -34,7 +34,7 @@ const SECTIONS: Record<string, Section> = {
   nodate: { title: 'No date yet', empty: 'No undated tasks.', items: (d) => d.anytime },
   private: { title: 'Personal', empty: 'No personal items. Only you would see them.', items: (d) => all(d).filter((t) => t.scope === 'private') },
   pa: { title: 'Given to your PA', empty: 'Say “PA ko bolo…” to give your PA a task.', staff: true, items: (d) => d.pa_tasks ?? [] },
-  md_tasks: { title: 'Tasks from your requests', empty: 'None yet.', items: (d) => d.md_tasks ?? [] },
+  md_tasks: { title: 'Tasks you gave the MD', empty: 'None yet. Say “Sir ko bolo…” to put something on the MD’s list.', staff: true, items: (d) => d.md_tasks ?? [] },
   mg: { title: 'Given to the manager', empty: 'Say “Mansi ko bolo…” to give the manager a task.', staff: true, items: (d) => d.mg_tasks ?? [] },
   given: { title: 'Given by you', empty: 'Nothing given yet. Say “Sunil ko bolo…” to give someone work.', staff: true, items: (d) => d.given_tasks ?? [] },
   team: { title: 'Team’s work', empty: 'Nobody on the team has open work.', staff: true, items: (d) => d.team_tasks ?? [] },
@@ -135,7 +135,7 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
   const md = mdWord(data);
   let title = SECTIONS[section]?.title ?? 'Tasks';
   if (section === 'requests') title = isMD ? 'Need your OK' : `Waiting for ${md}`;
-  if (section === 'md_tasks') title = user.role === 'PA' || user.role === 'MG' ? `${md}’s official tasks` : `${md}’s tasks from your requests`;
+  if (section === 'md_tasks') title = user.role === 'PA' || user.role === 'MG' ? `${md}’s official tasks` : `${md}’s tasks from you`;
   if (section === 'busy') title = `When ${md} is busy today`;
   if (section === 'updates') title = 'Updates';
   if (section === 'cancelled') title = 'Cancelled';
@@ -151,7 +151,7 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
     const list = isMD ? data.requests.filter((r) => r.state === 'PENDING') : data.requests.slice(0, 20);
     body = list.length
       ? list.map((r) => <RequestCard key={r.id} request={r} mode={isMD ? 'md' : 'pa'} />)
-      : <Empty text={isMD ? 'Nothing waiting for your decision.' : `Say “${md} ke liye kal 3 baje…” to send ${md} a task.`} />;
+      : <Empty text={isMD ? 'Nothing waiting for your decision. Work given to you goes straight onto your list now.' : `Nothing waiting. Work for ${md} goes straight onto ${md}’s list now.`} />;
   } else if (section === 'busy') {
     const busy = data.md_busy_today ?? [];
     body = (

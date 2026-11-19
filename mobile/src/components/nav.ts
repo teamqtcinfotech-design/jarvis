@@ -20,13 +20,15 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
     // Everyone has personal items now (theirs alone), and everyone can give work to anyone on the team.
     { key: 'private', label: 'Personal', icon: 'lock-closed-outline', count: privateCount, detail: 'Only you can see these' },
     { key: 'given', label: 'Given by you', icon: 'people-outline', count: open(data?.given_tasks), detail: 'Work you gave people, with progress' },
+    // Work for the MD goes straight onto his list now; a request from before that still waits is listed until it is settled.
+    ...(pending
+      ? [{ key: 'requests', label: isMD ? 'Need your OK' : `Waiting for ${md}`, icon: 'hand-left-outline', count: pending, tone: colors.gold }]
+      : []),
     ...(isMD
       ? [
-          { key: 'requests', label: 'Need your OK', icon: 'hand-left-outline', count: pending, tone: colors.gold },
           { key: 'team', label: 'Team’s work', icon: 'git-network-outline', count: open(data?.team_tasks), detail: 'Everyone’s work, their own and given to each other' },
         ]
       : [
-          { key: 'requests', label: `Waiting for ${md}`, icon: 'hand-left-outline', count: pending, tone: colors.gold },
           { key: 'md_tasks', label: `${md}’s tasks from you`, icon: 'person-outline', count: open(data?.md_tasks) },
           { key: 'busy', label: `When ${md} is busy`, icon: 'time-outline' },
         ]),

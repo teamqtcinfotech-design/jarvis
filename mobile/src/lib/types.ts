@@ -101,6 +101,21 @@ export interface SectionItem {
   aliases: string[];
 }
 
+/** One of the latest messages, for the home screen: received ("inbox", seen by me) or sent (seen by everyone it went to). */
+export interface MessageBrief {
+  id: string;
+  box: 'inbox' | 'sent';
+  text: string;
+  /** Who it is from (inbox) or who it went to (sent), as JARVIS says them ("Sir", "Mansi, Nikki"). */
+  who: string;
+  at: string;
+  seen: boolean;
+  seen_at: string | null;
+  priority: Priority;
+  seen_count: number;
+  to_count: number;
+}
+
 export interface RequestItem {
   id: string;
   kind: 'CREATE' | 'CHANGE';
@@ -164,6 +179,9 @@ export interface Dashboard {
   md_tasks?: TaskItem[]; // the MD's official work: all of it (PA, manager) or what came from their own requests
   /** Everyone on the team (names and jobs). */
   team?: TeamMember[];
+  /** The latest messages received and sent, and how many received ones are unread (home screen). */
+  messages?: MessageBrief[];
+  messages_unseen?: number;
 }
 
 export interface ServerAlert {

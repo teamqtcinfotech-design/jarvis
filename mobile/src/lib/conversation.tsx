@@ -17,7 +17,7 @@ import { Animated, AppState, Platform } from 'react-native';
 
 import { type AlertQuestion, type EngineItem, type HeldOffer, questionFor, useAlertEngine } from './alertEngine';
 import { langOfText, replyLang, setReplyLang, twin } from './lang';
-import { addressHiOf, addressOf, mdHe, mdWord, mdWordHi } from './names';
+import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { useDashboard } from './useDashboard';
 import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
 import { dataChanged } from './bus';
@@ -102,7 +102,7 @@ const ConversationContext = createContext<ConversationValue | null>(null);
 const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
 // AI-written "done" lines are used only where "saved" really means done. A staff task still waiting for
 // the staff app, or a team split, gets an exact status line instead.
-const AI_DONE_OK: DraftAction[] = ['private_task', 'md_request', 'own_task', 'remember', 'accept_request', 'decline_request', 'complete'];
+const AI_DONE_OK: DraftAction[] = ['private_task', 'own_task', 'remember', 'accept_request', 'decline_request', 'complete'];
 // How long the Undo button stays under a "Done" line (the server allows a little longer).
 const UNDO_FOR_MS = 60_000;
 const nowMs = () => Date.now();
@@ -977,10 +977,6 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         const who = res.data?.assignee?.staff_name ?? d.mg_name ?? 'the manager';
         spoken = `Given to ${who}, ${address}. I'll tell you when it's done.`;
         spokenHi = `${who} को दे दिया, ${addressHi}। पूरा होने पर बताऊँगा।`;
-      } else if (d.action === 'md_request') {
-        await api('/requests/', { method: 'POST', body, idempotencyKey: key });
-        spoken = `Sent to ${md}, ${address}. I'll tell you when ${mdHe(dash)} answers.`;
-        spokenHi = `${mdHi} को भेज दिया, ${addressHi}। जवाब आते ही बताऊँगा।`;
       } else if (d.action === 'pa_self_task') {
         // Mansi's own task: straight onto her list, nothing is sent to Sir for approval.
         await api('/pa-tasks/self/', { method: 'POST', body: { ...body, description: d.transcript }, idempotencyKey: key });
@@ -1061,7 +1057,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     setBusy('saving');
     setDraftError('');
     const key = idemKey.current;
-    if (items.length > 1 && items.every((it) => SERVER_SAVED.includes(it.action) || it.action === 'private_task' || it.action === 'md_request')) {
+    if (items.length > 1 && items.every((it) => SERVER_SAVED.includes(it.action) || it.action === 'private_task')) {
       // Many instructions for many people in one go: saved together on the server (one Undo takes them all back).
       try {
         const r = await saveOnServer(d, key);

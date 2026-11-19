@@ -8,7 +8,7 @@ from unittest import mock
 from rest_framework.test import APIClient
 
 from core import services
-from core.models import Alert, Contact, Kind, PrivateTask, Priority, SharedTask, Status, TaskEvent
+from core.models import Alert, Contact, Kind, PrivateTask, Priority, SharedTask, Status, TaskEvent, TaskRequest
 from core.tests import BaseCase, _cmd, _workday
 
 IST = dt_timezone(timedelta(hours=5, minutes=30))
@@ -299,3 +299,95 @@ class NobodyReadsAnotherPersonsWorkTests(TaskCoreCase):
         self.assertIn("confidential errand", body)            # her work: the MD sees all work
         self.assertNotIn("personal dentist", body)            # her personal item: nobody's but hers
         self.assertEqual(self.md_client.get(f"/api/v1/private-tasks/{self.pa_personal.id}/").status_code, 404)
+
+
+class WorkForTheMdTests(TaskCoreCase):
+    """Work for the MD from anyone else (Nov 2026): straight onto his list like work for anyone, ringing until he
+    sees it; nothing waits for an acceptance, and he can decline it (the giver is told)."""
+
+    def give_sir(self, client, title="Review the vendor report"):
+        d = self.interpret(client, f"Sir ko bolo {title}", _cmd(
+            intent="assign_to_person", staff_name="Sir", recipients=["Sir"], title=title, priority="HIGH",
+            spoken_reply=f"Ji, Sir ko de diya: {title}."))
+        self.assertTrue(d["booked"], d["spoken_reply"])
+        return SharedTask.objects.get(title=title)
+
+    def test_a_task_given_to_sir_is_on_his_list_at_once_and_rings(self):
+        task = self.give_sir(self.nikki_client)
+        self.assertEqual((task.assignee_type, task.assignee_user, task.origin, task.created_by), ("MD", self.md, "GIVEN", self.nikki))
+        self.assertFalse(TaskRequest.objects.exists())                      # nothing waits for an acceptance
+        ring = Alert.objects.get(recipient=self.md, kind="TASK_ASSIGNED", ref_id=str(task.id))
+        self.assertTrue(ring.ring)                                          # rings on his phone until he taps Seen
+        self.assertEqual(ring.sender, self.nikki)
+        # His day shows it (given today, no date: today's work), and "my tasks" by voice names it.
+        today = self.md_client.get("/api/v1/today/").json()
+        self.assertIn(task.title, json.dumps(today["today"]))
+        r = self.interpret(self.md_client, "aaj mere kya tasks hain", _cmd(intent="query", view_kind="today", view_who="me"))
+        self.assertIn(task.title, json.dumps(r))
+        # Nikki sees it under what she gave, and under Sir's tasks from her; Priya (who runs his diary) sees it too.
+        mine = self.nikki_client.get("/api/v1/today/").json()
+        self.assertIn(task.title, json.dumps(mine["given_tasks"]))
+        self.assertIn(task.title, json.dumps(mine["md_tasks"]))
+        self.assertIn(task.title, json.dumps(self.pa_client.get("/api/v1/today/").json()["md_tasks"]))
+        self.assert_no_secret(self.nikki_client.get("/api/v1/today/"))
+
+    def test_sir_declines_and_the_giver_is_told(self):
+        task = self.give_sir(self.nikki_client)
+        r = self.md_client.patch(f"/api/v1/shared-tasks/{task.id}/", {"expected_version": task.version, "status": "CANCELLED"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        task.refresh_from_db()
+        self.assertEqual(task.status, Status.CANCELLED)
+        self.assertIsNotNone(task.seen_at)                                  # touching it is seeing it
+        self.assertTrue(TaskEvent.objects.filter(task=task, kind=TaskEvent.Kind.SEEN, actor=self.md).exists())
+        note = Alert.objects.get(recipient=self.nikki, ref_id=str(task.id), kind="STAFF_UPDATE")
+        self.assertEqual(note.title, "Sir declined a task")
+        self.assertIn("Sir has declined: Review the vendor report", note.spoken_text)
+        # The ring on his phone is over.
+        ring = Alert.objects.get(recipient=self.md, kind="TASK_ASSIGNED", ref_id=str(task.id))
+        self.assertIsNotNone(ring.seen_at)
+        self.assertIsNotNone(ring.acknowledged_at)
+
+    def test_sir_finishes_it_and_the_giver_is_told(self):
+        task = self.give_sir(self.nikki_client, "Sign the lease")
+        r = self.md_client.post(f"/api/v1/shared-tasks/{task.id}/complete/", {"expected_version": task.version}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        task.refresh_from_db()
+        self.assertEqual(task.status, Status.COMPLETED)
+        note = Alert.objects.get(recipient=self.nikki, ref_id=str(task.id), kind="STAFF_UPDATE")
+        self.assertEqual(note.title, "Sir completed a task")
+        self.assertIn("Sir has completed: Sign the lease", note.spoken_text)
+        # Moving it to another day tells the giver too; his own work (nobody gave it) tells nobody.
+        other = self.give_sir(self.nikki_client, "Call the auditor")
+        tomorrow = (datetime.now(IST) + timedelta(days=1)).date().isoformat()
+        r = self.md_client.patch(f"/api/v1/shared-tasks/{other.id}/", {"expected_version": other.version, "due_date": tomorrow}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(Alert.objects.filter(recipient=self.nikki, ref_id=str(other.id), title="Sir moved a task").exists())
+
+    def test_a_request_still_waiting_is_moved_onto_his_list(self):
+        req = services.create_md_request(self.pa, {"title": "Approve the Pune budget", "kind": Kind.TASK, "priority": Priority.NORMAL})
+        self.assertTrue(Alert.objects.filter(recipient=self.md, kind="NEW_REQUEST", ref_id=str(req.id), acknowledged_at__isnull=True).exists())
+        self.assertEqual(services.settle_pending_requests(), 1)
+        req.refresh_from_db()
+        self.assertEqual(req.state, TaskRequest.State.ACCEPTED)
+        task = req.resulting_task
+        self.assertEqual((task.assignee_type, task.assignee_user, task.created_by, task.origin), ("MD", self.md, self.pa, "GIVEN"))
+        self.assertTrue(Alert.objects.filter(recipient=self.md, kind="TASK_ASSIGNED", ref_id=str(task.id), ring=True).exists())
+        self.assertFalse(Alert.objects.filter(recipient=self.md, kind="NEW_REQUEST", ref_id=str(req.id), acknowledged_at__isnull=True).exists())
+        self.assertEqual(services.settle_pending_requests(), 0)             # nothing left the second time
+
+    def test_the_home_screen_carries_the_latest_messages(self):
+        services.send_message_to(self.pa, [self.md], "Vendor is here, Sir")
+        services.send_message_to(self.pa, [self.nikki], "Nikki, GST file bhej do")  # between two others: not Sir's
+        his = services.dashboard(self.md)
+        self.assertEqual([m["text"] for m in his["messages"]], ["Vendor is here, Sir"])
+        self.assertEqual((his["messages"][0]["box"], his["messages"][0]["who"], his["messages"][0]["seen"]), ("inbox", "Priya", False))
+        self.assertEqual(his["messages_unseen"], 1)
+        hers = services.dashboard(self.pa)
+        self.assertEqual([m["box"] for m in hers["messages"]], ["sent", "sent"])
+        self.assertEqual((hers["messages"][1]["who"], hers["messages"][1]["seen"], hers["messages"][1]["to_count"]), ("Sir", False, 1))
+        # He taps Seen: his copy says so, hers says seen too, and nothing is unread for him any more.
+        alert = Alert.objects.get(recipient=self.md, ref_type="message")
+        services.mark_seen(self.md, alert)
+        self.assertTrue(services.dashboard(self.md)["messages"][0]["seen"])
+        self.assertEqual(services.dashboard(self.md)["messages_unseen"], 0)
+        self.assertTrue(services.dashboard(self.pa)["messages"][1]["seen"])

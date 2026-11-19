@@ -34,6 +34,13 @@ class Command(BaseCommand):
         signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
         self.stdout.write(self.style.SUCCESS(
             f"TaskPanel worker started ({settings.TASKPANEL_MODE} mode). Ctrl+C to stop."))
+        # Work for the MD goes straight onto his list now: a request still waiting from before is moved there.
+        try:
+            moved = services.settle_pending_requests()
+            if moved:
+                self.stdout.write(f"{tu.now_local():%H:%M:%S}  {moved} waiting request(s) put on the MD's list")
+        except Exception:  # noqa: BLE001 — the worker's other duties must start regardless
+            log.exception("settling the waiting requests failed")
         last_pull = last_dir = 0.0
         last_follow = -1e9  # first cycle runs the follow-up check straight away
         cleaned_on = None   # the local date the alert cleanup last ran (once a day, in the small hours)

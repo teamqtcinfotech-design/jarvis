@@ -96,6 +96,9 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
   const gaveIt = myId != null && item.created_by_id === myId;
   const direct = isMD || gaveIt || item.scope === 'private'; // changes it straight away (anyone else proposes to the MD)
   const giver = item.created_by || md;
+  // Work on the MD's own list that someone on the team gave him: it rings until he sees it, and he may decline it
+  // (the giver is told) instead of doing it.
+  const givenToMD = item.assignee?.type === 'MD' && (item.origin === 'GIVEN' || item.origin === 'MEET') && item.created_by_id != null && !gaveIt;
   const toldSir = ownPaTask ? '' : ` I've told ${giver},`;
   const paStatus = (status: string, note = '') =>
     api(`/pa-tasks/${item.id}/status/`, { method: 'POST', body: { status, expected_version: item.version, note } });
@@ -142,18 +145,22 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
     run('section', () => api(`/shared-tasks/${item.id}/section/`, { method: 'POST', body: { section: name } }),
       `Moved to ${name}, ${address}.`, `${name} में रख दिया, ${addressHi}।`);
 
-  // A cancel is undone from the Cancelled list, but it still asks first.
+  // A cancel is undone from the Cancelled list, but it still asks first. For the MD, work someone gave him is
+  // "declined": the same step, and the giver hears it in those words.
+  const declining = isMD && givenToMD;
   const confirmCancel = () => {
     Alert.alert(
-      direct ? 'Cancel this task?' : 'Propose cancelling this task?',
-      direct ? 'It goes to the Cancelled list, where you can restore it.' : `${md} will be asked to agree.`,
+      declining ? 'Decline this task?' : direct ? 'Cancel this task?' : 'Propose cancelling this task?',
+      declining ? `${giver} will be told you declined it. It goes to the Cancelled list, where you can restore it.`
+        : direct ? 'It goes to the Cancelled list, where you can restore it.' : `${md} will be asked to agree.`,
       [
         { text: 'Keep it', style: 'cancel' },
         {
-          text: direct ? 'Cancel task' : 'Propose',
+          text: declining ? 'Decline' : direct ? 'Cancel task' : 'Propose',
           style: 'destructive',
           onPress: () => run('cancel', () => api(base, { method: 'PATCH', body: { expected_version: item.version, status: 'CANCELLED' } }),
-            `Cancelled, ${address}.`, `कैंसल कर दिया, ${addressHi}।`),
+            declining ? `Declined, ${address}. I've told ${giver}.` : `Cancelled, ${address}.`,
+            declining ? `मना कर दिया, ${addressHi}। ${giver} को बता दिया।` : `कैंसल कर दिया, ${addressHi}।`),
         },
       ],
     );
@@ -222,6 +229,21 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
               </Txt>
             ) : null}
             {item.hold_reason ? <Txt variant="small" style={{ marginTop: 2 }}>On hold: {item.hold_reason}</Txt> : null}
+          </View>
+        ) : givenToMD ? (
+          <View style={s.box}>
+            <Txt variant="small">
+              {item.origin === 'MEET' ? 'Meeting set by ' : 'Given to '}{isMD ? (item.origin === 'MEET' ? giver : 'you') : md}{item.origin === 'MEET' ? ' with ' : ' by '}
+              <Txt variant="heading" style={{ fontSize: 13 }}>{item.origin === 'MEET' ? (isMD ? 'you' : md) : giver}</Txt>
+              {item.status_label ? ` · ${item.status_label}` : ''}
+            </Txt>
+            {!closed ? (
+              <Txt variant="small" style={{ marginTop: 2, color: item.seen_at ? colors.inkSoft : colors.warn }}>
+                {item.seen_at ? `Seen ${momentLabel(item.seen_at)}` : isMD ? 'Not seen yet · ringing until you tap Seen' : `${md} has not seen it yet`}
+                {item.promise_label ? ` · will do it by ${item.promise_label}` : ''}
+              </Txt>
+            ) : null}
+            {isMD && !closed ? <Txt variant="caption" style={{ marginTop: 4 }}>Not for you? Decline below and {giver} is told.</Txt> : null}
           </View>
         ) : item.created_by ? (
           <Txt variant="small" style={{ marginTop: 8 }}>Requested by {item.created_by}</Txt>
@@ -334,7 +356,7 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
                   style={{ flex: 1, marginRight: 8 }}
                 />
                 <Button
-                  title={direct ? 'Cancel task' : 'Propose cancel'}
+                  title={declining ? 'Decline' : direct ? 'Cancel task' : 'Propose cancel'}
                   kind="danger"
                   compact
                   loading={busy === 'cancel'}

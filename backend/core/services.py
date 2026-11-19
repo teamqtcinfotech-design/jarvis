@@ -28,6 +28,7 @@ from django.conf import settings
 
 from . import timeutils as tu
 from .models import (
+    CLOSED_STATUSES,
     PRIORITY_RANK,
     Alert,
     AuditLog,
@@ -136,8 +137,9 @@ def diary_qs(user: User):
 
 
 def given_qs(user: User):
-    """Work this person gave someone else on the team (with its progress), meetings they set with others included."""
-    return _with_people(SharedTask.objects.filter(created_by=user, assignee_type=SharedTask.Assignee.USER,
+    """Work this person gave someone else on the team (with its progress), meetings they set with others included;
+    what they gave the MD is here too (it sits on his list like anyone else's)."""
+    return _with_people(SharedTask.objects.filter(created_by=user, assignee_type__in=PERSON_TYPES,
                                                   origin__in=GIVEN_ORIGINS + MEET_ORIGINS)
                         .exclude(assignee_user=user))
 
@@ -627,7 +629,7 @@ def alert_question(alert: Alert) -> dict | None:
         return alert.question
     if alert.kind == Alert.Kind.NEW_REQUEST and alert.ref_type == "request" and alert.recipient.is_md:
         return {"kind": "accept", "en": "Accept it?", "hi": "मंज़ूर करूँ?"}
-    if alert.kind == Alert.Kind.TASK_ASSIGNED and not alert.recipient.is_md:
+    if alert.kind == Alert.Kind.TASK_ASSIGNED:
         task = task_of(alert)
         giver = alert.sender or (task.created_by if task else None)
         if giver is not None and giver.id != alert.recipient_id:
@@ -673,6 +675,7 @@ _TITLE_HI = (
     ("started a task", "{who} ने काम शुरू किया"),
     ("reopened a task", "{who} ने काम फिर से खोला"),
     ("cancelled a task", "{who} ने काम कैंसल किया"),
+    ("declined a task", "{who} ने काम के लिए मना किया"),
     ("moved a task", "{who} ने काम का समय बदला"),
     ("took that back", "{who} ने वापस ले लिया"),
     ("delegated a task", "{who} ने स्टाफ़ को काम दिया"),
@@ -1052,6 +1055,9 @@ def dashboard(user: User) -> dict:
         "requests": requests_out,
         "delegated": delegated,
         "taskpanel": taskpanel,
+        # The latest messages (received and sent) and how many are unread, for the home screen.
+        "messages": recent_messages(user),
+        "messages_unseen": unseen_messages_count(user),
         **extra,
     }
     if user.is_assistant:
@@ -1139,8 +1145,14 @@ def update_shared_md_task(md: User, task_id, changes: dict, expected_version: in
     _log_changes(md, task, old_status, old_due)
     if task.assignee_user_id and task.assignee_user_id != md.id:
         _tell_assignee_of_change(md, task, old_status, old_due)
-    elif task.status == Status.CANCELLED and old_status != Status.CANCELLED:
-        close_task_alerts(task)
+    else:
+        if task.created_by_id and task.created_by_id != md.id and task.origin not in OWN_ORIGINS:
+            # Work on his own list that someone gave him: touching it means he has seen it (the ringing stops), and
+            # the giver hears the step itself: done, declined, moved.
+            _seen_by_touching(md, task)
+            _tell_giver_of_change(md, task, old_status, old_due)
+        if task.is_closed and old_status not in CLOSED_STATUSES:
+            close_task_alerts(task)
     audit(md, "shared_task.update", "shared_task", task.id, "fields: " + ",".join(sorted(changes)))
     return task
 
@@ -1155,13 +1167,12 @@ def create_person_task(giver: User, person: User, data: dict, *, meeting: bool =
                        compose_note: bool = True) -> SharedTask:
     """One person gives another on the team a task, or sets a meeting with them. Both see it; the person is told at
     once in the giver's name, and the giver hears when it is done (or put on hold).
-    Work for the MD is never given like this: it goes to him as a request he accepts (create_md_request)."""
+    Work for the MD goes the same way (Nov 2026): straight onto his own list, ringing until he sees it; nothing
+    waits for an acceptance, and he can decline it from the list (the giver is told)."""
     if person is None or not person.is_active:
         raise ServiceError("no_person", "that person's account is switched off.", 422)
     if person.id == giver.id:
         return create_own_task(giver, data)
-    if person.is_md and not giver.is_md:
-        raise ServiceError("use_request", f"work for {md_address()} goes to {md_pronouns()[1]} as a request.", 422)
     task = SharedTask(
         title=data["title"].strip(), notes=data.get("notes", ""),
         kind=Kind.MEETING if meeting else data.get("kind", Kind.TASK),
@@ -1333,39 +1344,65 @@ def update_task_status(user: User, task_id, new_status: str, expected_version: i
     task.hold_reason = note.strip()[:300] if new_status == Status.BLOCKED else ""
     task.completed_at = timezone.now() if new_status == Status.COMPLETED else None
     task.version += 1
-    # Moving it at all means they have seen it: the ringing stops (the giver hears the step itself, not a "seen").
-    first_look = task.seen_at is None and task.origin not in OWN_ORIGINS
-    if first_look:
-        task.seen_at = timezone.now()
     task.save()
-    if first_look:
-        log_event(task, TaskEvent.Kind.SEEN, user)
-        Alert.objects.filter(recipient=user, ref_type="shared_task", ref_id=str(task.id), seen_at__isnull=True) \
-            .update(seen_at=task.seen_at)
+    # Moving it at all means they have seen it: the ringing stops (the giver hears the step itself, not a "seen").
+    _seen_by_touching(user, task)
     _log_changes(user, task, old, (task.due_at, task.due_date))
     if new_status == Status.COMPLETED:
         close_task_alerts(task)
-    giver = task.created_by if task.created_by_id and task.created_by_id != user.id else None
-    if giver is not None and new_status != old and task.origin not in OWN_ORIGINS and giver.is_active:
-        name, sir, sir_hi = user.spoken_name, address_of(giver), address_hi_of(giver)
-        spoken_hi = ""
-        if new_status == Status.COMPLETED:
-            title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"{sir}, {name} has completed: {task.title}."
-            spoken_hi = f"{sir_hi}, {name} ने पूरा कर दिया: {task.title}।"
-        elif new_status == Status.BLOCKED:
+    _tell_giver_of_change(user, task, old, (task.due_at, task.due_date))
+    audit(user, "task.status", "shared_task", task.id, f"{old} -> {new_status}")
+    return task
+
+
+def _seen_by_touching(user: User, task: SharedTask) -> None:
+    """The person a task was given to moved it (a status, a time, done): that is seeing it. The task and its history
+    say so and the ringing on their phones stops; the giver hears the step itself, never a separate "seen"."""
+    if task.seen_at is not None or task.origin in OWN_ORIGINS or task.assignee_user_id != user.id:
+        return
+    now = timezone.now()
+    task.seen_at = now
+    SharedTask.objects.filter(id=task.id).update(seen_at=now)  # not a change to the task: no new version
+    log_event(task, TaskEvent.Kind.SEEN, user)
+    Alert.objects.filter(recipient=user, ref_type="shared_task", ref_id=str(task.id), seen_at__isnull=True).update(seen_at=now)
+
+
+def _tell_giver_of_change(actor: User, task: SharedTask, old_status: str, old_due) -> None:
+    """Whoever gave this person the task hears what they did with it: done, declined (cancelled), on hold, moved to
+    another time; started and reopened are quiet news. Their own work tells nobody. The MD is named by the form of
+    address ("Sir has declined: …"), anyone else by name."""
+    giver = task.created_by if task.created_by_id and task.created_by_id != actor.id else None
+    if giver is None or task.origin in OWN_ORIGINS or not giver.is_active:
+        return
+    name, name_hi = giver_words(actor)
+    to, to_hi = address_of(giver), address_hi_of(giver)
+    kind, spoken_hi = Alert.Kind.STAFF_UPDATE, ""
+    if task.status != old_status:
+        if task.status == Status.COMPLETED:
+            title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"{to}, {name} has completed: {task.title}."
+            spoken_hi = f"{to_hi}, {name_hi} ने पूरा कर दिया: {task.title}।"
+        elif task.status == Status.CANCELLED:
+            title, priority, spoken = f"{name} declined a task", Priority.NORMAL, f"{to}, {name} has declined: {task.title}."
+            spoken_hi = f"{to_hi}, {name_hi} ने मना कर दिया: {task.title}।"
+        elif task.status == Status.BLOCKED:
             title, priority = f"{name} put a task on hold", Priority.NORMAL
-            spoken = f"{sir}, {name} has put {task.title} on hold. Reason: {task.hold_reason}."
-            spoken_hi = f"{sir_hi}, {name} ने {task.title} होल्ड पर रखा है। कारण: {task.hold_reason}।"
-        elif new_status == Status.IN_PROGRESS:
+            spoken = f"{to}, {name} has put {task.title} on hold. Reason: {task.hold_reason}."
+            spoken_hi = f"{to_hi}, {name_hi} ने {task.title} होल्ड पर रखा है। कारण: {task.hold_reason}।"
+        elif task.status == Status.IN_PROGRESS:
             title, priority, spoken = f"{name} started a task", Priority.LOW, ""
         else:
             title, priority, spoken = f"{name} reopened a task", Priority.LOW, ""
-        Alert.objects.create(
-            recipient=giver, sender=user, kind=Alert.Kind.STAFF_UPDATE, priority=priority, title=title, body=task.title,
-            spoken_text=spoken[:400], spoken_text_hi=spoken_hi[:400], ref_type="shared_task", ref_id=str(task.id),
-        )
-    audit(user, "task.status", "shared_task", task.id, f"{old} -> {new_status}")
-    return task
+    elif (task.due_at, task.due_date) != tuple(old_due) and not task.is_closed:
+        when = tu.due_phrase(task.due_kind, task.due_date, task.due_at) or "no fixed time"
+        when_hi = tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at) or "बिना तय समय"
+        kind, title, priority = Alert.Kind.INFO, f"{name} moved a task", Priority.NORMAL
+        spoken, spoken_hi = f"{to}, {name} has moved {task.title} to {when}.", f"{to_hi}, {name_hi} ने {task.title} {when_hi} पर कर दिया।"
+    else:
+        return
+    Alert.objects.create(
+        recipient=giver, sender=actor, kind=kind, priority=priority, title=title[:200], body=task.title,
+        spoken_text=spoken[:400], spoken_text_hi=spoken_hi[:400], ref_type="shared_task", ref_id=str(task.id),
+    )
 
 
 def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: int, note: str = "") -> SharedTask:
@@ -1461,8 +1498,9 @@ def _notify_md_new_request(req: TaskRequest):
 
 @transaction.atomic
 def create_md_request(pa: User, data: dict) -> TaskRequest:
-    """Anyone on the team asks the MD to do or attend something (`pa` is whoever asks): nothing reaches his list
-    until he accepts."""
+    """The old way (before Nov 2026) of giving the MD work: a request he accepts first. Kept for the request API and
+    older phones; JARVIS itself now puts work for the MD straight on his list (create_person_task), and any request
+    still waiting is moved there by settle_pending_requests."""
     if not pa.is_assistant:
         raise ServiceError("forbidden", "The MD adds his own work directly; requests come from the team.", 403)
     payload = _payload_for_storage({k: v for k, v in data.items() if k != "reason"})
@@ -1579,6 +1617,33 @@ def decline_request(md: User, request_id, note: str = "") -> TaskRequest:
         .update(acknowledged_at=timezone.now())
     audit(md, "request.decline", "request", req.id)
     return req
+
+
+def settle_pending_requests() -> int:
+    """Requests to the MD still waiting from before work went straight onto his list (Nov 2026): each becomes the
+    task it asked for, on his list, from whoever asked, ringing until he sees it; the request is closed as accepted
+    with a note. Run when the worker starts; nothing to do the second time. Returns how many were moved."""
+    md = get_md()
+    if md is None:
+        return 0
+    moved = 0
+    waiting = TaskRequest.objects.filter(state=TaskRequest.State.PENDING, kind=TaskRequest.Kind.CREATE) \
+        .select_related("requested_by").order_by("created_at")
+    for req in waiting:
+        with transaction.atomic():
+            data = _payload_to_input(req.payload)
+            if not (data.get("title") or "").strip():
+                continue
+            task = create_person_task(req.requested_by, md, data, compose_note=False)
+            now = timezone.now()
+            req.state, req.decided_at, req.resulting_task = TaskRequest.State.ACCEPTED, now, task
+            req.decision_note = f"Put on {md_address()}'s list: work for {md_pronouns()[1]} now goes straight there."[:300]
+            req.save()
+            Alert.objects.filter(recipient=md, ref_type="request", ref_id=str(req.id), acknowledged_at__isnull=True) \
+                .update(acknowledged_at=now)
+            audit(req.requested_by, "request.settled", "request", req.id, f"task {task.id}")
+        moved += 1
+    return moved
 
 
 @transaction.atomic
@@ -2865,6 +2930,43 @@ def send_message_to(sender: User, people: list[User], text: str, *, when=None,
         ))
         audit(sender, "message.send", "user", person.id, "later" if when else "now")
     return made
+
+
+MESSAGE_BRIEF_LIMIT = 6
+MESSAGE_UNSEEN_WINDOW = timedelta(days=30)
+
+
+def recent_messages(user: User, limit: int = MESSAGE_BRIEF_LIMIT) -> list[dict]:
+    """The latest messages this person received or sent, for the home screen: who, the words, when, and whether it
+    was seen (one they got: by them; one they sent: by everyone it went to). A message held for later is not shown
+    to the person it is for before its time. Only messages the person was part of exist for them at all."""
+    now = timezone.now()
+    rows = []
+    received = MessageReceipt.objects.filter(recipient=user).exclude(message__deliver_at__gt=now) \
+        .select_related("message__sender").order_by("-message__sent_at")[:limit]
+    for r in received:
+        m = r.message
+        rows.append({"id": str(m.id), "box": "inbox", "text": m.text, "who": giver_words(m.sender)[0], "at": m.sent_at.isoformat(),
+                     "seen": r.seen_at is not None, "seen_at": r.seen_at.isoformat() if r.seen_at else None,
+                     "priority": m.priority, "seen_count": 1 if r.seen_at else 0, "to_count": 1})
+    sent = Message.objects.filter(sender=user).prefetch_related("receipts__recipient").order_by("-sent_at")[:limit]
+    for m in sent:
+        receipts = list(m.receipts.all())
+        seen = [r for r in receipts if r.seen_at]
+        rows.append({"id": str(m.id), "box": "sent", "text": m.text,
+                     "who": ", ".join(giver_words(r.recipient)[0] for r in receipts), "at": m.sent_at.isoformat(),
+                     "seen": bool(receipts) and len(seen) == len(receipts),
+                     "seen_at": max(r.seen_at for r in seen).isoformat() if seen else None,
+                     "priority": m.priority, "seen_count": len(seen), "to_count": len(receipts)})
+    rows.sort(key=lambda r: r["at"], reverse=True)
+    return rows[:limit]
+
+
+def unseen_messages_count(user: User) -> int:
+    """Messages this person got in the last month and has not seen yet (a held one counts from its moment)."""
+    now = timezone.now()
+    return MessageReceipt.objects.filter(recipient=user, seen_at__isnull=True, message__sent_at__gte=now - MESSAGE_UNSEEN_WINDOW) \
+        .exclude(message__deliver_at__gt=now).count()
 
 
 def send_message(sender: User, text: str, *, when=None, priority: str = Priority.NORMAL, to: str = "") -> str:

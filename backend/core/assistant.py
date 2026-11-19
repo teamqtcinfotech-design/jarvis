@@ -15,7 +15,7 @@ from django.utils import timezone
 from . import ai_brain, datacards, hinglish_parser, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
-from .models import Alert, Kind, Priority, PrivateTask, SharedTask, TaskRequest, User
+from .models import Alert, Kind, Priority, PrivateTask, SharedTask, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
@@ -29,7 +29,7 @@ AUTO_ACTIONS = {"private_task", "own_task", "person_task", "person_meeting", "md
 EDIT_ACTIONS = {"change_task", "delete_task"}
 _CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind", "duration_minutes"}
 # Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the person's they give it to,
-# or the MD's (someone asking for Sir's time: they only ever hear "busy", never why).
+# or the MD's (someone putting work in Sir's diary: they only ever hear "busy", never why).
 _SLOT_ACTIONS = {"private_task": "self", "person_meeting": "self", "person_task": "person", "md_request": "md",
                  "change_task": "self", "own_task": "self",
                  "pa_meeting": "self", "pa_task": "person", "pa_self_task": "self"}
@@ -344,7 +344,7 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
         elif intent == "assign_to_staff" and any(st in ("known", "close", "ambiguous") for _, st in team_hits):
             intent = "assign_to_person"
     # A meeting or call WITH someone on the team is the speaker's meeting with that person (they are told and both
-    # are reminded); with the MD (from anyone else) it is a request for his time.
+    # are reminded); with the MD (from anyone else) it goes in his diary as work for him (md_request).
     if cmd.get("kind") in {Kind.MEETING, Kind.CALL} and intent in {"assign_to_person", "create_task", "needs_destination",
                                                                     "meet_with_person", "assign_to_staff"}:
         with_whom = [str(p) for p in (cmd.get("people") or [])] + (names if intent == "meet_with_person" else [])
@@ -594,6 +594,9 @@ def _clean_pending(pending) -> dict | None:
 
 
 _BOOKABLE = {"private_task", "own_task", "person_meeting", "pa_self_task", "pa_meeting"}
+# Items with a day and time whose repeat (the same words a moment later) is "already booked", not saved or questioned
+# again: the bookable ones, and work for the MD (it sits in his diary now and would otherwise clash with itself).
+_REPEATABLE = _BOOKABLE | {"md_request"}
 DUPLICATE_WINDOW = timedelta(minutes=3)
 
 
@@ -613,9 +616,8 @@ def _just_saved(user: User, action: str, title: str, when: datetime | None, assi
         if ids:
             rows = rows.filter(assignee_user_id__in=ids)
     elif action == "md_request":
-        want = " ".join((title or "").lower().split())
-        return any(" ".join(str((r.payload or {}).get("title") or "").lower().split()) == want
-                   for r in TaskRequest.objects.filter(requested_by=user, created_at__gte=since))
+        rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.GIVEN,
+                                         assignee_type=SharedTask.Assignee.MD, created_at__gte=since)
     elif action == "message":
         want = " ".join((title or "").split())
         ids = [a.get("id") for a in (assignees or []) if isinstance(a, dict)]
@@ -1418,7 +1420,7 @@ def _auto_save(user: User, draft: dict, cmd: dict, full_text: str) -> None:
         # The model's own "done" line reads best for one simple item it fully understood (it names the person as
         # said); the server's line is used for lists, and whenever the model's line could be stale.
         done = (cmd.get("done_reply") or "").strip()
-        if len(items) == 1 and result["saved"] == 1 and done and items[0]["action"] in {"private_task", "own_task", "md_request"}:
+        if len(items) == 1 and result["saved"] == 1 and done and items[0]["action"] in {"private_task", "own_task"}:
             done_hi = (cmd.get("done_reply_hi") or "").strip()
             en, hi = done, done_hi if _DEVANAGARI.search(done_hi) else hi
     draft["action"], draft["booked"], draft["batch"] = "answer", True, []
@@ -1446,14 +1448,14 @@ def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
     staff = (d.get("staff") or {}).get("name")
     kind_en = {"MEETING": "meeting", "CALL": "call", "PAYMENT": "payment", "FOLLOW_UP": "follow-up"}.get(d.get("kind"), "task")
     kind_hi = _KIND_HI.get(d.get("kind"), "टास्क")
-    what = {"private_task": f"personal {kind_en}", "md_request": f"request for {services.md_address()}",
+    what = {"private_task": f"personal {kind_en}", "md_request": f"{kind_en} for {services.md_address()}",
             "delegation": f"{kind_en} for {staff}" if staff else "task for staff", "team_delegation": f"task for {(d.get('team') or {}).get('label') or 'the team'}",
             "pa_task": f"{kind_en} for {pa_name}", "pa_meeting": f"meeting with {pa_name}", "pa_self_task": f"your own {kind_en}",
             "person_task": f"{kind_en} for {pa_name}", "person_meeting": f"meeting with {pa_name}", "own_task": f"your own {kind_en}",
             "message": f"message to {pa_name}",
             "mg_task": f"{kind_en} for {d.get('mg_name') or 'the manager'}",
             "choose_destination": kind_en}.get(d.get("action"), kind_en)
-    what_hi = {"private_task": f"पर्सनल {kind_hi}", "md_request": f"{sir_hi} के लिए रिक्वेस्ट",
+    what_hi = {"private_task": f"पर्सनल {kind_hi}", "md_request": f"{sir_hi} के लिए {kind_hi}",
                "delegation": f"{staff} के लिए {kind_hi}" if staff else "स्टाफ़ के लिए टास्क", "team_delegation": "टीम के लिए टास्क",
                "pa_task": f"{pa_name} के लिए {kind_hi}", "pa_meeting": f"{pa_name} के साथ मीटिंग", "pa_self_task": f"आपका अपना {kind_hi}",
                "person_task": f"{pa_name} के लिए {kind_hi}", "person_meeting": f"{pa_name} के साथ मीटिंग", "own_task": f"आपका अपना {kind_hi}",
@@ -2036,7 +2038,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         elif draft["action"] != "team_delegation" and (not draft["spoken_reply"] or draft["engine"] == "rules"):
             what = {
                 "private_task": "Personal task",
-                "md_request": "Request for MD",
+                "md_request": f"Task for {services.md_address()}",
                 "delegation": f"Assign to {draft['staff']['name']}" if draft["staff"] else "Assign to staff",
                 "pa_task": f"Task for {pa_name}",
                 "pa_self_task": "Your own task",
@@ -2046,7 +2048,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             }[draft["action"]]
             what_hi = {
                 "private_task": "पर्सनल टास्क",
-                "md_request": f"{sir_hi} के लिए रिक्वेस्ट",
+                "md_request": f"{sir_hi} के लिए टास्क",
                 "delegation": f"{draft['staff']['name']} को असाइन" if draft["staff"] else "स्टाफ़ को असाइन",
                 "pa_task": f"{pa_name} के लिए टास्क",
                 "pa_self_task": "आपका अपना टास्क",
@@ -2066,7 +2068,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     # Does it fit the diary? (clash, free slot, a very full day) — may replace the question above.
     # The same meeting, saved by this person a moment ago (heard twice, or said again because the answer was slow):
     # said so, and not saved or questioned a second time.
-    if (draft["action"] in _BOOKABLE and draft["kind"] in (Kind.MEETING, Kind.CALL) and draft["due_date"] and draft["due_time"]
+    if (draft["action"] in _REPEATABLE and draft["kind"] in (Kind.MEETING, Kind.CALL) and draft["due_date"] and draft["due_time"]
             and draft["title"] and not draft["needs_clarification"] and not is_reminder
             and _just_saved(user, draft["action"], draft["title"],
                             exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"])),

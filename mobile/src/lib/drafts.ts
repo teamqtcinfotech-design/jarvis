@@ -4,9 +4,10 @@ import type { Draft, DraftAction } from './types';
 export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delegation', 'team_delegation', 'pa_task', 'pa_meeting',
   'pa_self_task', 'mg_task', 'person_task', 'person_meeting', 'own_task'];
 
-/** Cards of the team's kind, saved on the server by the same path the voice uses (/assistant/execute/). */
+/** Cards of the team's kind, saved on the server by the same path the voice uses (/assistant/execute/). Work for the
+ *  MD (md_request) is one of them: it goes straight onto the MD's list there, like work for anyone. */
 export const SERVER_SAVED: DraftAction[] = ['person_task', 'person_meeting', 'own_task', 'message', 'pa_task', 'pa_meeting',
-  'pa_self_task', 'mg_task', 'organise'];
+  'pa_self_task', 'mg_task', 'md_request', 'organise'];
 
 /** Cards that end with a question ("shall I save it?") and wait for a yes / no / change. */
 export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'message', 'accept_request', 'decline_request', 'complete', 'remember',
@@ -49,7 +50,7 @@ export function draftHeading(d: Draft, md = 'Sir', him = 'him'): { title: string
         icon: 'people-circle-outline',
       };
     case 'md_request':
-      return { title: `Request to ${md}`, detail: `${md} will accept or decline it.`, icon: 'paper-plane-outline' };
+      return { title: `Task for ${md}`, detail: `Goes straight onto ${md}’s list and rings until seen. ${md} can decline it.`, icon: 'person-outline' };
     case 'mg_task':
       return { title: `Task for ${d.mg_name || 'the manager'}`, detail: `${d.mg_name || 'The manager'} is told at once.`, icon: 'person-outline' };
     case 'pa_self_task':

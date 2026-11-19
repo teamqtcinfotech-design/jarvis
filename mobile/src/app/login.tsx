@@ -1,7 +1,7 @@
 /**
- * Sign in. By phone number: the number, then the 6-digit SMS code (Firebase sends and checks it on the phone; on
- * most phones the code is read by itself). The app on this phone must carry the phone sign-in (2.7.0 and later);
- * an older app still signs in with a username and password while the server allows it.
+ * Sign in. For now with a username and password (see PHONE_SIGN_IN). The phone sign-in is built and waits: the
+ * number, then the 6-digit SMS code (Firebase sends and checks it on the phone; on most phones the code is read by
+ * itself); the app on this phone must carry it (2.7.0 and later).
  */
 import { Redirect } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -17,6 +17,11 @@ import { otpAwaitAuto, otpCancel, otpConfirm, otpStart, otpSupported } from '@/l
 
 const COUNTRY = '+91';
 
+/** The phone sign-in is switched off for now: Firebase will not send the SMS until the project is on its paid plan
+ *  (and India is allowed as a region). Until then every phone signs in with the username and password (the MD's
+ *  test account among them). Set this true to bring the phone sign-in back; PhoneLogin below is complete. */
+const PHONE_SIGN_IN = false;
+
 /** "98765 43210" / "098765-43210" / "+91 98765 43210" -> "+919876543210"; "" when it is not a number. */
 function fullNumber(raw: string): string {
   const digits = raw.replace(/\D/g, '');
@@ -30,7 +35,7 @@ function fullNumber(raw: string): string {
 export default function Login() {
   const { user } = useSession();
   if (user) return <Redirect href="/" />;
-  return otpSupported ? <PhoneLogin /> : <PasswordLogin />;
+  return PHONE_SIGN_IN && otpSupported ? <PhoneLogin /> : <PasswordLogin />;
 }
 
 function PhoneLogin() {
@@ -173,7 +178,7 @@ function PhoneLogin() {
   );
 }
 
-/** The older way, for a phone that does not carry the phone sign-in yet (and while the server allows it). */
+/** Username and password: the way in while the phone sign-in is switched off (and for a phone without it). */
 function PasswordLogin() {
   const { signIn } = useSession();
   const [username, setUsername] = useState('');
@@ -204,7 +209,7 @@ function PasswordLogin() {
         <Button title="Sign in" icon="log-in-outline" onPress={submit} loading={busy} disabled={!username.trim() || !password} style={{ marginTop: 20 }} />
       </View>
       <Txt variant="caption" style={{ color: colors.faint, marginTop: 18, textAlign: 'center' }}>
-        Only invited accounts can sign in. The new app signs in by phone number.
+        Only invited accounts can sign in.
       </Txt>
     </Shell>
   );
