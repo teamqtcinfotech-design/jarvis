@@ -11,11 +11,11 @@ from django.utils import timezone
 
 from . import scheduling, services
 from . import timeutils as tu
-from .models import Kind, PrivateTask, SharedTask, Status, TaskEvent
+from .models import Alert, Kind, PrivateTask, SharedTask, Status, TaskEvent
 
 VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
               "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person",
-              "department", "departments", "section", "messages", "approvals"]
+              "department", "departments", "section", "messages", "approvals", "alerts"]
 
 _PROGRESS = {Status.OPEN: 0, Status.IN_PROGRESS: 50, Status.BLOCKED: 50, Status.COMPLETED: 100, Status.CANCELLED: 0}
 _REMOTE_PROGRESS = {"todo": 0, "working": 50, "waiting": 50, "done": 100}
@@ -731,14 +731,166 @@ def _history_view(user, include_private: bool, p: dict) -> dict:
     return view
 
 
+def _window(p: dict, default_days: int = 0) -> tuple[datetime, datetime, str, str]:
+    """(since, until, "in the last 10 minutes" / "today" / "1 Nov – 15 Nov", the Hindi twin) for a notifications or
+    approvals question: a span in minutes, a day or period, else today (or the last `default_days` days)."""
+    now = timezone.now()
+    today = tu.today_local()
+    minutes = int(p.get("minutes") or 0)
+    if minutes:
+        return now - timedelta(minutes=minutes), now, f"in the last {tu.minutes_phrase(minutes)}", f"पिछले {tu.minutes_phrase_hi(minutes)} में"
+    if p.get("from"):
+        start, end = p["from"], p.get("to") or p["from"]
+        if start == end == today:
+            return tu.day_bounds(today)[0], now, "today", "आज"
+        if start == end == today - timedelta(days=1):
+            return tu.day_bounds(start)[0], tu.day_bounds(start)[1], "yesterday", "कल"
+        en, hi = _period_words(start, end)
+        return tu.day_bounds(start)[0], tu.day_bounds(end)[1], en, hi
+    if default_days:
+        start = today - timedelta(days=default_days)
+        return tu.day_bounds(start)[0], now, f"in the last {default_days} days", f"पिछले {default_days} दिनों में"
+    return tu.day_bounds(today)[0], now, "today", "आज"
+
+
+def _senders(p: dict) -> set | None:
+    """The people a "from Mansi" / "Sir ne jo bheja" narrows to (user ids), or None for everyone."""
+    who = " ".join(str(p.get("who") or "").split())
+    if not who or who.lower() in listviews_me() | {"team", "all", "everyone", "staff"}:
+        return None
+    low = who.lower()
+    if low in {"sir", "md", "boss", "sahab", "ma'am", "madam", "maam"}:
+        md = services.get_md()
+        return {md.id} if md else set()
+    found = services.find_people(who, exclude=None)
+    if found["status"] in ("known", "close", "ambiguous"):
+        return {u.id for u in found["people"]}
+    return set()
+
+
+_PILE_WORDS = {
+    "message": ("message", "messages", "संदेश"), "task": ("task", "tasks", "टास्क"), "meeting": ("meeting", "meetings", "मीटिंग"),
+    "approval": ("approval", "approvals", "मंज़ूरी"), "request": ("request", "requests", "रिक्वेस्ट"), "update": ("update", "updates", "अपडेट"),
+}
+_PILE_ORDER = ("approval", "request", "meeting", "task", "message", "update")
+_TYPE_PILES = {"MESSAGE": "message", "TASK": "task", "MEETING": "meeting", "CALL": "meeting", "APPROVAL": "approval",
+               "REQUEST": "request", "UPDATE": "update", "PAYMENT": "task", "FOLLOW_UP": "task"}
+
+
+def _pile_of(a: Alert, task) -> str:
+    if a.ref_type == "message":
+        return "message"
+    if a.kind == Alert.Kind.NEW_REQUEST:
+        return "request"
+    if a.kind == Alert.Kind.TASK_ASSIGNED:
+        if task is not None and task.kind == Kind.APPROVAL:
+            return "approval"
+        if task is not None and task.kind in (Kind.MEETING, Kind.CALL):
+            return "meeting"
+        return "task"
+    return "update"
+
+
+def _alert_state(a: Alert, task) -> str:
+    """waiting / approved / declined for an approval; seen / unseen for everything else."""
+    if task is not None and task.kind == Kind.APPROVAL and a.kind == Alert.Kind.TASK_ASSIGNED:
+        return "approved" if task.status == Status.COMPLETED else "declined" if task.status == Status.CANCELLED else "waiting"
+    return "seen" if (a.seen_at or a.acknowledged_at) else "unseen"
+
+
+def _alerts_view(user, p: dict) -> dict:
+    """Notifications (Nov 2026): what reached this person in a window ("last 10 minutes", today, yesterday, a
+    period), sorted into piles (approvals, requests, meetings, tasks, messages, updates) and narrowed as asked: a
+    pile ("sirf messages"), a state (seen / unseen / approved / declined / waiting), a sender ("Mansi ne jo bheja"),
+    a priority. The counts are said by pile, so "inme se kitne meetings ke liye" is answered from the same card."""
+    address, address_hi = _addr(user)
+    since, until, period_en, period_hi = _window(p)
+    senders = _senders(p)
+    want_piles = {_TYPE_PILES[t] for t in (p.get("types") or []) if t in _TYPE_PILES}
+    want_state = p.get("filter") or ""
+    want_priority = {"urgent": {"URGENT"}, "high": {"HIGH"}, "important": {"URGENT", "HIGH"}}.get(p.get("priority") or "")
+    qs = Alert.objects.filter(recipient=user, created_at__gte=since, created_at__lt=until).select_related("sender").order_by("-created_at")
+    if senders is not None:
+        qs = qs.filter(sender_id__in=senders)
+    alerts = list(qs[:400])
+    task_ids = [a.ref_id for a in alerts if a.ref_type == "shared_task" and a.ref_id]
+    tasks = {str(t.id): t for t in SharedTask.objects.filter(id__in=task_ids)} if task_ids else {}
+    rows, by_pile, waiting_n = [], {k: 0 for k in _PILE_ORDER}, 0
+    firsts: dict[str, list] = {k: [] for k in _PILE_ORDER}
+    for a in alerts:
+        task = tasks.get(a.ref_id) if a.ref_type == "shared_task" else None
+        pile, state = _pile_of(a, task), _alert_state(a, task)
+        if want_piles and pile not in want_piles:
+            continue
+        if want_state and not (state == want_state or (want_state == "open" and state in ("unseen", "waiting"))
+                               or (want_state == "seen" and state in ("seen", "approved", "declined"))):
+            continue
+        if want_priority and a.priority not in want_priority:
+            continue
+        local = tu.to_local(a.created_at)
+        who = services.giver_words(a.sender)[0] if a.sender_id else "JARVIS"
+        what = (task.title if task is not None else a.body if a.ref_type == "message" else a.title) or a.title
+        rows.append({
+            "id": a.ref_id if a.ref_type in ("shared_task", "request") else str(a.id), "scope": "shared" if a.ref_type == "shared_task" else "",
+            "title": what, "kind": _PILE_WORDS[pile][0].title(), "priority": a.priority, "status": state.title(),
+            "when": tu.fmt_time(local), "day": tu.fmt_day(local.date()), "who": who, "progress": 0, "private": False,
+            "overdue": False, "version": task.version if task is not None else None, "hold_reason": "", "pile": pile,
+            "amount": services.rupees(task.amount) if task is not None and task.amount is not None else "",
+        })
+        by_pile[pile] += 1
+        if state in ("unseen", "waiting"):
+            waiting_n += 1
+        if len(firsts[pile]) < 2:
+            firsts[pile].append(f"{what}" + (f" ({who})" if who and pile != "update" else "") + (f", {state}" if pile == "approval" else ""))
+    rows.sort(key=lambda r: _PILE_ORDER.index(r["pile"]))
+    narrowed_en = []
+    if want_piles:
+        narrowed_en.append(" and ".join(_PILE_WORDS[k][1] for k in _PILE_ORDER if k in want_piles))
+    if want_state:
+        narrowed_en.append({"open": "still waiting"}.get(want_state, want_state))
+    if senders:
+        narrowed_en.append(f"from {p['who']}")
+    title = "Notifications" + (f" · {', '.join(narrowed_en)}" if narrowed_en else "")
+    view = _table("alerts", title, rows[:80], [("kind", "What"), ("title", "Says"), ("who", "From"), ("status", "Status"), ("when", "When")],
+                  subtitle=f"{len(rows)} {period_en}" + (f" · {waiting_n} still waiting for you" if waiting_n else ""))
+    view["stats"] = [{"label": _PILE_WORDS[k][1].title(), "value": n, "tone": "accent" if k in ("approval", "request") else "info", "icon": {
+        "approval": "ribbon-outline", "request": "mail-unread-outline", "meeting": "people-outline", "task": "checkbox-outline",
+        "message": "chatbubble-ellipses-outline", "update": "notifications-outline"}[k]} for k, n in by_pile.items() if n]
+    view["stats"].append({"label": "Waiting for you", "value": waiting_n, "tone": "warn" if waiting_n else "muted", "icon": "hourglass-outline"})
+    if not rows:
+        # "No meetings from Mansi came in the last 10 minutes." / "Nothing came today." / "Nothing approved today."
+        piles_en = " or ".join(_PILE_WORDS[k][1] for k in _PILE_ORDER if k in want_piles)
+        piles_hi = " या ".join(_PILE_WORDS[k][2] for k in _PILE_ORDER if k in want_piles)
+        base = f"no {piles_en}" if want_piles else "nothing"
+        tail = f" from {p['who']}" if senders else ""
+        state_en = {"seen": "that you have seen", "unseen": "unseen", "approved": "approved", "declined": "declined",
+                    "waiting": "waiting for you", "open": "still waiting"}.get(want_state, "")
+        en = f"{base}{tail} {state_en} {period_en}." if state_en else f"{base}{tail} came {period_en}."
+        hi = f"{period_hi}{' ' + p['who'] + ' की तरफ़ से' if senders else ''} " + (f"कोई {piles_hi} नहीं आई" if want_piles else "कुछ नहीं आया") + "।"
+        return _summ(view, address, address_hi, en, hi)
+    parts_en, parts_hi = [], []
+    for k in _PILE_ORDER:
+        n = by_pile[k]
+        if not n:
+            continue
+        w = _PILE_WORDS[k]
+        parts_en.append(f"{n} {w[0] if n == 1 else w[1]}: {'; '.join(firsts[k])}" + (f" and {n - len(firsts[k])} more" if n > len(firsts[k]) else ""))
+        parts_hi.append(f"{n} {w[2]}: {'; '.join(firsts[k])}")
+    en = f"{period_en}: " + ". ".join(parts_en) + "." + (f" {waiting_n} still waiting for you." if waiting_n else "")
+    hi = f"{period_hi}: " + "। ".join(parts_hi) + "।" + (f" {waiting_n} अभी भी आपके इंतज़ार में।" if waiting_n else "")
+    return _summ(view, address, address_hi, en, hi)
+
+
 def _approvals_view(user, p: dict) -> dict:
     """Approvals (Nov 2026): what waits for a decision, and what was approved or declined in the period (the last 30
-    days when none was said), with the amounts added up. The MD sees every approval; anyone else those they asked
-    for or were asked to decide."""
+    days when none was said), with the amounts added up; "sirf jo maine approve kiye" narrows to one state. The MD
+    sees every approval; anyone else those they asked for or were asked to decide."""
     address, address_hi = _addr(user)
     today = tu.today_local()
     start = p.get("from") or today - timedelta(days=30)
     end = p.get("to") or today
+    want_state = p.get("filter") if p.get("filter") in ("approved", "declined", "waiting", "open") else ""
+    want_state = "waiting" if want_state == "open" else want_state
     qs = services.visible_shared_qs(user).filter(kind=Kind.APPROVAL).order_by("-created_at")
     if p.get("who") and p["who"].lower() not in listviews_me():
         subject = services.find_people(p["who"], exclude=None)
@@ -747,11 +899,16 @@ def _approvals_view(user, p: dict) -> dict:
             qs = qs.filter(Q(created_by_id__in=ids) | Q(assignee_user_id__in=ids))
     day_start, _ = tu.day_bounds(start)
     _, day_end = tu.day_bounds(end)
+    if p.get("minutes"):
+        day_start, day_end, period_en, period_hi = _window(p)
     rows, waiting, approved_total, approved_n, declined_n = [], 0, 0.0, 0, 0
     for t in qs[:300]:
         open_ = not t.is_closed
         decided = t.completed_at or t.updated_at
         if not open_ and not (decided and day_start <= decided < day_end):
+            continue
+        state = "waiting" if open_ else "approved" if t.status == Status.COMPLETED else "declined"
+        if want_state and state != want_state:
             continue
         item = services.shared_item(t)
         row = _row(item, True)
@@ -772,9 +929,23 @@ def _approvals_view(user, p: dict) -> dict:
         row["day"] = tu.fmt_day(tu.to_local(decided).date()) if not open_ and decided else (row["day"] or "No date")
         rows.append(row)
     rows.sort(key=lambda r: (0 if r["status"] == "Waiting" else 1))
-    period_en, period_hi = _period_words(start, end)
-    view = _table("approvals", "Approvals", rows[:80], [("status", "Status"), ("title", "What"), ("amount", "Amount"), ("who", "Asked by → of")],
+    if not p.get("minutes"):
+        # Nothing said about the period = the last 30 days, said that way (not as two dates).
+        period_en, period_hi = _period_words(start, end) if p.get("from") else ("in the last 30 days", "पिछले 30 दिनों में")
+    title = "Approvals" + (f" · {want_state}" if want_state else "")
+    view = _table("approvals", title, rows[:80], [("status", "Status"), ("title", "What"), ("amount", "Amount"), ("who", "Asked by → of")],
                   subtitle=f"{waiting} waiting · {approved_n} approved · {declined_n} declined, {period_en}")
+    if want_state:
+        n = len(rows)
+        names = "; ".join(f"{r['title']}{' (' + r['amount'] + ')' if r['amount'] else ''}" for r in rows[:3])
+        word = {"waiting": "waiting for you", "approved": "approved", "declined": "declined"}[want_state]
+        word_hi = {"waiting": "इंतज़ार में", "approved": "मंज़ूर", "declined": "नामंज़ूर"}[want_state]
+        view["stats"] = [{"label": word.title(), "value": n, "tone": "accent", "icon": "ribbon-outline"}]
+        if want_state == "approved":
+            view["stats"].append({"label": "Approved ₹", "value": services.rupees(approved_total) if approved_total else "₹0", "tone": "accent", "icon": "cash-outline"})
+        en = f"{n} {'approval' if n == 1 else 'approvals'} {word} {period_en}" + (f": {names}" if names else "") + "."
+        hi = f"{period_hi} {n} मंज़ूरी {word_hi}" + (f": {names}" if names else "") + "।"
+        return _summ(view, address, address_hi, en, hi)
     view["stats"] = [
         {"label": "Waiting", "value": waiting, "tone": "warn" if waiting else "muted", "icon": "hourglass-outline"},
         {"label": "Approved", "value": approved_n, "tone": "success", "icon": "checkmark-circle-outline"},
@@ -938,6 +1109,8 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         return _messages_report(user, p)
     if kind == "approvals":
         return _approvals_view(user, p)
+    if kind == "alerts":
+        return _alerts_view(user, p)
     if kind == "history":
         view = _history_view(user, include_private, p)
         address, address_hi = _addr(user)
@@ -1144,6 +1317,9 @@ _QUERY_HINTS = [
     ("history", ("last time", "pichhli baar", "pichli baar", "kab mila", "last met", "last meeting with", "history", "kab diya tha", "pehle kab")),
     ("cancelled", ("cancelled", "canceled", "cancel kiye", "cancel hue", "hataye", "deleted", "restore")),
     ("done", ("completed", "finished", "ho gaya", "ho gaye", "khatam", "kya kya hua", "what got done")),
+    ("alerts", ("notification", "notifications", "alerts", "alert aaye", "kya aaya", "kya kya aaya", "aaya hai", "aaye hain", "incoming",
+                "jo aaya", "dekh liye", "dekhe hue", "unseen", "what came in", "what has come")),
+    ("approvals", ("approve kiye", "approved", "declined", "manzoor kiye", "mana kiye", "approvals", "kitne approve")),
     ("requests", ("request", "approve", "approval", "ok karna", "waiting for", "pending request", "manzoori")),
     ("busy", ("busy", "free kab", "khaali", "khali", "free time")),
     ("people", ("staff ki list", "staff list", "list of my staff", "list of staff", "list of the staff", "staff ke naam",

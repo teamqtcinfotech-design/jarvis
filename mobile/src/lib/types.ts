@@ -517,6 +517,8 @@ export interface Draft {
   booked?: boolean;
   /** What was just saved can be taken back for a minute (the Undo button, or "undo" said aloud). */
   undo?: boolean;
+  /** The server settled an alert by this instruction ("approve kar do", "dekh liya"): its banner can go. */
+  settled?: { ref_type: 'shared_task' | 'request'; ref_id: string } | null;
   reminder_saved?: boolean;
   /** The server saved what the waiting card held (and more): the card closes. */
   card_done?: boolean;

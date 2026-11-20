@@ -71,9 +71,22 @@ function UpdatesList() {
             <Txt variant="caption">{when(a)}</Txt>
           </View>
           {a.body ? <Txt variant="small" style={{ marginTop: 6 }}>{a.body}</Txt> : null}
-          <Pressable onPress={() => engine.markRead([a.id]).catch(() => undefined)} hitSlop={8} style={{ alignSelf: 'flex-end', marginTop: 8 }}>
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>Got it</Txt>
-          </Pressable>
+          {a.question?.kind === 'approve' ? (
+            // An approval still waiting: decided from here as well as from the banner.
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 }}>
+              <Button title="Decline" kind="danger" compact onPress={() => engine.answerAlert(a, false).catch(() => undefined)} />
+              <Button title="Approve" icon="checkmark" compact onPress={() => engine.answerAlert(a, true).catch(() => undefined)} style={{ marginLeft: 6 }} />
+            </View>
+          ) : a.ring && !a.seen_at ? (
+            // Still ringing until Seen: the Seen is here too.
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 }}>
+              <Button title={a.seen_label || 'Seen'} icon="eye-outline" compact onPress={() => engine.seenAlert(a).catch(() => undefined)} />
+            </View>
+          ) : (
+            <Pressable onPress={() => engine.markRead([a.id]).catch(() => undefined)} hitSlop={8} style={{ alignSelf: 'flex-end', marginTop: 8 }}>
+              <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>Got it</Txt>
+            </Pressable>
+          )}
         </Card>
       ))}
       {items.length > 1 ? (
@@ -149,8 +162,16 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
     body = <Txt variant="small" style={{ textAlign: 'center', marginTop: 30 }}>{error || 'Loading…'}</Txt>;
   } else if (section === 'requests') {
     const list = isMD ? data.requests.filter((r) => r.state === 'PENDING') : data.requests.slice(0, 20);
-    body = list.length
-      ? list.map((r) => <RequestCard key={r.id} request={r} mode={isMD ? 'md' : 'pa'} />)
+    // Approvals asked of him sit here too (open, on his list): tap one for Approve / Decline.
+    const approvals = [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime]
+      .filter((t) => t.kind === 'APPROVAL' && t.status !== 'COMPLETED' && t.status !== 'CANCELLED');
+    body = list.length || approvals.length
+      ? (
+        <>
+          {approvals.map((t) => <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} />)}
+          {list.map((r) => <RequestCard key={r.id} request={r} mode={isMD ? 'md' : 'pa'} />)}
+        </>
+      )
       : <Empty text={isMD ? 'Nothing waiting for your decision. Work given to you goes straight onto your list now.' : `Nothing waiting. Work for ${md} goes straight onto ${md}’s list now.`} />;
   } else if (section === 'busy') {
     const busy = data.md_busy_today ?? [];

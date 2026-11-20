@@ -2465,8 +2465,11 @@ def reassign_task(by: User, task_id, person: User) -> SharedTask:
     task = SharedTask.objects.select_for_update().get(id=task_id)
     if not (by.is_md or task.created_by_id == by.id or task.assignee_user_id == by.id):
         raise ServiceError("forbidden", "only whoever gave it, or has it, can give it to someone else.", 403)
-    if task.assignee_type != SharedTask.Assignee.USER or task.origin not in GIVEN_ORIGINS + MEET_ORIGINS:
-        raise ServiceError("invalid", "only work given to someone on the team can be given to someone else.", 422)
+    if task.assignee_type not in PERSON_TYPES or task.origin not in GIVEN_ORIGINS + MEET_ORIGINS + OWN_ORIGINS:
+        raise ServiceError("invalid", "only work on someone's list can be given to someone else.", 422)
+    if task.origin in OWN_ORIGINS:
+        # Their own work handed to a colleague: from here on it is work they gave (they hear when it is done).
+        task.origin = SharedTask.Origin.GIVEN
     if task.is_closed:
         raise ServiceError("closed", "this task is already closed.", 409)
     if person is None or not person.is_active:

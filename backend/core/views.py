@@ -921,7 +921,7 @@ class DataViewView(APIView):
     def get(self, request, kind):
         q = request.query_params
         # The same request form the voice uses: /views/tasks/?who=Ramesh&from=2026-11-10&to=2026-11-16&by=given
-        params = {k: q.get(k, "") for k in ("who", "from", "to", "by", "filter", "group")}
+        params = {k: q.get(k, "") for k in ("who", "from", "to", "by", "filter", "group", "types", "priority", "words", "minutes")}
         view = datacards.build(request.user, kind, include_private=q.get("private") != "0", params=params)
         if view is None:
             return error("not_found", "No such view.", 404)

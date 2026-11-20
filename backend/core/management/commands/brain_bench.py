@@ -134,6 +134,22 @@ BENCH = [
     ("md", "{mg} ne kya message bheja tha", {"intent": "query", "view_kind": "messages", "view_who": "{mg}"}),
     ("md", "maine kal {pa} ko kya kaha tha", {"intent": "query", "view_kind": "messages", "view_who": "{pa}", "view_filter": "sent", "view_from": Y, "view_to": Y}),
     ("pa", "mere messages dikhao", {"intent": "query", "view_kind": "messages"}),
+    # --- notifications (Nov 2026): a span from now, a day, a sender, a pile, a state; counts per pile; what I approved
+    ("md", "abhi 10 minute mein jitne messages ya notification aaye wo batao", {"intent": "query", "view_kind": "alerts", "due_in_minutes": 10, "view_from": ""}),
+    ("md", "aaj kya kya notifications aaye", {"intent": "query", "view_kind": "alerts", "due_in_minutes": 0}),
+    ("md", "pichhle ek ghante ke alerts dikhao", {"intent": "query", "view_kind": "alerts", "due_in_minutes": 60}),
+    ("md", "{mg} ne aaj kya bheja", {"intent": "query", "view_kind": ["alerts", "messages"], "view_who": "{mg}"}),
+    ("md", "sirf messages dikhao jo aaj aaye", {"intent": "query", "view_kind": ["alerts", "messages"]}),
+    ("md", "jo notifications maine dekh liye wo dikhao", {"intent": "query", "view_kind": "alerts", "view_filter": "seen"}),
+    ("md", "show me only what I approved", {"intent": "query", "view_kind": "approvals", "view_filter": "approved"}),
+    ("md", "kitne approvals abhi baaki hain", {"intent": "query", "view_kind": ["approvals", "requests"], "view_filter": ["waiting", "open", ""]}),
+    ("md", "inme se kitne meetings ke liye hain", {"intent": "query", "view_kind": "alerts", "view_types": ["MEETING"], "due_in_minutes": 10},
+     {"kind": "alerts", "minutes": 10}),
+    ("md", "inme se {mg} ki taraf se kitne hain", {"intent": "query", "view_kind": "alerts", "view_who": "{mg}", "due_in_minutes": 10},
+     {"kind": "alerts", "minutes": 10}),
+    ("md", "inme se urgent kitne hain", {"intent": "query", "view_kind": "alerts", "view_priority": "urgent"},
+     {"kind": "alerts", "from": T, "to": T}),
+    ("md", "mere aaj ke tasks aur meetings, pending aur done", {"intent": "query", "view_kind": ["today", "tasks"], "view_from": T, "view_to": T}),
 ]
 
 

@@ -217,6 +217,9 @@ _PERSONAL = re.compile(
 _TASK_WORD = re.compile(r"\b(tasks?|to-?dos?)\b|टास्क|टास्क्स", re.IGNORECASE)
 _MEETING_WORD = re.compile(r"\b(meetings?|calls?|appointments?|schedule|plan|agenda|baithak)\b|मीटिंग|मीटिंग्स|कॉल|बैठक|प्लान|शेड्यूल", re.IGNORECASE)
 _OWN_WORD = re.compile(r"\b(apna|apne|apni|khud|own|personal|niji)\b|अपना|अपने|अपनी|खुद|पर्सनल|निजी", re.IGNORECASE)
+# "Inme se kitne…", "of these…": a question about the list just answered, not a fresh one.
+_AMONG_WORD = re.compile(r"\b(inme|inmein|in me|isme|ismein|unme|unmein|of these|of those|among (?:these|those|them)|out of (?:these|those)|from these)\b"
+                         r"|इनमें|इसमें|उनमें", re.IGNORECASE)
 _WITH = re.compile(r"\b(ke saath|ke sath|ke sang|with)\b", re.IGNORECASE)
 _TEAM_SUFFIX = re.compile(r"\b(team|department|dept|waalon|walon|waale|wale|log)\s*$", re.IGNORECASE)
 
@@ -1656,6 +1659,30 @@ def _prepare_arrange(user: User, draft: dict, person: User, item: dict, address:
          f"{address_hi}, {person.spoken_name} को कहूँ कि {his_hi} {what}" + (f" ({now_hi})" if now_hi else "") + f" {new_hi} पर कर दे?")
 
 
+def _hand_over(user: User, draft: dict, person: User, item: dict, address: str, address_hi: str) -> None:
+    """"Ye Nikki ko de do": an existing work item goes to someone else at once (services.reassign_task: the one who had
+    it and the giver are told, the new person is rung); a personal item cannot go anywhere."""
+    draft["action"], draft["needs_clarification"], draft["question"] = "answer", False, ""
+    task = _target_task(item)
+    if task is None:
+        _say(draft, f"{address}, I can't find that item any more.", f"{address_hi}, वो काम अब नहीं मिल रहा।")
+        return
+    if not isinstance(task, SharedTask):
+        _say(draft, f"{address}, that is your personal item, so it cannot be given to {person.spoken_name}. Say 'Nikki ko bolo …' to give {person.spoken_name} a task of their own.",
+             f"{address_hi}, ये आपका पर्सनल काम है, इसलिए {person.spoken_name} को नहीं दिया जा सकता। उन्हें अलग से टास्क देने के लिए बोलिए '{person.spoken_name} ko bolo …'।")
+        return
+    old = task.assignee_user
+    try:
+        task = services.reassign_task(user, task.id, person)
+    except services.ServiceError as err:
+        _say(draft, f"Sorry {address}, {err.message}", f"माफ़ कीजिए {address_hi}, {err.message}")
+        return
+    draft["booked"], draft["settled"] = True, {"ref_type": "shared_task", "ref_id": str(task.id)}
+    told = old.spoken_name if old is not None and old.id != user.id and old.is_active else ""
+    _say(draft, f"Done, {address}: {task.title} is with {person.spoken_name} now." + (f" {told} has been told." if told else ""),
+         f"हो गया, {address_hi}: {task.title} अब {person.spoken_name} के पास है।" + (f" {told} को बता दिया।" if told else ""))
+
+
 def _steps_of(raw) -> list[str]:
     """The checklist of one task as the model gives it: "Hotel | Flights | Car" (the schema's form), or a list."""
     if isinstance(raw, str):
@@ -1762,13 +1789,25 @@ def _act_on_item(user: User, cmd: dict, intent: str, draft: dict, ctx: dict, on_
                 _say(draft, f"{address}, {step} ticked: {done} of {total} done on '{task.title}'.",
                      f"{address_hi}, {step} हो गया: '{task.title}' के {total} में से {done} पूरे।")
         else:
+            word = str(cmd.get("setting_value") or "").strip().lower()
+            approve = cmd.get("approve") if isinstance(cmd.get("approve"), bool) else word not in {"decline", "declined", "no", "nahi", "reject", "mana"}
+            if isinstance(task, SharedTask) and task.kind != Kind.APPROVAL and task.assignee_user_id == user.id and approve:
+                # "Bijli wale ka approve kar do" on plain work given to him: not an approval, an OK: it counts as seen,
+                # whoever gave it is told, and its ringing stops everywhere.
+                told = ""
+                for alert in Alert.objects.filter(recipient=user, ref_type="shared_task", ref_id=str(task.id), seen_at__isnull=True):
+                    out = services.mark_seen(user, alert, tell=True)
+                    told = services.giver_words(out.recipient)[0] if out is not None else told
+                draft["booked"], draft["settled"] = True, {"ref_type": "shared_task", "ref_id": str(task.id)}
+                _say(draft, f"Okay {address}, noted: {task.title}." + (f" I've told {told} you've seen it." if told else ""),
+                     f"ठीक है {address_hi}, नोट कर लिया: {task.title}।" + (f" {told} को बता दिया कि आपने देख लिया।" if told else ""))
+                return
             if not isinstance(task, SharedTask) or task.kind != Kind.APPROVAL:
                 _say(draft, f"{address}, '{task.title}' is not an approval.", f"{address_hi}, '{task.title}' कोई मंज़ूरी नहीं है।")
                 return
-            word = str(cmd.get("setting_value") or "").strip().lower()
-            approve = cmd.get("approve") if isinstance(cmd.get("approve"), bool) else word in {"approve", "approved", "yes", "haan", "ok"}
             note = " ".join(str(cmd.get("note_text") or cmd.get("notes") or "").split())
             task = services.approve_task(user, task.id, approve, note)
+            draft["settled"] = {"ref_type": "shared_task", "ref_id": str(task.id)}
             amt = services.rupees(task.amount)
             asker = services.giver_words(task.created_by)[0] if task.created_by_id and task.created_by_id != user.id else ""
             asker_hi = services.giver_words(task.created_by)[1] if asker else ""
@@ -2032,7 +2071,10 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 # "Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de": someone on the team is asked to make
                 # the change; the item stays as it is until they confirm (see _prepare_arrange).
                 askers = [p for p in (_team_person(user, n)[0] for n in _recipients_of(cmd)) if p is not None and p.id != user.id]
-                if not draft["changes"]:
+                if askers and len(matches) == 1 and not draft["changes"]:
+                    # "Ye task Nikki ko de do" / "hand it over to Nikki": the item itself goes to them, now.
+                    _hand_over(user, draft, askers[0], matches[0], address, address_hi)
+                elif not draft["changes"]:
                     _ask(draft, f"{address}, what should I change about '{names}': the time, the day, the priority or the name?",
                          f"{address_hi}, '{names}' में क्या बदलूँ: समय, दिन, प्रायोरिटी या नाम?")
                 elif askers and len(matches) == 1:
@@ -2265,10 +2307,18 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             from_whom = cmd.get("view_from_whom")
             if from_whom == "me" and general and not _OWN_WORD.search(full_text):
                 from_whom = ""
+            # "Last 10 minutes" for notifications and approvals: the span rides in due_in_minutes. "Inme se kitne
+            # meetings ke liye" after that list keeps its span (the model tends to drop it) unless a day was named.
+            minutes = due_in if kind in ("alerts", "approvals") else 0
+            prev = (on_screen or {}).get("filters") or (ctx.get("last_list") or {}).get("filters") or {}
+            if not minutes and kind in ("alerts", "approvals") and not cmd.get("view_from") and isinstance(prev, dict) \
+                    and prev.get("kind") == kind and prev.get("minutes") and _AMONG_WORD.search(full_text):
+                minutes = int(prev["minutes"])
             request = {"who": cmd.get("view_who"), "from": cmd.get("view_from"), "to": cmd.get("view_to"),
                        "by": cmd.get("view_by"), "filter": cmd.get("view_filter"), "group": cmd.get("view_group"),
                        "types": types, "from_whom": from_whom,
-                       "priority": cmd.get("view_priority"), "words": cmd.get("view_words"), "ids": ids}
+                       "priority": cmd.get("view_priority"), "words": cmd.get("view_words"), "ids": ids,
+                       "minutes": minutes}
             view = datacards.build(user, kind, include_private, params=request, missing=cmd.get("view_missing") or "")
             if view and view.get("ask"):
                 # "Ramesh" fits two people: ask which, show nothing yet.

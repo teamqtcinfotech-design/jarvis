@@ -25,6 +25,7 @@ import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
 import { Drawer } from './Drawer';
 import { navItems } from './nav';
+import { WaitingCard } from './AlertBanner';
 import { Orb } from './Orb';
 import { TaskRow } from './TaskRow';
 import { TaskSheet } from './TaskSheet';
@@ -146,7 +147,11 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const md = mdWord(data);
   const presence = engine.presence.state;
   const items = navItems(user, data, engine);
-  const pending = data?.requests.filter((r) => r.state === 'PENDING').length ?? 0;
+  // "Need your OK": requests waiting, and approvals asked of him (open, on his list).
+  const approvals = data
+    ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime].filter((t) => t.kind === 'APPROVAL' && t.status !== 'COMPLETED' && t.status !== 'CANCELLED')
+    : [];
+  const pending = (data?.requests.filter((r) => r.state === 'PENDING').length ?? 0) + approvals.length;
   const next = data ? nextTimed([...data.today, ...data.overdue], now) : null;
   // Today means today: late items from earlier days are a separate chip, not rows that crowd out the day.
   const todayList = data ? data.today.filter((t) => t.status !== 'COMPLETED').slice(0, 6) : [];
@@ -235,6 +240,9 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <Txt variant="small" style={{ color: colors.muted, fontWeight: '500' }}>{greeting()},</Txt>
         <Txt variant="display">{address}</Txt>
         <Txt variant="caption" style={{ marginTop: 2 }}>{data?.date_label ?? ''}</Txt>
+
+        {/* What is waiting for him right now: in the page, hiding nothing (see AlertBanner.tsx) */}
+        <WaitingCard />
 
         {/* Next up */}
         <Pressable onPress={() => (next ? setOpenTask(next.item) : !data && loadError ? reload(true) : talk())} style={s.heroWrap}>
@@ -421,7 +429,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           Saying "Hey JARVIS" brings the big orb up in the middle of the screen. */}
       {conv.talkOpen ? null : (
         <View style={[s.cornerOrb, { bottom: insets.bottom + 10 }]} pointerEvents="box-none">
-          <Orb state={conv.orb} size={ORB_CORNER} level={conv.level} onPress={talk} shift />
+          <Orb state={conv.orb} size={engine.current ? Math.round(ORB_CORNER * 1.22) : ORB_CORNER} level={conv.level} onPress={talk} shift />
         </View>
       )}
       {/* The walkie-talkie, bottom-left, the orb's twin: tap = pick who; hold = talk to the last people at once. */}

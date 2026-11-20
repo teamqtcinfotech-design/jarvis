@@ -159,12 +159,16 @@ TOOLS = [
                   "description": "today (today's plan), week, pending (everything open), late, upcoming, nodate, done (finished work, a report), "
                                  "tasks (a general list), person (one person's work), people (the team), performance, busy (when the MD is busy), "
                                  "history (a task's steps), messages, cancelled, private (the speaker's personal items), official, department, "
-                                 "departments, section, stats, requests"},
+                                 "departments, section, stats, requests, approvals, alerts (what reached the speaker: notifications of every kind, "
+                                 "sorted into tasks / meetings / approvals / messages / updates, for a span or a day)"},
          "who": _s("'me', the MD's word, a team member's name or job, a department, 'team', 'staff' or 'all'; '' when not about someone in particular"),
          "from_day": _s("YYYY-MM-DD, first day of a period asked about, else ''"), "to_day": _s("YYYY-MM-DD, last day, else ''"),
          "by": {"type": "string", "enum": ["", "due", "given", "done"]},
-         "filter": {"type": "string", "enum": ["", "open", "done", "late", "personal", "official", "inbox", "sent", "on_leave"]},
-         "types": {"type": "array", "items": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL"]}},
+         "filter": {"type": "string", "enum": ["", "open", "done", "late", "personal", "official", "inbox", "sent", "on_leave",
+                                              "seen", "unseen", "approved", "declined", "waiting"]},
+         "types": {"type": "array", "items": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL",
+                                                                          "MESSAGE", "REQUEST", "UPDATE"]}},
+         "minutes": {"type": "integer", "description": "alerts / approvals: a span from now asked for ('abhi 10 minute mein', 'last 2 hours' = 120); 0 otherwise"},
          "from_whom": {"type": "string", "enum": ["", "sir", "pa", "me", "staff"]},
          "priority": {"type": "string", "enum": ["", "urgent", "high", "important"]},
          "words": _s("words from the item's own title that pick it out, else ''"),
@@ -393,7 +397,9 @@ def cmd_for(user: User, name: str, a: dict, ctx: dict | None = None) -> dict:
                            ("from_whom", "view_from_whom"), ("priority", "view_priority"), ("words", "view_words"), ("group", "view_group")):
             cmd[field] = " ".join(str(a.get(key) or "").split())[:200]
         cmd["view_from"], cmd["view_to"] = assistant._safe_date(cmd["view_from"]), assistant._safe_date(cmd["view_to"])
-        cmd["view_types"] = [t for t in (a.get("types") or []) if t in ("TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP")]
+        cmd["view_types"] = [t for t in (a.get("types") or []) if t in ("TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL", "MESSAGE", "REQUEST", "UPDATE")]
+        mins = a.get("minutes")
+        cmd["due_in_minutes"] = int(mins) if isinstance(mins, int) and 0 < mins <= 7 * 24 * 60 else 0
     elif name in ("change", "complete", "cancel_item"):
         cmd["intent"] = {"change": "change_task", "complete": "complete_task", "cancel_item": "delete_task"}[name]
         which = str(a.get("which_id") or "").strip()

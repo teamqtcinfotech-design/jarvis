@@ -336,7 +336,12 @@ class WorkForTheMdTests(TaskCoreCase):
         # (she is not the one doing them). The PA, who runs his diary, still sees his meetings coming.
         from core import timeutils as tu
         day = tu.today_local().isoformat()
-        for title, kind, at in (("Sign the lease", "TASK", "16:00"), ("Call the auditor", "CALL", "17:00"), ("Vendor review meeting", "MEETING", "18:00")):
+        # Times today, clear of the base fixture's meeting (now + 1 h) and of the moment itself.
+        hour = tu.now_local().hour
+        if hour + 4 > 23:
+            self.skipTest("too late in the day: these three items must still lie ahead today")
+        hours = [f"{hour + 2:02d}:00", f"{hour + 3:02d}:00", f"{hour + 4:02d}:00"]
+        for title, kind, at in (("Sign the lease", "TASK", hours[0]), ("Call the auditor", "CALL", hours[1]), ("Vendor review meeting", "MEETING", hours[2])):
             d = self.interpret(self.nikki_client, f"Sir ko bolo aaj {at[:2]} baje {title}", _cmd(
                 intent="assign_to_person", staff_name="Sir", recipients=["Sir"], title=title, kind=kind, due_date=day, due_time=at,
                 spoken_reply="Ji."))

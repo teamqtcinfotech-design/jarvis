@@ -15,7 +15,7 @@ import { router } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Animated, AppState, Platform } from 'react-native';
 
-import { type AlertQuestion, type EngineItem, type HeldOffer, questionFor, useAlertEngine } from './alertEngine';
+import { type AlertQuestion, type EngineItem, type HeldOffer, describeWaiting, questionFor, useAlertEngine } from './alertEngine';
 import { langOfText, replyLang, setReplyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { useDashboard } from './useDashboard';
@@ -135,6 +135,10 @@ const CONTINUE_WORDS = /(continue|carry on|go on|go ahead|keep going|resume|aage
 
 /** Questions answered in free words, read by the server ("kal shaam tak", "Sunil ko de do"), not by yes / no. */
 const FREE_ANSWER_KINDS = new Set<AlertQuestion['kind']>(['promise', 'unseen', 'reassign']);
+// Going through the alerts by voice: skip to the next one; lay them all out.
+const NEXT_WORDS = /^(?:ok(?:ay)?[,.]?\s*)?(?:next|agla|agli|aage|skip|chhodo|rehne do|next (?:one|wala|notification|alert)|agla (?:wala|notification|alert)|अगला|आगे|स्किप)[.!]?$/i;
+const SHOW_ALL_WORDS = /\b(?:show (?:me )?(?:all|the) (?:incoming |new |pending )?(?:notification|notifications|alerts?|banners?)|show (?:me )?all|sab(?:hi)? (?:notification|notifications|alerts?|banners?)|(?:notification|notifications|alerts?|banners?)(?: dikhao| dikha do| dikhaao| batao|\?)|saare (?:notification|notifications|alerts?)|kya (?:aaya|aya) hai|what(?:'s| is| has) (?:waiting|new|come|pending for me)|सब (?:नोटिफ़िकेशन|नोटिफिकेशन|अलर्ट)|क्या आया है)/i;
+const QUALIFIED = /\d|\b(?:last|pichhle|pichle|minute|minutes|min|ghante|ghanta|hour|hours|aaj|kal|today|yesterday|seen|unseen|dekhe|dekha|approved|approve|declined|waiting|sirf|only|from|se|wale|wali|urgent|important|meeting|meetings|task|tasks|message|messages|approval|approvals|mansi|nikki|himanshu|seema|sir)\b/i;
 
 /** What he talked over is offered back for three minutes. */
 const stillFresh = (at: number) => Date.now() - at < 3 * 60_000;
@@ -143,7 +147,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { user } = useSession();
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
-    setHeldVisible, held, setPresenter, answerQuestion, snooze, dismiss, presence } = useAlertEngine();
+    setHeldVisible, held, setPresenter, answerQuestion, snooze, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
+    allVisible, waiting } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
@@ -286,6 +291,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const clearItemToOpen = () => setItemToOpen('');
   /** The data card he is looking at, in a few plain fields, sent along with what he says. */
   const onScreen = () => {
+    // The alerts he is going through (the list is open, or JARVIS just asked about one): "this one", "pehla wala",
+    // "Sharmaji wali" point at them.
+    if (allVisible || questionRef.current) {
+      const items = waiting
+        .map((w) => ({ id: w.ref?.id ?? (w.refType === 'shared_task' ? w.refId : w.requestId) ?? '', title: w.title }))
+        .filter((i) => i.id && i.title)
+        .slice(0, 15);
+      if (items.length) return { kind: 'alerts', title: 'Waiting for you', items, filters: null };
+    }
     const top = answersRef.current[0];
     if (!top) return null;
     return {
@@ -408,6 +422,31 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return;
     }
     const pq = questionRef.current;
+    // Going through the alerts: "next" leaves this one waiting and says the next; "sab dikhao" lays them all out as
+    // cards with their buttons and the microphone. Neither goes to the server.
+    if ((pq || currentAlert) && NEXT_WORDS.test(text) && text.split(/\s+/).length <= 4) {
+      questionRef.current = null;
+      expectingRef.current = false;
+      silenceRef.current = 0;
+      skipAlert();
+      return;
+    }
+    // Only the plain "show me what is waiting": a question with a span, a day, a sender, a state or a kind ("last 10
+    // minutes", "aaj ke", "Mansi ne", "dekhe hue", "sirf approvals") is answered by the server's notifications card.
+    if (SHOW_ALL_WORDS.test(text) && !QUALIFIED.test(text) && text.split(/\s+/).length <= 6) {
+      // "Show me all the notifications": laid out as cards, and said pile by pile (tasks, approvals, meetings,
+      // messages), so nothing is missed; then JARVIS listens for what to do with them.
+      questionRef.current = null;
+      silenceRef.current = 0;
+      const all = [...waiting, ...held.filter((h) => !waiting.some((w) => w.key === h.key))];
+      setAllVisible(all.length > 0);
+      const d = describeWaiting(all, address, addressHi);
+      const t = twin(d.en, d.hi);
+      push('jarvis', d.en);
+      expectingRef.current = all.length > 0;
+      say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: all.length ? listen : undefined });
+      return;
+    }
     if (pq && FREE_ANSWER_KINDS.has(pq.q.kind)) {
       // "Kal shaam tak" / "nahi ho payega, ..." / "Sunil ko de do": free words, read by the server.
       answerOnServer(pq, text);
@@ -428,13 +467,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (SILENCE_CODES.has(code)) {
       if (!expectingRef.current) return; // the user tapped once and said nothing: just rest
       silenceRef.current += 1;
-      // An alert's question with no answer: one more listen, then it stays on its banner, nothing more is said.
+      // An alert's question with no answer: one more listen, then it stays on its banner, nothing more is said
+      // about it; the next of several that came together is told now.
       if (questionRef.current) {
         if (silenceRef.current < 2) listen();
         else {
           questionRef.current = null;
           silenceRef.current = 0;
           expectingRef.current = false;
+          presentNext();
         }
         return;
       }
@@ -505,12 +546,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     questionRef.current = q ? { item, q, spoken } : null;
     offerRef.current = null;
     setHeldVisible(false);
-    openTalk();
-    try {
-      router.navigate('/');
-    } catch {
-      // not mounted yet; the voice still works
-    }
+    // The alert is said and asked from where he is: the banner carries it, the orb in the corner grows while it
+    // waits for his answer. The talk sheet is not opened over the banners (it comes up only if his answer needs a card).
     // No line (only the question: "Shall I tell Sir when you'll do it?" after Seen): the language JARVIS uses with him.
     const hindi = spoken ? langOfText(spoken) === 'hi' : replyLang() === 'hi';
     const ask = hindi ? q?.hi : q?.en;
@@ -741,6 +778,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     // An answer with data: the screen gets a timeline / chart / table while the short reply is spoken. The card is
     // titled by what it shows ("Waiting for Ma'am"), not by the raw words that asked for it.
     if (d.view && d.action === 'answer') addAnswer(d.view, d.view.title || lastQuestion.current);
+    // The server settled an alert by this instruction ("bijli wale ka approve kar do", "dekh liya"): its banner goes.
+    if (d.settled?.ref_id) acknowledgeByRef(d.settled.ref_type, d.settled.ref_id).catch(() => undefined);
     // The server already saved it (a clear meeting booked at once, or a plain reminder): the lists catch up now.
     if (d.booked || d.reminder_saved) {
       dataChanged.emit();

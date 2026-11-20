@@ -25,8 +25,10 @@ _STAFF = {"staff", "team", "all staff", "the staff", "the team", "employees", "s
           "my staff", "my team"}
 _ALL = {"all", "everyone", "everybody", "sab", "sabka", "sab log", "all of us"}
 _TEAM_WORDS = re.compile(r"\b(team|department|dept|waale|wale|walon|waalon|log|ka|ke|ki)\b")
-_FILTERS = {"open", "done", "late", "on_leave", "personal", "official", "inbox", "sent"}
-_TYPES = {"TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL"}
+_FILTERS = {"open", "done", "late", "on_leave", "personal", "official", "inbox", "sent",
+            # notifications and approvals (Nov 2026)
+            "seen", "unseen", "approved", "declined", "waiting"}
+_TYPES = {"TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL", "MESSAGE", "UPDATE", "REQUEST"}
 _FROM_WHOM = {"sir", "pa", "me", "staff"}
 _PRIORITIES = {"urgent", "high", "important"}
 _LIMIT = 400          # most recent tasks read per source
@@ -72,7 +74,12 @@ def clean_params(raw) -> dict:
     ids_raw = raw.get("ids")
     if isinstance(ids_raw, str):
         ids_raw = ids_raw.split(",")
+    try:
+        minutes = max(0, min(int(raw.get("minutes") or 0), 7 * 24 * 60))  # "last 10 minutes" for notifications
+    except (TypeError, ValueError):
+        minutes = 0
     return {
+        "minutes": minutes,
         "who": " ".join(str(raw.get("who") or "").split())[:80],
         "from": start, "to": end,
         "by": raw.get("by") if raw.get("by") in {"due", "given", "done"} else "",
@@ -97,6 +104,8 @@ def request_of(kind: str, p: dict) -> dict:
         out["from"], out["to"] = p["from"].isoformat(), (p.get("to") or p["from"]).isoformat()
     if p.get("types"):
         out["types"] = list(p["types"])
+    if p.get("minutes"):
+        out["minutes"] = p["minutes"]
     return out
 
 

@@ -6,6 +6,7 @@ import { Pressable, Text, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AlertBanner } from '@/components/AlertBanner';
+import { AlertsSheet } from '@/components/AlertsSheet';
 import { AppLock } from '@/components/AppLock';
 import { HeldSheet } from '@/components/HeldSheet';
 import { ShareIntake } from '@/components/ShareIntake';
@@ -40,6 +41,7 @@ function Shell() {
             <View style={{ flex: 1 }}>
               {stack}
               <AlertBanner />
+              <AlertsSheet />
               <HeldSheet />
               <ShareIntake />
               <UpdateKeeper />

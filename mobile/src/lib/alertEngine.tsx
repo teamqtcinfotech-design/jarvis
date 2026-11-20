@@ -72,6 +72,9 @@ export interface EngineItem {
   ring?: boolean;
   /** "Seen" / "देख लिया": the button's word in the person's language. */
   seenLabel?: string;
+  /** What the alert is about on the server (a work item, a message, a request), and its id. */
+  refType?: string;
+  refId?: string;
   /** Who it is from ("Sir", "Mansi"), for the banner. */
   from?: string;
 }
@@ -172,6 +175,17 @@ interface EngineValue {
   news: ServerAlert[];
   /** The Updates screen was opened: the small news on it counts as seen. */
   markRead: (ids: string[]) => Promise<void>;
+  /** Several alerts came at once: they are told one at a time. The conversation calls this when one is settled or
+   *  dropped, and the next (still waiting) is said with its question. */
+  presentNext: () => void;
+  /** The same yes / no and Seen from the Updates list, for an alert as the server lists it. */
+  answerAlert: (a: ServerAlert, yes: boolean) => Promise<void>;
+  seenAlert: (a: ServerAlert) => Promise<void>;
+  /** "Next": this one stays waiting (back of the line); the next is said with its question. */
+  skip: () => void;
+  /** "Sab dikhao": every alert waiting, as cards with their buttons and the microphone (AlertsSheet). */
+  allVisible: boolean;
+  setAllVisible: (v: boolean) => void;
 }
 
 const EngineContext = createContext<EngineValue | null>(null);
@@ -242,7 +256,52 @@ function fromAlert(a: ServerAlert): EngineItem {
     ring: !!a.ring,
     seenLabel: a.seen_label || 'Seen',
     from: a.from_word || a.from_name || '',
+    refType: a.ref_type,
+    refId: a.ref_id,
   };
+}
+
+/** Which pile an item belongs to, for telling him "3 tasks, 2 approvals, 1 meeting, 2 messages" and for the list. */
+export type AlertGroup = 'approval' | 'request' | 'meeting' | 'task' | 'message' | 'update';
+export const GROUP_ORDER: AlertGroup[] = ['approval', 'request', 'meeting', 'task', 'message', 'update'];
+export const GROUP_WORDS: Record<AlertGroup, { en: [string, string]; hi: string; title: string }> = {
+  approval: { en: ['approval', 'approvals'], hi: 'मंज़ूरी', title: 'Approvals' },
+  request: { en: ['request', 'requests'], hi: 'रिक्वेस्ट', title: 'Requests' },
+  meeting: { en: ['meeting', 'meetings'], hi: 'मीटिंग', title: 'Meetings & calls' },
+  task: { en: ['task', 'tasks'], hi: 'टास्क', title: 'Tasks' },
+  message: { en: ['message', 'messages'], hi: 'संदेश', title: 'Messages' },
+  update: { en: ['update', 'updates'], hi: 'अपडेट', title: 'Updates & reminders' },
+};
+
+export function groupOf(item: EngineItem): AlertGroup {
+  if (item.question?.kind === 'approve') return 'approval';
+  if (item.alertKind === 'NEW_REQUEST' && item.requestId) return 'request';
+  if (item.refType === 'message') return 'message';
+  if (item.source === 'reminder') return item.kind === 'MEETING' || item.kind === 'CALL' ? 'meeting' : 'task';
+  if (item.alertKind === 'TASK_ASSIGNED') return /^meeting with|^call with|meeting/i.test(item.title) ? 'meeting' : 'task';
+  return 'update';
+}
+
+/** "Sir, waiting for you: 2 tasks, Sign the lease and Pay the vendor; 1 approval, Vendor Advance; 1 message." */
+export function describeWaiting(items: EngineItem[], address: string, addressHi: string): { en: string; hi: string } {
+  if (!items.length) return { en: `${address}, nothing is waiting for you.`, hi: `${addressHi}, अभी कुछ भी इंतज़ार में नहीं है।` };
+  const piles = new Map<AlertGroup, EngineItem[]>();
+  for (const it of items) {
+    const g = groupOf(it);
+    piles.set(g, [...(piles.get(g) ?? []), it]);
+  }
+  const en: string[] = [];
+  const hi: string[] = [];
+  for (const g of GROUP_ORDER) {
+    const pile = piles.get(g);
+    if (!pile?.length) continue;
+    const w = GROUP_WORDS[g];
+    const names = pile.slice(0, 3).map((i) => (i.concealed ? 'a private reminder' : i.from && g !== 'update' ? `${i.title} from ${i.from}` : i.title));
+    const rest = pile.length > 3 ? ` and ${pile.length - 3} more` : '';
+    en.push(`${pile.length} ${pile.length === 1 ? w.en[0] : w.en[1]}: ${names.join('; ')}${rest}`);
+    hi.push(`${pile.length} ${w.hi}: ${pile.slice(0, 3).map((i) => i.title).join('; ')}${pile.length > 3 ? ` और ${pile.length - 3}` : ''}`);
+  }
+  return { en: `${address}, waiting for you: ${en.join('. ')}.`, hi: `${addressHi}, आपके लिए इंतज़ार में: ${hi.join('। ')}।` };
 }
 
 function buzzSilently(urgent: boolean) {
@@ -488,7 +547,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     (item: EngineItem, mode: 'loud' | 'silent') => {
       const shown: EngineItem = { ...item, mode, concealed: mode === 'silent' && item.isPrivate };
       if (!currentRef.current) setCurrent(shown);
+      else if (currentRef.current.key === shown.key) setCurrent(shown);
       else {
+        // The same alert can reach here twice when many arrive at once (a poll and a push): one row, the newest.
+        queueRef.current = queueRef.current.filter((q) => q.key !== shown.key);
         queueRef.current.push(shown);
         queueRef.current.sort((a, b) => RANK[a.priority] - RANK[b.priority]);
         setQueued(queueRef.current.length);
@@ -547,20 +609,71 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [setCurrent, setHeld, setQueued, spokenFor, tell],
   );
 
-  /** Several things at the same moment: shown one by one, said as ONE sentence. */
+  /** Several things at the same moment: told ONE AT A TIME. The first is said with its question; the rest go on the
+   *  banner's stack at once and wait their turn: as soon as one is answered (or dropped), the next is said. */
   // "hold" is defined further down; this lets the function above it keep the rest for later.
   const holdRef = useRef<(item: EngineItem, why: NonNullable<EngineItem['heldFor']>) => void>(() => undefined);
+  const toPresent = useRef<EngineItem[]>([]);
   const deliverTogether = useCallback(
     (items: EngineItem[]) => {
       if (items.length === 1) return deliver(items[0], 'loud');
-      // Several at once: only the one that matters most now is said (the most urgent, then the newest). The rest
-      // are not read out in a row; they are kept, and he is asked once whether he wants to hear them.
       const order = [...items].sort((a, b) => RANK[a.priority] - RANK[b.priority] || b.fireAt - a.fireAt);
       deliver(order[0], 'loud');
-      order.slice(1).forEach((item) => holdRef.current(item, 'more'));
+      order.slice(1).forEach((item) => {
+        show(item, 'silent');
+        if (!toPresent.current.some((t) => t.key === item.key)) toPresent.current.push(item);
+      });
     },
-    [deliver],
+    [deliver, show],
   );
+  /** The next alert still waiting on the stack, brought to the front and said with its question; nothing while he
+   *  is talking with JARVIS. */
+  const presentNext = useCallback(() => {
+    if (talkingRef.current) return; // tried again once the conversation is quiet (setTalking)
+    while (toPresent.current.length) {
+      const item = toPresent.current.shift()!;
+      const stillHere = currentRef.current?.key === item.key || queueRef.current.some((q) => q.key === item.key);
+      if (!stillHere) continue; // dealt with meanwhile (tapped, answered by voice, finished elsewhere)
+      focus(item);
+      deliver(item, 'loud');
+      return;
+    }
+  }, [deliver, focus]);
+  /** "Next" / "agla": the one on the banner goes to the back of the line (still waiting, nothing is lost) and the next
+   *  one is said with its question. */
+  const skip = useCallback(() => {
+    const cur = currentRef.current;
+    if (!cur) return;
+    queueRef.current = queueRef.current.filter((q) => q.key !== cur.key);
+    const next = toPresent.current.find((t) => t.key !== cur.key && queueRef.current.some((q) => q.key === t.key)) ?? queueRef.current[0] ?? null;
+    queueRef.current.push(cur);
+    setQueued(queueRef.current.length);
+    toPresent.current = toPresent.current.filter((t) => t.key !== (next?.key ?? ''));
+    if (!next) {
+      setCurrent(cur);
+      return;
+    }
+    focus(next);
+    deliver(next, 'loud');
+  }, [deliver, focus, setCurrent, setQueued]);
+  const [allVisible, setAllVisible] = useState(false);
+  const presentNextRef = useRef(presentNext);
+  useEffect(() => {
+    presentNextRef.current = presentNext;
+  }, [presentNext]);
+  const nextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleNext = useCallback((ms = 1200) => {
+    if (!toPresent.current.length) return;
+    if (nextTimer.current) clearTimeout(nextTimer.current);
+    nextTimer.current = setTimeout(() => {
+      nextTimer.current = null;
+      presentNextRef.current();
+    }, ms);
+  }, []);
+  const scheduleNextRef = useRef(scheduleNext);
+  useEffect(() => {
+    scheduleNextRef.current = scheduleNext;
+  }, [scheduleNext]);
 
   const hold = useCallback(
     (item: EngineItem, why: NonNullable<EngineItem['heldFor']>) => {
@@ -614,7 +727,11 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     talkingRef.current = talking;
     if (afterTalkTimer.current) clearTimeout(afterTalkTimer.current);
     afterTalkTimer.current = null;
-    if (talking || !afterTalk.current.length) return;
+    if (talking) return;
+    if (!afterTalk.current.length) {
+      scheduleNextRef.current(2500);
+      return;
+    }
     afterTalkTimer.current = setTimeout(() => {
       afterTalkTimer.current = null;
       if (talkingRef.current) return;
@@ -622,6 +739,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       const waiting = afterTalk.current.filter((i) => currentRef.current?.key === i.key || queueRef.current.some((q) => q.key === i.key));
       afterTalk.current = [];
       if (waiting.length) sayAfterTalk.current(waiting);
+      else presentNextRef.current(); // the next of several that came together, now that he is quiet
     }, 2500);
   }, []);
 
@@ -948,11 +1066,13 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       setHeld(remaining);
       announcedHeld.current = Math.min(announcedHeld.current, remaining.length);
       if (currentRef.current?.key === item.key) advance();
+      toPresent.current = toPresent.current.filter((t) => t.key !== item.key);
+      scheduleNext(); // one settled: the next of several that came together is said now
       const id = osId(item.key);
       Notifications.cancelScheduledNotificationAsync(id).catch(() => undefined);
       Notifications.dismissNotificationAsync(id).catch(() => undefined);
     },
-    [advance, setHeld, setQueued],
+    [advance, setHeld, setQueued, scheduleNext],
   );
 
   const acknowledge = useCallback(
@@ -1190,6 +1310,26 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [],
   );
 
+  // The Updates list acts on an alert as the server lists it (the same yes / no / Seen as the banner).
+  const answerAlert = useCallback(
+    async (a: ServerAlert, yes: boolean) => {
+      const item = fromAlert(a);
+      const q = a.question ?? questionFor(item, isMD, md);
+      if (!q) return acknowledge(item);
+      await answerQuestion(item, q, yes);
+      setNews((prev) => prev.filter((x) => x.id !== a.id));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- md is a fresh object each render; its two words are what matter
+    [answerQuestion, acknowledge, isMD, md.en, md.hi],
+  );
+  const seenAlert = useCallback(
+    async (a: ServerAlert) => {
+      await markSeen(fromAlert(a));
+      setNews((prev) => prev.map((x) => (x.id === a.id ? { ...x, seen_at: new Date().toISOString(), ring: false } : x)));
+    },
+    [markSeen],
+  );
+
   const value: EngineValue = {
     presence,
     setPresenter,
@@ -1198,6 +1338,12 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     dismiss: clearKey,
     news,
     markRead,
+    presentNext,
+    answerAlert,
+    seenAlert,
+    skip,
+    allVisible,
+    setAllVisible,
     meetingMode,
     setMeetingMode,
     offer,
