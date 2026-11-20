@@ -190,6 +190,11 @@ XAI_TIMEOUT_SECONDS = float(os.environ.get("XAI_TIMEOUT_SECONDS", "40"))
 # JARVIS's spoken replies are voiced by Grok. A per-person daily character cap keeps the bill predictable
 # (60,000 characters is roughly 500 short replies, under one dollar); past it the phone uses its own voice.
 JARVIS_GROK_VOICE = env_bool("JARVIS_GROK_VOICE", True)
+# The live voice line (core/livevoice.py): Grok's realtime model as ears, mouth and form-filler; the server stays the
+# brain. Off = the phones use the usual turn-by-turn way. XAI_LIVE_REASONING: "none" for the quickest replies, "high"
+# (the model's default) for the most careful form, "" = the model's default.
+JARVIS_LIVE_VOICE = env_bool("JARVIS_LIVE_VOICE", True)
+XAI_LIVE_REASONING = os.environ.get("XAI_LIVE_REASONING", "")
 JARVIS_TTS_DAILY_CHAR_LIMIT = int(os.environ.get("JARVIS_TTS_DAILY_CHAR_LIMIT", "60000"))
 JARVIS_TTS_MAX_CHARS = int(os.environ.get("JARVIS_TTS_MAX_CHARS", "700"))  # one spoken reply, cut at a sentence end
 

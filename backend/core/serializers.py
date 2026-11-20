@@ -167,6 +167,33 @@ class InterpretSerializer(serializers.Serializer):
         return value
 
 
+class LiveToolSerializer(InterpretSerializer):
+    """A form the live voice model filled (core/livevoice.py): the tool's name and arguments, with the same
+    conversation state the phone sends with a sentence (the waiting card, the choices, the screen)."""
+    text = serializers.CharField(max_length=1000, required=False, allow_blank=True, default="", trim_whitespace=True)
+    name = serializers.CharField(max_length=40)
+    arguments = serializers.JSONField(required=False, default=dict)
+    private_ok = serializers.BooleanField(required=False, default=True)
+
+    def validate_arguments(self, value):
+        import json
+        if isinstance(value, str):
+            try:
+                value = json.loads(value or "{}")
+            except ValueError:
+                value = {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("arguments must be an object.")
+        if len(json.dumps(value, default=str)) > 12000:
+            raise serializers.ValidationError("arguments are too large.")
+        return value
+
+
+class LiveUsageSerializer(serializers.Serializer):
+    """How long a live voice line stayed open (billed per minute), when the phone closes it."""
+    seconds = serializers.IntegerField(min_value=0, max_value=4 * 3600)
+
+
 class AboutSerializer(serializers.Serializer):
     """The reminder or alert the phone's background part has just spoken and asked about; the words are the answer."""
     kind = serializers.ChoiceField(choices=[("reminder", "reminder"), ("alert", "alert")])

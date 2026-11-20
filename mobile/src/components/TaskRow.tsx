@@ -2,7 +2,7 @@ import React from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { timeOf } from '@/lib/format';
-import { colors, kindIcon, priorityColor, radius } from '@/lib/theme';
+import { colors, kindIcon, kindLabel, priorityColor, radius } from '@/lib/theme';
 import type { TaskItem } from '@/lib/types';
 
 import { Icon, PriorityTag, Tag, Txt } from './ui';
@@ -51,6 +51,10 @@ export function TaskRow({ item, onPress, showStaffStatus, flat, last }: {
           {item.title}
         </Txt>
         <View style={s.meta}>
+          {/* A meeting or a call is not a task: it says so on the row, so the lists read at a glance. */}
+          {item.kind === 'MEETING' || item.kind === 'CALL' ? (
+            <Tag label={kindLabel[item.kind]} icon={kindIcon[item.kind]} color={colors.accentDeep} bg={colors.accentSoft} />
+          ) : null}
           {item.overdue ? <Tag label="Late" color={colors.danger} bg={colors.dangerSoft} /> : null}
           {item.priority === 'URGENT' || item.priority === 'HIGH' ? <PriorityTag priority={item.priority} /> : null}
           {item.scope === 'private' ? <Tag label="Private" icon="lock-closed" color={colors.inkSoft} /> : null}

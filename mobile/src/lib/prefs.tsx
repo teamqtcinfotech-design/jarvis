@@ -52,6 +52,9 @@ export interface Prefs {
   reminderSound: 'default' | 'silent';
   /** Talking over JARVIS while it speaks stops it and it listens, like a person. Off if the room echoes. */
   bargeIn: boolean;
+  /** The live conversation (Grok's realtime voice as ears and mouth; the server stays the brain): replies in about a
+   *  second on one open line. Off: the usual turn by turn. This phone's own switch. */
+  liveVoice: boolean;
   /** Ring until seen: work and messages from the team ring this phone until Seen is tapped (the receiver's rules). */
   ringUntilSeen: boolean;
   ringEveryMinutes: number;
@@ -98,6 +101,7 @@ const DEFAULTS: Prefs = {
   snoozeMinutes: 15,
   reminderSound: 'default',
   bargeIn: true,
+  liveVoice: true,
   ringUntilSeen: true,
   ringEveryMinutes: 10,
   ringUrgentEveryMinutes: 1,
@@ -131,7 +135,7 @@ function clean(data: Partial<Prefs> | null | undefined): Partial<Prefs> {
 
 /** Settings that belong to THIS phone, not to the person: never sent to the server, never taken from it.
  *  "Hey JARVIS" is a microphone on one device; switching it on here must not switch it on on the other phone. */
-const DEVICE_ONLY: (keyof Prefs)[] = ['wakeWordEnabled'];
+const DEVICE_ONLY: (keyof Prefs)[] = ['wakeWordEnabled', 'liveVoice'];
 
 function withoutDeviceOnly(patch: Partial<Prefs>): Partial<Prefs> {
   const out = { ...patch };

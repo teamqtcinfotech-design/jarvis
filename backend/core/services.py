@@ -1016,12 +1016,13 @@ def dashboard(user: User) -> dict:
         extra["pa_tasks"] = _recent_first_open(pa_tasks_qs().exclude(origin__in=MEET_ORIGINS))
         extra["mg_tasks"] = _recent_first_open(mg_tasks_qs().exclude(origin__in=MEET_ORIGINS))
     else:
-        # A meeting or call someone arranged for the MD (their request, accepted) belongs in their day as well: they
-        # set it up and have to see it coming. The PA and the manager run his diary, so they see all of his.
-        md_meetings = shared_md_tasks_qs().filter(kind__in=[Kind.MEETING, Kind.CALL]).exclude(status=Status.CANCELLED)
-        if not user.sees_md_diary:
-            md_meetings = md_meetings.filter(created_by=user)
-        items += [shared_item(t) for t in md_meetings]
+        # The PA and the manager run the MD's diary: his meetings and calls sit in their day too, so they see them
+        # coming. Anyone else's day holds only their own work: what they put on the MD's list (a task, a call, a
+        # meeting he attends without them) is in "Given by you" and "the MD's tasks from you", never in their Today.
+        # A meeting BETWEEN them and the MD is on both lists through diary_qs (origin MEET).
+        if user.sees_md_diary:
+            md_meetings = shared_md_tasks_qs().filter(kind__in=[Kind.MEETING, Kind.CALL]).exclude(status=Status.CANCELLED)
+            items += [shared_item(t) for t in md_meetings]
         mine = TaskRequest.objects.filter(requested_by=user).select_related("requested_by", "target")[:30]
         requests_out = [request_item(r) for r in mine]
         md_list = shared_md_tasks_qs() if user.sees_md_diary else shared_md_tasks_qs().filter(created_by=user)

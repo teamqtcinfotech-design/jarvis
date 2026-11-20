@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import org.json.JSONObject
 
 /** JS-facing side of the "Hey JARVIS" listener. See src/lib/wake.ts for the wrapper the app uses. */
 class JarvisWakeModule : Module() {
@@ -22,7 +23,7 @@ class JarvisWakeModule : Module() {
 
     override fun definition() = ModuleDefinition {
         Name("JarvisWake")
-        Events("wake", "tts", "push", "barge", "walkie")
+        Events("wake", "tts", "push", "barge", "walkie", "live")
 
         OnCreate {
             WakeBus.listener = { sendEvent("wake", emptyMap<String, Any>()) }
@@ -36,6 +37,13 @@ class JarvisWakeModule : Module() {
             WakeBus.pushListener = {
                 try {
                     sendEvent("push", emptyMap<String, Any>())
+                } catch (_: Throwable) {
+                }
+            }
+            // The live voice line tells the app what happens on it (heard, said, a form to run, speaking, closed).
+            LiveVoice.listener = { event, data ->
+                try {
+                    sendEvent("live", mapOf("event" to event, "data" to data.toString()))
                 } catch (_: Throwable) {
                 }
             }
@@ -59,7 +67,23 @@ class JarvisWakeModule : Module() {
             WakeBus.bargeListener = null
             TtsEngine.callback = null
             WalkieEngine.listener = null
+            LiveVoice.listener = null
+            LiveVoice.stop("destroyed")
         }
+
+        // ---------------------------------------------------------------- the live voice line (Grok realtime)
+        Function("liveSupported") { true }
+        /** Open the line with what the server handed the app (url, token, the session as JSON text, the rules). */
+        AsyncFunction("liveStart") { config: Map<String, Any?> ->
+            val json = JSONObject()
+            for ((k, v) in config) if (v != null) json.put(k, v)
+            LiveVoice.start(context, json)
+        }
+        Function("liveStop") { LiveVoice.stop("app") }
+        Function("liveToolResult") { callId: String, output: String -> LiveVoice.toolResult(callId, output) }
+        Function("liveSay") { text: String -> LiveVoice.say(text) }
+        Function("liveInterrupt") { LiveVoice.interrupt() }
+        Function("liveStatus") { LiveVoice.status().toString() }
 
         // ---------------------------------------------------------------- sign in by phone (an SMS code)
         Function("otpSupported") { true }

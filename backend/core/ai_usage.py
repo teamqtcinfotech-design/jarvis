@@ -45,6 +45,20 @@ def record_voice(user, characters: int) -> None:
     AiUsage.objects.filter(pk=row.pk).update(requests=F("requests") + 1, input_tokens=F("input_tokens") + characters)
 
 
+def record_live(user, seconds: int) -> None:
+    """A live voice line (core/livevoice.py): one more line opened (seconds 0), or how long one stayed open; the
+    seconds go in output_tokens (the line is billed per minute)."""
+    if user is None or not getattr(user, "pk", None) or seconds < 0:
+        return
+    row, _ = AiUsage.objects.get_or_create(user=user, day=tu.today_local(), kind=AiUsage.Kind.LIVE)
+    AiUsage.objects.filter(pk=row.pk).update(requests=F("requests") + (1 if not seconds else 0), output_tokens=F("output_tokens") + seconds)
+
+
+def live_seconds_today(user) -> int:
+    row = AiUsage.objects.filter(user=user, day=tu.today_local(), kind=AiUsage.Kind.LIVE).first()
+    return row.output_tokens if row else 0
+
+
 def voice_chars_today(user) -> int:
     row = AiUsage.objects.filter(user=user, day=tu.today_local(), kind=AiUsage.Kind.VOICE).first()
     return row.input_tokens if row else 0

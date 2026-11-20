@@ -785,16 +785,14 @@ class SmartAssistantTests(BaseCase):
 
     @override_settings(JARVIS_AI_ENABLED=True, ANTHROPIC_API_KEY="test-key")
     def test_pa_hears_a_composed_professional_note(self):
-        from types import SimpleNamespace as NS
-        client = mock.Mock()
         note = {"text": "Mansi, please keep 10:00 today free for a meeting with Sir. It is urgent.",
                 "text_hi": "मानसी, कृपया आज 10 बजे सर के साथ मीटिंग के लिए समय रखिए। यह अर्जेंट है।"}
-        client.messages.create.return_value = NS(
-            content=[NS(type="text", text=json.dumps(note, ensure_ascii=False))],
-            stop_reason="end_turn", usage=NS(input_tokens=50, output_tokens=20, cache_creation_input_tokens=0,
-                                             cache_read_input_tokens=0, server_tool_use=None))
+        # The note is written by Grok's quick text model (core/compose.py): the Responses API's shape.
+        answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps(note, ensure_ascii=False)}]}],
+                  "usage": {"input_tokens": 50, "output_tokens": 20}}
         when = tu.now_local() + timedelta(hours=3)
-        with mock.patch("core.ai_brain._get_client", return_value=client):
+        with override_settings(JARVIS_AI_ENABLED=True), mock.patch("core.xai.configured", return_value=True), \
+                mock.patch("core.xai.responses", return_value=answer) as responses:
             r = self.md_client.post("/api/v1/pa-tasks/", {
                 "title": "Meeting with Mansi", "kind": "MEETING", "priority": "URGENT", "meeting_with_pa": True,
                 "due_date": when.date().isoformat(), "due_time": when.strftime("%H:%M"),
@@ -803,7 +801,7 @@ class SmartAssistantTests(BaseCase):
         alert = self.pa_client.get("/api/v1/alerts/").json()["results"][0]
         self.assertEqual(alert["spoken_text"], note["text"])
         self.assertEqual(alert["spoken_text_hi"], note["text_hi"])  # the Hindi twin travels with it
-        sent = json.dumps(client.messages.create.call_args.kwargs, default=str)
+        sent = json.dumps(responses.call_args.kwargs, default=str)
         self.assertNotIn(SECRET, sent)  # only the task's own facts go to the model
         # The PA has been speaking Hindi lately: the same alert is spoken to her in Hindi.
         services.set_pref_quiet(self.pa, "langRecent", "hi,hi,en,hi")
@@ -2755,7 +2753,7 @@ class LanguageTests(BaseCase):
         self.assertIn("हेलो जार्विस", d["speak_text"])
         d, _ = self.interpret(self.md_client, "okay thanks, that's all", _cmd(intent="end_conversation", engine="rules"))
         self.assertEqual(d["speak_lang"], "en")
-        self.assertIn("Hello JARVIS", d["speak_text"])
+        self.assertIn("Hey JARVIS", d["speak_text"])
 
     def test_the_yes_is_answered_in_the_language_of_the_yes(self):
         tomorrow = (tu.today_local() + timedelta(days=1)).isoformat()

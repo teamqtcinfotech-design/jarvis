@@ -331,6 +331,32 @@ class WorkForTheMdTests(TaskCoreCase):
         self.assertIn(task.title, json.dumps(self.pa_client.get("/api/v1/today/").json()["md_tasks"]))
         self.assert_no_secret(self.nikki_client.get("/api/v1/today/"))
 
+    def test_what_nikki_puts_on_sirs_list_never_sits_in_her_own_day(self):
+        # A task, a call and a meeting for Sir, from Nikki: on his list, in her "given by you", never in her Today
+        # (she is not the one doing them). The PA, who runs his diary, still sees his meetings coming.
+        from core import timeutils as tu
+        day = tu.today_local().isoformat()
+        for title, kind, at in (("Sign the lease", "TASK", "16:00"), ("Call the auditor", "CALL", "17:00"), ("Vendor review meeting", "MEETING", "18:00")):
+            d = self.interpret(self.nikki_client, f"Sir ko bolo aaj {at[:2]} baje {title}", _cmd(
+                intent="assign_to_person", staff_name="Sir", recipients=["Sir"], title=title, kind=kind, due_date=day, due_time=at,
+                spoken_reply="Ji."))
+            self.assertTrue(d.get("booked"), (title, d["spoken_reply"]))
+        hers = self.nikki_client.get("/api/v1/today/").json()
+        own_day = json.dumps(hers["today"] + hers["overdue"] + hers["upcoming"] + hers["anytime"])
+        for title in ("Sign the lease", "Call the auditor", "Vendor review meeting"):
+            self.assertNotIn(title, own_day, title)
+            self.assertIn(title, json.dumps(hers["given_tasks"]), title)
+        his = self.md_client.get("/api/v1/today/").json()
+        self.assertIn("Vendor review meeting", json.dumps(his["today"]))
+        self.assertIn("Call the auditor", json.dumps(his["today"]))
+        pas = self.pa_client.get("/api/v1/today/").json()
+        self.assertIn("Vendor review meeting", json.dumps(pas["today"]))   # the PA runs his diary
+        self.assertNotIn("Sign the lease", json.dumps(pas["today"]))       # but his plain tasks are not her day
+        # Kinds stay what they are: a meeting on his list is a meeting, with its reminder lead, not a task.
+        meeting = SharedTask.objects.get(title="Vendor review meeting")
+        self.assertEqual((meeting.kind, meeting.assignee_type), ("MEETING", "MD"))
+        self.assertIsNotNone(meeting.due_at)
+
     def test_sir_declines_and_the_giver_is_told(self):
         task = self.give_sir(self.nikki_client)
         r = self.md_client.patch(f"/api/v1/shared-tasks/{task.id}/", {"expected_version": task.version, "status": "CANCELLED"}, format="json")

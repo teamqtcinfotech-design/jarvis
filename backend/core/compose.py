@@ -2,15 +2,17 @@
 
 When Sir gives Mansi a task or sets a meeting, she hears a composed note in his name; when she sends
 Sir a request, he hears a courteous note in hers. Always brief, always formal; a plain template is used
-if the AI is unavailable, so nothing ever waits on it.
+if the AI is unavailable or slow, so nothing ever waits on it for more than a few seconds.
+
+Written by Grok's quick text model (Nov 2026): a note takes well under a second, and the live voice line's
+"given to Mansi" no longer waits on a slow note.
 """
 import json
 import logging
 
-import anthropic
 from django.conf import settings
 
-from . import ai_brain, ai_usage
+from . import ai_usage, xai
 from .models import AiUsage
 
 log = logging.getLogger("jarvis.compose")
@@ -37,35 +39,49 @@ NOTE_SCHEMA = {
     "required": ["text", "text_hi"],
     "additionalProperties": False,
 }
+TIMEOUT_SECONDS = 4.0   # a note is a nicety: past this the plain template goes out instead
+_DEVANAGARI = __import__("re").compile(r"[ऀ-ॿ]")
 
 
 def compose(kind: str, sender: str, recipient: str, facts: dict, fallback: str, fallback_hi: str = "",
             user=None) -> tuple[str, str]:
     """kind: task_for_pa | meeting_with_pa | request_to_md | change_request.
     Returns (message, message in Devanagari), or the fallbacks when the AI is unavailable."""
-    if not ai_brain.ai_available():
+    if not (settings.JARVIS_AI_ENABLED and xai.configured()):
         return fallback, fallback_hi
     from . import services  # local import: services imports compose inside its functions
 
     payload = {"kind": kind, "sender": sender, "recipient": recipient, "md_address": services.md_address(),
                **{k: v for k, v in facts.items() if v}}
     try:
-        response = ai_brain._get_client().messages.create(  # noqa: SLF001 — same client, same timeouts
-            model=settings.JARVIS_AI_COMMAND_MODEL,
-            max_tokens=400,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": f"<facts>\n{json.dumps(payload, ensure_ascii=False, default=str)}\n</facts>"}],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": NOTE_SCHEMA}},
+        data = xai.responses(
+            model=settings.XAI_COMMAND_MODEL, reasoning_effort="none", instructions=SYSTEM_PROMPT,
+            input=f"<facts>\n{json.dumps(payload, ensure_ascii=False, default=str)}\n</facts>",
+            json_schema=NOTE_SCHEMA, schema_name="note", max_output_tokens=300, timeout=TIMEOUT_SECONDS,
         )
-        ai_usage.record(user, AiUsage.Kind.COMMAND, response)
-        if response.stop_reason == "refusal":
-            return fallback, fallback_hi
-        data = json.loads(ai_brain._first_text(response))  # noqa: SLF001
-        text = " ".join(str(data.get("text") or "").split())[:300]
-        text_hi = " ".join(str(data.get("text_hi") or "").split())[:300]
+        _count(user, data)
+        note = json.loads(xai.output_text(data) or "{}")
+        text = " ".join(str(note.get("text") or "").split())[:300]
+        text_hi = " ".join(str(note.get("text_hi") or "").split())[:300]
         if not text:
             return fallback, fallback_hi
-        return text, (text_hi if ai_brain._DEVANAGARI_RE.search(text_hi) else fallback_hi)  # noqa: SLF001
-    except (anthropic.APIError, ValueError) as exc:
+        return text, (text_hi if _DEVANAGARI.search(text_hi) else fallback_hi)
+    except (xai.XaiError, ValueError, OSError) as exc:
         log.warning("compose failed (%s); template used", type(exc).__name__)
         return fallback, fallback_hi
+
+
+def _count(user, data: dict) -> None:
+    """One more quick model call on the day's counter (tokens from the response's usage block)."""
+    if user is None or not getattr(user, "pk", None):
+        return
+    usage = data.get("usage") or {}
+
+    class _Usage:
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+
+    class _Response:
+        usage = _Usage()
+
+    ai_usage.record(user, AiUsage.Kind.COMMAND, _Response())

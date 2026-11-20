@@ -24,6 +24,7 @@ import { say } from '@/lib/speech';
 import { colors } from '@/lib/theme';
 import type { ContactItem, HabitItem, MemoryItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
+import { liveAvailable } from '@/lib/liveVoice';
 import { type WakeStatus, wakeSetListening, wakeSetVoice, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
 
 /**
@@ -462,6 +463,13 @@ function VoiceSection() {
         detail="Start talking while JARVIS speaks and it stops to listen."
         right={<Switch value={prefs.bargeIn} onValueChange={(v) => update({ bargeIn: v })} trackColor={{ true: colors.gold }} />}
       />
+      {liveAvailable ? (
+        <Row
+          title="Live conversation"
+          detail="JARVIS listens and answers on one open line: replies in about a second. Off: the usual turn by turn."
+          right={<Switch value={prefs.liveVoice} onValueChange={(v) => update({ liveVoice: v })} trackColor={{ true: colors.gold }} />}
+        />
+      ) : null}
       <Button title="Test voice" kind="secondary" icon="volume-high-outline" compact onPress={testVoice} style={{ alignSelf: 'flex-start', marginTop: 10 }} />
     </Card>
   );

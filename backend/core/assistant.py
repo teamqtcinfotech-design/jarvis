@@ -1257,11 +1257,13 @@ def _clean_screen(screen) -> dict | None:
 
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
                 awaiting: str = "", choices: dict | None = None, include_private: bool = True,
-                pending: dict | None = None, screen: dict | None = None) -> dict:
+                pending: dict | None = None, screen: dict | None = None, cmd: dict | None = None) -> dict:
     """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed.
     choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer.
     include_private=False: phone locked; the MD's private items are kept out of the model's view.
-    pending: the waiting card itself (so a yes can take the time JARVIS offered, or a new time can be checked)."""
+    pending: the waiting card itself (so a yes can take the time JARVIS offered, or a new time can be checked).
+    cmd: the command already read (the live voice line fills the form itself, core/livevoice.py): no model is
+    asked; everything after the reading runs exactly as it does for a sentence the brain read."""
     full_text = f"{previous}. {text}".strip(". ") if previous else text
     card = _clean_pending(pending) if awaiting else None  # the waiting card (not to be confused with pending requests)
     ctx = services.ai_context(user, include_private=include_private)
@@ -1302,7 +1304,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         model_text = text
     staff_names = [s["name"] for s in ctx["staff"]]
     pending = ctx.get("pending_requests", [])
-    cmd = ai_brain.interpret(model_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
+    if cmd is not None:
+        cmd = {**cmd, "engine": "ai", "ai_failed": False}
+    else:
+        cmd = ai_brain.interpret(model_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
     ai_failed = bool(cmd.get("ai_failed"))
     if awaiting and cmd.get("engine") == "rules" and not ai_failed and not hinglish_parser.yes_no(text):
         # Offline parser has no context: re-read the change together with the original sentence.
@@ -1918,7 +1923,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         draft["needs_clarification"] = False
         draft["question"] = ""
         if not draft["spoken_reply"]:
-            _say(draft, f"Okay {address}. Just say Hello JARVIS whenever you need me.",
+            _say(draft, f"Okay {address}. Just say Hey JARVIS whenever you need me.",
                  f"ठीक है {address_hi}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।")
     else:
         draft["action"] = "answer"

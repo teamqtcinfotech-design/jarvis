@@ -724,6 +724,7 @@ class AiUsage(models.Model):
         ANSWER = "ANSWER", "Answering a question"
         BRIEFING = "BRIEFING", "Briefing"
         VOICE = "VOICE", "Spoken reply (Grok voice); input_tokens holds characters"
+        LIVE = "LIVE", "Live voice line (Grok realtime); requests = lines opened, output_tokens = seconds"
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ai_usage")
     day = models.DateField()

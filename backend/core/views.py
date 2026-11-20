@@ -14,7 +14,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from . import ai_brain, ai_usage, assistant, conversation, datacards, lang, push, services, sessions, xai
+from . import ai_brain, ai_usage, assistant, conversation, datacards, lang, livevoice, push, services, sessions, xai
 from . import timeutils as tu
 from .idempotency import error, idempotent
 from .models import (
@@ -31,6 +31,8 @@ from .serializers import (
     DecisionSerializer,
     DelegationInputSerializer,
     InterpretSerializer,
+    LiveToolSerializer,
+    LiveUsageSerializer,
     LoginSerializer,
     PaTaskInputSerializer,
     PaTaskStatusSerializer,
@@ -710,6 +712,52 @@ class InterpretView(APIView):
                                       s.validated_data.get("choices"), pending=s.validated_data.get("pending"),
                                       screen=s.validated_data.get("screen"))
         return Response(draft)
+
+
+class LiveSessionView(APIView):
+    """The live voice line (core/livevoice.py): where the phone opens it, a short-lived token (the key stays here),
+    and the session to send first: JARVIS's voice persona, the speaker's facts, and the form tools."""
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant"
+
+    def get(self, request):
+        private_ok = request.query_params.get("private_ok", "1") != "0"
+        try:
+            config = livevoice.session_config(request.user, include_private=private_ok)
+        except xai.XaiError as err:
+            log.warning("live voice token failed: %s", err.message)
+            return error("live_unavailable", "The live voice could not be reached. The usual way still works.", 503)
+        ai_usage.record_live(request.user, 0)
+        return Response(config)
+
+
+class LiveToolView(APIView):
+    """A form the live voice model filled: turned into the brain's command and run exactly like a sentence it read
+    (the same draft as /assistant/interpret/), plus the line the voice reads back word for word."""
+    permission_classes = [IsMDOrPA]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant"
+
+    def post(self, request):
+        s = LiveToolSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        draft = livevoice.run_tool(request.user, d["name"], d["arguments"], previous=d["previous"], history=d["history"],
+                                   awaiting=d["awaiting"], choices=d.get("choices"), pending=d.get("pending"),
+                                   screen=d.get("screen"), include_private=d["private_ok"])
+        return Response(draft)
+
+
+class LiveUsageView(APIView):
+    """The phone closed a live line: how long it was open is counted (the line is billed per minute)."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request):
+        s = LiveUsageSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        ai_usage.record_live(request.user, s.validated_data["seconds"])
+        return Response({"ok": True, "seconds_today": ai_usage.live_seconds_today(request.user)})
 
 
 class ConversationTurnView(APIView):

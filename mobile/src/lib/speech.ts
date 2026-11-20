@@ -103,8 +103,27 @@ function pump() {
 /** "PA" is read by every voice as a word ("paa"); as "P.A." it is said letter by letter. The screen keeps "PA". */
 export const forSpeech = (text: string) => text.replace(/\bPA\b/g, 'P.A.');
 
+/** While the live voice line is open (src/lib/liveVoice.ts) it is JARVIS's mouth: every line the app would speak
+ *  goes to it instead of the phone's player. */
+export interface LiveSink {
+  say: (text: string, lang: SpeakLang) => void;
+  stop: () => void;
+}
+let liveSink: LiveSink | null = null;
+
+export function setLiveSink(sink: LiveSink | null) {
+  liveSink = sink;
+}
+
 export function say(text: string, opts: { interrupt?: boolean; onDone?: () => void; lang?: SpeakLang; fallback?: string } = {}) {
   if (!text?.trim()) {
+    opts.onDone?.();
+    return;
+  }
+  if (liveSink) {
+    // The line speaks it; what follows a sentence here (listen again, close the sheet) happens at once: the line
+    // itself keeps listening, and a closing is held back until the line has finished (see liveVoice.ts).
+    liveSink.say(forSpeech(text), opts.lang ?? 'en');
     opts.onDone?.();
     return;
   }
@@ -117,6 +136,7 @@ export function say(text: string, opts: { interrupt?: boolean; onDone?: () => vo
 }
 
 export function stopSpeaking() {
+  liveSink?.stop();
   queue = [];
   if (ttsAvailable) ttsStop();
   else Speech.stop();

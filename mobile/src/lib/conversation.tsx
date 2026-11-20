@@ -26,6 +26,7 @@ import { CONFIRMABLE, SERVER_SAVED, TASK_DRAFTS, describeDraft } from './drafts'
 import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
 import { useSession } from './session';
+import { closeLine, hasCollected, type LineState, lineOpen, lineSpeaking, liveAvailable, openLine, takeCollected } from './liveVoice';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
 import type { AlertAnswer, AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
@@ -161,6 +162,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const [talkOpenedAt, setTalkOpenedAt] = useState(0);
   const [talkMode, setTalkMode] = useState<'voice' | 'type' | 'dock'>('voice');
   const [itemToOpen, setItemToOpen] = useState('');
+  // The live conversation (src/lib/liveVoice.ts): the line's state, and whether its voice is playing right now.
+  const [live, setLive] = useState<LineState>('off');
+  const [liveSpeaking, setLiveSpeaking] = useState(false);
+  const liveWanted = liveAvailable && prefs.liveVoice && !!user;
+  const lastLiveSay = useRef('');       // the last line the server had the voice read (its transcript is not shown twice)
+  const endAfterSpeech = useRef(false); // "bas": the line closes once its goodbye is said
   const answersRef = useRef<Answer[]>([]); // what is on screen, for "is list ka PDF" and "pehla wala"
   const lastQuestion = useRef('');
 
@@ -193,8 +200,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     presentAlert: (item: EngineItem, spoken: string) => void;
     wake: () => void;
     barge: () => void;
+    liveTool: (name: string, args: Record<string, unknown>) => Promise<string>;
   }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, presentAlert: () => undefined,
-    wake: () => undefined, barge: () => undefined });
+    wake: () => undefined, barge: () => undefined, liveTool: async () => '{}' });
 
   // Which language the recogniser starts in. 'auto' is Indian English (Hinglish included) and, on Android 14+, the
   // phone switches to Hindi by itself. Older phones cannot switch, so there, once the last several turns were all
@@ -304,11 +312,13 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     questionRef.current = null; // an unanswered alert question stays on its banner, nothing more is asked
     cancelVoice();
     stopSpeaking();
+    closeLine();
   };
   const history = () =>
     messagesRef.current.filter((m) => m.tone !== 'error').slice(-8).map((m) => ({ role: m.role, text: m.text }));
   const listen = () => {
     if (!user) return;
+    if (lineOpen()) return; // the live line listens by itself, all the time
     // A short answer is expected only when JARVIS has just asked one thing (a card, a "which one?", an offer, an
     // alert's question); otherwise he gets a long moment to start speaking. After "lamba message hai" JARVIS keeps
     // listening across pauses until he says "bas".
@@ -558,7 +568,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       presentOffer(offer, true);
       return;
     }
-    greet();
+    if (liveWanted) {
+      startLive(true).catch(() => greet_());
+      return;
+    }
+    greet_();
   };
 
   const interpret = async (text: string, previous: string, awaiting: string, choices: typeof choicesRef.current = null,
@@ -586,6 +600,97 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const sayOwn = (en: string, hi: string, opts: { interrupt?: boolean; onDone?: () => void } = {}) => {
     const t = twin(en, hi);
     say(t.text, { ...opts, lang: t.lang, fallback: t.fallback });
+  };
+
+  // ---------------------------------------------------------------- the live conversation
+  /** Open the live line (greeting first when woken by "Hey JARVIS"). When it cannot open, the usual way takes over. */
+  const startLive = async (greet: boolean) => {
+    if (!user) return;
+    const ok = await openLine({
+      onHeard: (text, final) => {
+        if (!final || !text.trim()) return;
+        Haptics.selectionAsync().catch(() => undefined);
+        setHeldVisible(false);
+        const last = messagesRef.current[messagesRef.current.length - 1];
+        if (last?.role === 'user' && last.text === text) return;
+        push('user', text);
+        lastQuestion.current = text;
+      },
+      onSaid: (text) => {
+        // The server's own line was shown when it was decided; the model's reading of it is not shown again.
+        const norm = (s: string) => s.replace(/[\s.,!?।]+/g, ' ').trim().toLowerCase();
+        if (lastLiveSay.current && norm(text) === norm(lastLiveSay.current)) return;
+        push('jarvis', text);
+      },
+      onTool: (_callId, name, args) => fns.current.liveTool(name, args),
+      onState: (s, reason) => {
+        setLive(s);
+        if (s === 'off') {
+          setLiveSpeaking(false);
+          endAfterSpeech.current = false;
+          if (reason === 'failed') push('jarvis', 'The live line dropped. Tap the orb to carry on.', { tone: 'error' });
+        }
+      },
+      onSpeaking: (on) => {
+        setLiveSpeaking(on);
+        if (!on && endAfterSpeech.current) {
+          endAfterSpeech.current = false;
+          closeLine();
+          setTalkOpen(false);
+        }
+      },
+      onListening: () => undefined,
+      onLevel: (lvl) => level.setValue(Math.min(1, lvl / 3000)),
+      onError: () => undefined,
+    }, { greet, bargeIn: prefs.bargeIn });
+    if (!ok) {
+      // The usual turn-by-turn way: greet and listen with the phone's recogniser.
+      if (greet) greet_();
+      else listen();
+    }
+  };
+
+  /** A form the live model filled: run it on the server exactly like a sentence the brain read, let the usual
+   *  handling show cards and decide what JARVIS says, and give the model that line to read back. */
+  const liveTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const said = String(args.said ?? '').trim();
+    const pq = questionRef.current;
+    if (pq && FREE_ANSWER_KINDS.has(pq.q.kind) && said) {
+      // "Kal shaam tak" / "Sunil ko de do": free words for a question about work between people: the server reads
+      // them as before, and what it answers is what the voice says.
+      await answerOnServer(pq, said);
+      return JSON.stringify({ say: takeCollected() || 'Ji.' });
+    }
+    setBusy('thinking');
+    try {
+      const card = waitingCard();
+      const slim = card ? { ...card, categories: [], staff_candidates: [], target_candidates: [] } : null;
+      const pendingOffer = offerRef.current;
+      const awaiting = card ? describeDraft(card)
+        : pq ? `JARVIS asked: "${pq.q.en || pq.spoken}" about "${pq.item.title}"`
+        : pendingOffer ? `JARVIS asked: "${pendingOffer.text}" (${pendingOffer.count} alerts kept while away)` : '';
+      const res = await api<Draft & { say: string }>('/assistant/live/tool/', {
+        method: 'POST',
+        body: { name, arguments: args, previous: card ? card.transcript : previousRef.current, awaiting,
+          choices: card ? null : choicesRef.current, pending: slim, history: history(), screen: onScreen() },
+        timeoutMs: 30000,
+      });
+      setBusy('');
+      const d = res.data;
+      handleDraft(d);
+      // A line said after a wait (a save, a search) arrives a moment later: give it that moment.
+      const until = nowMs() + (d.action === 'confirm_pending' || d.action === 'ask' || d.action === 'briefing' ? 12000 : 250);
+      while (!hasCollected() && nowMs() < until) await new Promise((r) => setTimeout(r, 60));
+      const line = takeCollected() || d.say || '';
+      lastLiveSay.current = line;
+      if (d.action === 'end') endAfterSpeech.current = true;
+      return JSON.stringify(line ? { say: line } : { ok: true });
+    } catch (e) {
+      setBusy('');
+      const msg = e instanceof ApiError ? e.message : 'Something went wrong.';
+      push('jarvis', msg, { tone: 'error' });
+      return JSON.stringify({ error: msg });
+    }
   };
 
   const handleDraft = (d: Draft) => {
@@ -1135,6 +1240,22 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   const micPress = () => {
+    if (liveWanted) {
+      // On the live line a tap stops the voice mid-sentence; while JARVIS is only listening a tap changes nothing
+      // (he is used to tapping before he speaks). The line ends with the X, with "bas", or after a quiet while.
+      if (lineOpen()) {
+        if (lineSpeaking()) stopSpeaking();
+        else Haptics.selectionAsync().catch(() => undefined);
+        return;
+      }
+      if (live === 'connecting') return;
+      stopSpeaking();
+      setHeldVisible(false);
+      silenceRef.current = 0;
+      expectingRef.current = true;
+      startLive(true).catch(() => listen()); // "Ji Sir?" from the line: he hears that it is listening
+      return;
+    }
     if (voice.state === 'listening') {
       // A tap while listening means "stop": drop whatever was half-heard and rest until the next tap or "Hey JARVIS".
       expectingRef.current = false;
@@ -1167,13 +1288,21 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     expectingRef.current = false;
   };
 
-  const greet = () => {
+  /** The greeting the usual way: "Ji Sir?" with the phone's voice, then listen with the recogniser. */
+  const greet_ = () => {
     const show = `Ji ${address}?`;
     push('jarvis', show);
     expectingRef.current = true;
     calledRef.current = true; // he called: wait for him through the quiet rounds
     silenceRef.current = 0;
     say(isMD ? `जी ${addressHi}?` : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
+  };
+  const greet = () => {
+    if (liveWanted && !lineOpen()) {
+      startLive(true).catch(() => greet_());
+      return;
+    }
+    greet_();
   };
 
   // He started talking while JARVIS was speaking (the native side heard him over the voice and stopped it): drop
@@ -1192,7 +1321,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   useEffect(() => {
-    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge };
+    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge, liveTool };
   });
   useEffect(() => onBarge(() => fns.current.barge()), []);
   // The alert engine hands alerts that carry a question to this conversation (voice and ear live here).
@@ -1214,6 +1343,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       if (state !== 'active') {
         cancelVoice();
         stopSpeaking();
+        closeLine(); // the live line is billed by the minute: never left open out of sight
       }
     });
     return () => {
@@ -1222,21 +1352,24 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     };
   }, [cancelVoice]);
 
-  const listening = voice.state === 'listening';
+  // On the live line JARVIS is listening whenever it is not speaking or thinking.
+  const liveOn = live === 'open';
+  const listening = voice.state === 'listening' || (liveOn && !liveSpeaking && !busy);
+  const speakingAny = speaking || liveSpeaking;
 
   // A held-alerts offer is asked as soon as JARVIS is idle (not mid-sentence, not mid-search). Right after
   // "Hey JARVIS" the held list may arrive a moment late: if he has not started talking yet, ask it then.
   useEffect(() => {
-    if (!offer || offer.id === presentedOffer.current || busy || speaking) return;
+    if (!offer || offer.id === presentedOffer.current || busy || speakingAny) return;
     const justWoke = Date.now() - wokeAtRef.current < 8000 && !voice.partial;
-    if (listening && !justWoke) return;
+    if (listening && !justWoke && !liveOn) return;
     presentedOffer.current = offer.id;
     const kick = setTimeout(() => {
-      if (listening) cancelVoice();
+      if (listening && !liveOn) cancelVoice();
       fns.current.presentOffer(offer, false);
     }, 0);
     return () => clearTimeout(kick);
-  }, [offer, listening, busy, speaking, voice.partial, cancelVoice]);
+  }, [offer, listening, busy, speakingAny, liveOn, voice.partial, cancelVoice]);
 
   // "Hey JARVIS": the native listener either tells us directly (app open) or brings the app to the front
   // with a pending flag (app was closed). One microphone user at a time: it pauses while JARVIS talks or listens.
@@ -1276,8 +1409,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   // Alerts that arrive mid-conversation show quietly instead of talking over him.
   useEffect(() => {
-    setTalking(listening || speaking || busy !== '');
-  }, [listening, speaking, busy, setTalking]);
+    setTalking(listening || speakingAny || busy !== '');
+  }, [listening, speakingAny, busy, setTalking]);
 
   // The background service runs whenever someone is signed in: it is what brings reminders and messages to a
   // closed app. After a reboot, a reinstall, or Xiaomi stopping it, the app switches it back on whenever it comes
@@ -1354,8 +1487,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  const orb: OrbState = listening ? 'listening' : busy ? 'thinking' : speaking ? 'speaking' : 'idle';
-  const status = listening && voice.longMode ? 'Listening… say “bas” when you’re done'
+  const orb: OrbState = busy ? 'thinking' : speakingAny ? 'speaking' : listening ? 'listening' : 'idle';
+  const status = live === 'connecting' ? 'Connecting…'
+    : liveOn && liveSpeaking ? 'Speaking… tap to interrupt'
+    : liveOn && busy ? 'Thinking…'
+    : liveOn ? 'Listening… just speak · say “bas” or tap ✕ to end'
+    : listening && voice.longMode ? 'Listening… say “bas” when you’re done'
     : listening ? 'Listening…'
     : busy === 'searching' ? 'Searching the internet…'
     : busy === 'thinking' ? 'Thinking…'
@@ -1368,7 +1505,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     : 'Tap and speak';
 
   const value: ConversationValue = {
-    messages, draft, draftError, busy, speaking, listening, partial: voice.partial, orb, status, level,
+    messages, draft, draftError, busy, speaking: speakingAny, listening, partial: voice.partial, orb, status, level,
     answers, removeAnswer, clearAnswers, showView, itemToOpen, clearItemToOpen, talkOpen, talkOpenedAt, talkMode, openTalk, closeTalk,
     micPress, send, editDraft, cancelDraft, save, undo, clear, greet,
   };

@@ -96,10 +96,40 @@ type Native = {
   otpConfirm?: (code: string) => Promise<OtpResult>;
   otpAwaitAuto?: () => Promise<OtpResult>;
   otpCancel?: () => void;
+  // the live voice line (2.8.0 and later)
+  liveSupported?: () => boolean;
+  liveStart?: (config: LiveConfig) => Promise<boolean>;
+  liveStop?: () => void;
+  liveToolResult?: (callId: string, output: string) => void;
+  liveSay?: (text: string) => void;
+  liveInterrupt?: () => void;
+  liveStatus?: () => string;
   addListener: ((event: 'wake' | 'push' | 'barge', listener: () => void) => { remove: () => void }) &
     ((event: 'tts', listener: (e: TtsEvent) => void) => { remove: () => void }) &
-    ((event: 'walkie', listener: (e: WalkieEvent) => void) => { remove: () => void });
+    ((event: 'walkie', listener: (e: WalkieEvent) => void) => { remove: () => void }) &
+    ((event: 'live', listener: (e: LiveEvent) => void) => { remove: () => void });
 };
+
+/** What the native live line needs to open (from /assistant/live/session/, see src/lib/liveVoice.ts). */
+export interface LiveConfig {
+  url: string;
+  token: string;
+  /** The session.update body, as JSON text (the persona, the facts, the form tools). */
+  sessionJson: string;
+  rate: number;
+  bargeIn: boolean;
+  bargeLevel: number;
+  idleSeconds: number;
+  maxSeconds: number;
+  /** Said by the line as soon as it opens ("Ji Sir?"), or ''. */
+  greeting: string;
+}
+
+/** What the live line reports: the event name and its details (JSON text from the native side). */
+export interface LiveEvent {
+  event: 'state' | 'heard' | 'said' | 'tool' | 'speaking' | 'listening' | 'barge' | 'usage' | 'level' | 'error';
+  data: string;
+}
 
 /** What the walkie-talkie engine reports: the event name and its details (JSON text from the native side). */
 export interface WalkieEvent {
@@ -389,6 +419,62 @@ export function otpCancel() {
     native?.otpCancel?.();
   } catch {
     // ignore
+  }
+}
+
+// ---------------------------------------------------------------- the live voice line (Grok realtime)
+export const liveSupported = native !== null && typeof native.liveStart === 'function';
+
+export async function liveStart(config: LiveConfig): Promise<boolean> {
+  if (!native?.liveStart) return false;
+  try {
+    return await native.liveStart(config);
+  } catch {
+    return false;
+  }
+}
+
+export function liveStop() {
+  try {
+    native?.liveStop?.();
+  } catch {
+    // ignore
+  }
+}
+
+/** The server's answer to a form the model filled: the line reads its "say" text back. */
+export function liveToolResult(callId: string, output: string) {
+  try {
+    native?.liveToolResult?.(callId, output);
+  } catch {
+    // ignore
+  }
+}
+
+/** Make the line say this now, word for word. */
+export function liveSay(text: string) {
+  try {
+    native?.liveSay?.(text);
+  } catch {
+    // ignore
+  }
+}
+
+export function liveInterrupt() {
+  try {
+    native?.liveInterrupt?.();
+  } catch {
+    // ignore
+  }
+}
+
+export function onLive(listener: (e: LiveEvent) => void): () => void {
+  if (!native || !liveSupported) return () => undefined;
+  try {
+    const sub = native.addListener('live', listener);
+    return () => sub.remove();
+  } catch {
+    return () => undefined;
   }
 }
 
