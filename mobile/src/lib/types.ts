@@ -108,6 +108,9 @@ export interface TaskItem {
   files_count?: number;
   /** Whose hands it passed through ("Sir", "Mansi", "Nikki") once it was handed on; empty otherwise. */
   chain?: string[];
+  /** An ask to move a meeting ("Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de"): which meeting, its time
+   *  now, the time asked for, and whether Done has already moved it. */
+  arrangement?: { about: { scope: 'private' | 'shared'; id: string; title: string; when: string }; to: string; to_hi: string; applied: boolean } | null;
 }
 
 /** A department: a group of people on the team (never the MD, the manager or the PA). */
@@ -349,6 +352,7 @@ export type DraftAction =
   | 'decline_request'
   | 'complete'
   | 'change_task'
+  | 'arrange_request'
   | 'delete_task'
   | 'set_setting'
   | 'briefing'
@@ -495,8 +499,11 @@ export interface Draft {
   /** Every item this applies to: "mark both as done", "accept all three". */
   targets: { id: string; title: string; scope?: string; version?: number }[];
   target_candidates: { id: string; title: string; scope?: string; version?: number }[];
-  /** change_task: the new values (title / due_date / due_time / priority / kind). */
+  /** change_task / arrange_request: the new values (title / due_date / due_time / priority / kind). */
   changes: Record<string, string>;
+  /** arrange_request: the meeting someone is asked to move, and the change asked for (sent back as is). */
+  about?: { scope: string; id: string; title: string; when: string };
+  arrange?: Record<string, string | number>;
   /** People named in it (the server checks it knows each one before anything is saved). */
   people?: string[];
   /** People the speaker just explained; now remembered as contacts. */

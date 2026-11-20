@@ -463,6 +463,11 @@ function VoiceSection() {
         detail="Start talking while JARVIS speaks and it stops to listen."
         right={<Switch value={prefs.bargeIn} onValueChange={(v) => update({ bargeIn: v })} trackColor={{ true: colors.gold }} />}
       />
+      <Row
+        title="Silent replies in a meeting"
+        detail="In meeting mode (or a meeting in your diary) JARVIS still saves and sends, but answers on the screen with a vibration, not aloud."
+        right={<Switch value={prefs.meetingQuietReplies} onValueChange={(v) => update({ meetingQuietReplies: v })} trackColor={{ true: colors.gold }} />}
+      />
       {liveAvailable ? (
         <Row
           title="Live conversation"

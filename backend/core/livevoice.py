@@ -179,6 +179,9 @@ TOOLS = [
          "kind": {"type": "string", "enum": ["", "TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"]},
          "first": {"type": "boolean", "description": "true for 'do this first / sabse upar rakho' (priority URGENT)"},
          "swap_with_id": _s("the id of the second item when the speaker swaps two items' times, else ''"),
+         "ask_person": _s("the team member asked to make the change ('Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de' -> 'Nikki'); "
+                          "the item stays until they confirm; '' when the speaker changes it themselves"),
+         "now": {"type": "boolean", "description": "true for 'abhi' / 'now' / 'main free hoon': the item moves to this very moment"},
          **_WHEN, "said": _SAID}, "required": ["which_words", "when_words", "said"]}},
     {"type": "function", "name": "complete",
      "description": "The speaker says an item is done / ho gaya.",
@@ -230,6 +233,9 @@ TOOLS = [
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS if t.get("type") == "function"}
+
+
+_NOW_IN = re.compile(r"\babhi\b|\bnow\b|अभी", re.IGNORECASE)
 
 
 def blank_cmd() -> dict:
@@ -418,6 +424,12 @@ def cmd_for(user: User, name: str, a: dict, ctx: dict | None = None) -> dict:
             other = str(a.get("swap_with_id") or "").strip()
             if other and which:
                 cmd["target_refs"], cmd["setting_value"], changed = [which, other], "swap", []
+            if a.get("now") and not (cmd["due_date"] or cmd["due_in_minutes"]):
+                cmd["due_in_minutes"], cmd["_now"] = 1, True  # the server turns "abhi" into this very moment
+                changed = sorted(set(changed) | {"due_date", "due_time"})
+            asker = " ".join(str(a.get("ask_person") or "").split())
+            if asker:
+                cmd["staff_name"], cmd["recipients"] = asker, [asker]
             cmd["changed_fields"] = changed
     elif name == "answer":
         reply = a.get("reply")
@@ -462,7 +474,7 @@ def cmd_for(user: User, name: str, a: dict, ctx: dict | None = None) -> dict:
         cmd["intent"] = "end_conversation"
     else:
         cmd["intent"] = "unknown"
-    cmd["_said"] = said or cmd.get("title") or ""
+    cmd["_said"] = (said or cmd.get("title") or "") + (" abhi" if cmd.pop("_now", False) and not _NOW_IN.search(said) else "")
     return cmd
 
 
@@ -535,6 +547,10 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
         "Repeats ('har mahine 10 tarikh ko', 'roz subah 9 baje', 'har Monday') go in repeat_words exactly as said, on ONE item; the parts of "
         "one task ('hotel, flights aur car') go in steps; an approval asked of someone ('Sir se 50 hazaar ka approval chahiye') is give_work "
         "with kind APPROVAL and the amount in rupees, to the person who approves.",
+        "'Abhi' / now / 'main free hoon' means right away: a quick ask to a person ('abhi mere office aao', 'chai leke aana', 'papers abhi "
+        "bhej do') is send_message, with no time; work given 'abhi' has no time either (the server marks it urgent enough); never tell the "
+        "speaker they are busy or not free. 'Sharmaji wali meeting abhi kar do' is change with now = true. 'Nikki ko bolo Sharmaji wali "
+        "meeting abhi arrange karwa de' is change with ask_person = Nikki and now = true: the meeting stays until Nikki confirms.",
         "Fill the form in Latin letters (Roman Hinglish or English), the way the team writes on WhatsApp. People: the name as on the "
         "team list (a name heard slightly wrong means the closest team member), or their job, 'me' for the speaker, 'everyone' or a "
         "department for a group. when_words: the speaker's own time words, exactly as said, in Latin letters; never turn them into a "

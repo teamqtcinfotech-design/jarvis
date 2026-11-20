@@ -28,7 +28,7 @@ import { usePrefs } from './prefs';
 import { useSession } from './session';
 import { closeLine, hasCollected, type LineState, lineOpen, lineSpeaking, liveAvailable, openLine, takeCollected } from './liveVoice';
 import { enqueue, flush, queued } from './offlineQueue';
-import { onSpeakingChange, say, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
+import { onSpeakingChange, say, setSpeechQuiet, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
 import type { AlertAnswer, AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
 import { onBarge, onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeSetListening, wakeStart, wakeStatus, wakeSupported } from './wake';
@@ -143,7 +143,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { user } = useSession();
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
-    setHeldVisible, held, setPresenter, answerQuestion, snooze, dismiss } = useAlertEngine();
+    setHeldVisible, held, setPresenter, answerQuestion, snooze, dismiss, presence } = useAlertEngine();
+  const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
   const isMD = user?.role === 'MD';
@@ -166,7 +167,14 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // The live conversation (src/lib/liveVoice.ts): the line's state, and whether its voice is playing right now.
   const [live, setLive] = useState<LineState>('off');
   const [liveSpeaking, setLiveSpeaking] = useState(false);
-  const liveWanted = liveAvailable && prefs.liveVoice && !!user;
+  // In a meeting with silent replies on: JARVIS still saves and sends, but answers on the screen (and a vibration),
+  // never aloud; the live line (which speaks by itself) is not opened then.
+  const quietReplies = inMeeting && prefs.meetingQuietReplies;
+  useEffect(() => {
+    setSpeechQuiet(quietReplies);
+    return () => setSpeechQuiet(false);
+  }, [quietReplies]);
+  const liveWanted = liveAvailable && prefs.liveVoice && !!user && !quietReplies;
   const lastLiveSay = useRef('');       // the last line the server had the voice read (its transcript is not shown twice)
   const endAfterSpeech = useRef(false); // "bas": the line closes once its goodbye is said
   const answersRef = useRef<Answer[]>([]); // what is on screen, for "is list ka PDF" and "pehla wala"
@@ -734,7 +742,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     // titled by what it shows ("Waiting for Ma'am"), not by the raw words that asked for it.
     if (d.view && d.action === 'answer') addAnswer(d.view, d.view.title || lastQuestion.current);
     // The server already saved it (a clear meeting booked at once, or a plain reminder): the lists catch up now.
-    if (d.booked || d.reminder_saved) dataChanged.emit();
+    if (d.booked || d.reminder_saved) {
+      dataChanged.emit();
+      // Silent replies in a meeting: the confirmation is felt, not heard (the words are on the screen).
+      if (quietReplies) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+    }
     // The server settled the waiting card itself ("keep this one, move the others"): the card closes.
     if (d.card_done) {
       setDraft(null);
@@ -882,11 +894,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const cur = draftRef.current;
       if (cur && o && (o.due_date || o.due_time)) {
         editedRef.current = true; // the AI's "done" line named the old time
-        if (cur.action === 'change_task') {
-          setDraft({ ...cur, changes: { ...cur.changes, ...(o.due_date ? { due_date: o.due_date } : {}), ...(o.due_time ? { due_time: o.due_time } : {}) } });
+        if (cur.action === 'change_task' || cur.action === 'arrange_request') {
+          const changes = { ...cur.changes, ...(o.due_date ? { due_date: o.due_date } : {}), ...(o.due_time ? { due_time: o.due_time } : {}) };
+          setDraft({ ...cur, changes, arrange: cur.action === 'arrange_request' ? { ...(cur.arrange ?? {}), ...changes } : cur.arrange });
         }
         else setDraft({ ...cur, due_date: o.due_date ?? cur.due_date, due_time: o.due_time ?? cur.due_time, schedule: null });
-      } else if (cur && o && cur.action !== 'change_task' && (o.duration_minutes || o.batch?.length)) {
+      } else if (cur && o && cur.action !== 'change_task' && cur.action !== 'arrange_request' && (o.duration_minutes || o.batch?.length)) {
         // He settled a clash: keep this one short (a new length), or push the others (they ride along as a batch).
         editedRef.current = true;
         setDraft({ ...cur, duration_minutes: o.duration_minutes ?? cur.duration_minutes,
@@ -923,6 +936,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       if (CONFIRMABLE.includes(d.action) || d.action === 'choose_destination') setDraft(d);
       // "Which one?" — remember the options so the answer ("both", "the franchise one") is matched against them.
       const intent = d.action === 'complete' ? 'complete_task'
+        : d.action === 'arrange_request' ? 'change_task'
         : d.action === 'accept_request' || d.action === 'decline_request' || d.action === 'change_task' || d.action === 'delete_task' ? d.action
         : null;
       if (intent && d.target_candidates?.length) {
@@ -1538,7 +1552,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   }, [user]);
 
   const orb: OrbState = busy ? 'thinking' : speakingAny ? 'speaking' : listening ? 'listening' : 'idle';
-  const status = live === 'connecting' ? 'Connecting…'
+  const status = quietReplies && listening ? 'In a meeting · listening, replies on screen only'
+    : quietReplies && busy ? 'Thinking… (replies on screen only)'
+    : live === 'connecting' ? 'Connecting…'
     : liveOn && liveSpeaking ? 'Speaking… tap to interrupt'
     : liveOn && busy ? 'Thinking…'
     : liveOn ? 'Listening… just speak · say “bas” or tap ✕ to end'

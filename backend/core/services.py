@@ -605,6 +605,8 @@ def shared_item(task: SharedTask) -> dict:
             "section_colour": task.section.colour if task.section_id else "",
             # Whose hands it passed through, when more than giver and doer ("Sir → Mansi → Nikki").
             "chain": chain_names(task),
+            # An ask to move a meeting: which one, its time now, the time asked for (see create_arrange_request).
+            "arrangement": arrangement_of(task) if task.about_id else None,
         }
     )
     return item
@@ -1488,7 +1490,12 @@ def update_task_status(user: User, task_id, new_status: str, expected_version: i
     _log_changes(user, task, old, (task.due_at, task.due_date))
     if new_status == Status.COMPLETED:
         close_task_alerts(task)
-    _tell_giver_of_change(user, task, old, (task.due_at, task.due_date))
+    if new_status == Status.COMPLETED and task.about_id and not (task.arrange or {}).get("applied"):
+        # "Done" on an arrange ask: the meeting moves now, and the giver hears that, not a plain "completed".
+        _apply_arrangement(user, task)
+        task.refresh_from_db(fields=["arrange"])
+    else:
+        _tell_giver_of_change(user, task, old, (task.due_at, task.due_date))
     audit(user, "task.status", "shared_task", task.id, f"{old} -> {new_status}")
     return task
 
@@ -1584,6 +1591,139 @@ def approve_task(user: User, task_id, approve: bool, note: str = "") -> SharedTa
 
 
 NOTE_MAX_CHARS = 1000
+
+
+# --------------------------------------------------------------------------- "Nikki ko bolo meeting abhi arrange karwa de"
+def _item_of(scope: str, item_id):
+    return PrivateTask.objects.filter(id=item_id).first() if scope == "private" else SharedTask.objects.filter(id=item_id).first()
+
+
+@transaction.atomic
+def create_arrange_request(giver: User, person: User, scope: str, item_id, changes: dict, words: str = "") -> SharedTask:
+    """Someone on the team is asked to move (or change) an item of the giver's, usually a meeting: a task on their
+    list that names the meeting, its time now and the time asked for, ringing until seen. The meeting itself stays
+    as it is until they mark the task done (then update_task_status applies the change once and tells everyone).
+    The same ask twice is one task."""
+    if person.id == giver.id:
+        raise ServiceError("self", "say who should arrange it.", 422)
+    target = _item_of(scope, item_id)
+    if target is None or (isinstance(target, PrivateTask) and target.owner_id != giver.id) \
+            or (isinstance(target, SharedTask) and not visible_shared_qs(giver).filter(id=target.id).exists()):
+        raise ServiceError("not_found", "I can't find that meeting any more.", 404)
+    if target.is_closed:
+        raise ServiceError("closed", f"{target.title} is already closed.", 409)
+    open_same = SharedTask.objects.filter(created_by=giver, assignee_user=person, about_id=target.id).exclude(status__in=CLOSED_STATUSES).first()
+    if open_same is not None:
+        return open_same
+    new_date = str(changes.get("due_date") or "")
+    new_time = str(changes.get("due_time") or "")
+    if new_date and not new_time and target.due_at:
+        new_time = tu.to_local(target.due_at).strftime("%H:%M")
+    if new_time and not new_date:
+        new_date = (target.due_date or tu.today_local()).isoformat()
+    try:
+        d = date.fromisoformat(new_date) if new_date else None
+        t = time.fromisoformat(new_time) if new_time else None
+    except ValueError as exc:
+        raise ServiceError("invalid", "I did not understand the new time.", 422) from exc
+    to_label = tu.due_phrase(DueKind.TIMED, d, tu.combine_local(d, t)) if d and t else tu.fmt_day(d) if d else ""
+    to_label_hi = tu.due_phrase_hi(DueKind.TIMED, d, tu.combine_local(d, t)) if d and t else tu.fmt_day_hi(d) if d else ""
+    from_label = tu.due_phrase(target.due_kind, target.due_date, target.due_at)
+    from_label_hi = tu.due_phrase_hi(target.due_kind, target.due_date, target.due_at)
+    his = md_pronouns()[2] if giver.is_md else "their"
+    title = f"Move {giver_words(giver)[0]}'s {target.title}" + (f" to {to_label}" if to_label else "")
+    task = SharedTask(
+        title=title[:200], notes=f"{target.title}: now {from_label or 'no fixed time'}" + (f" → asked for {to_label}" if to_label else ""),
+        kind=Kind.TASK, priority=Priority.HIGH, assignee_type=bucket_of(person), assignee_user=person,
+        origin=SharedTask.Origin.GIVEN, created_by=giver, description=(words or "").strip()[:5000],
+        sync_state=SharedTask.Sync.NOT_REQUIRED, about_scope=scope, about_id=target.id,
+        arrange={"due_date": new_date, "due_time": new_time, "applied": False, "about_title": target.title,
+                 "from_label": from_label, "from_label_hi": from_label_hi, "to_label": to_label, "to_label_hi": to_label_hi,
+                 **({"duration_minutes": int(changes["duration_minutes"])} if changes.get("duration_minutes") else {})},
+    )
+    apply_schedule(task, {"due_date": tu.today_local(), "_prefs": get_prefs(giver)}, creating=True)
+    task.handed = [giver.id, person.id]
+    task.save()
+    who, who_hi = giver_words(giver)
+    name = person.spoken_name
+    spoken = (f"{name}, {who} asks you to move {his} {target.title}" + (f" from {from_label}" if from_label else "")
+              + (f" to {to_label}" if to_label else "") + ". Mark it done once it is arranged.")
+    spoken_hi = (f"{name}, {who_hi} ने कहा है कि उनकी {target.title}" + (f" ({from_label_hi})" if from_label_hi else "")
+                 + (f" {to_label_hi} पर कर दें" if to_label_hi else " बदल दें") + "। अरेंज हो जाए तो डन कर दीजिए।")
+    Alert.objects.create(
+        recipient=person, sender=giver, kind=Alert.Kind.TASK_ASSIGNED, priority=Priority.HIGH, title=f"{who} asks: move a meeting"[:200],
+        body=spoken[:400], spoken_text=spoken[:400], spoken_text_hi=spoken_hi[:400], ref_type="shared_task", ref_id=str(task.id),
+        **ring_fields(person, Priority.HIGH),
+    )
+    log_event(task, TaskEvent.Kind.GIVEN, giver, to=person.id)
+    audit(giver, "arrange.request", "shared_task", task.id, f"about {scope} {target.id}")
+    return task
+
+
+def arrangement_of(task: SharedTask) -> dict | None:
+    """What an arrange task is about, for the screen: the meeting, its time now, the time asked for, applied or not."""
+    if not task.about_id:
+        return None
+    target = _item_of(task.about_scope or "shared", task.about_id)
+    a = task.arrange or {}
+    return {
+        "about": {"scope": task.about_scope or "shared", "id": str(task.about_id),
+                  "title": target.title if target is not None else a.get("about_title", ""),
+                  "when": tu.due_phrase(target.due_kind, target.due_date, target.due_at) if target is not None else ""},
+        "to": a.get("to_label", ""), "to_hi": a.get("to_label_hi", ""), "applied": bool(a.get("applied")),
+    }
+
+
+def _apply_arrangement(by: User, task: SharedTask) -> None:
+    """The person asked marked the arrange task done: the meeting moves once, to the time asked for, keeping its
+    length; the giver hears it from them, the other attendee (if any) hears it as a move. Never twice."""
+    a = dict(task.arrange or {})
+    if a.get("applied") or not task.about_id:
+        return
+    target = _item_of(task.about_scope or "shared", task.about_id)
+    giver = task.created_by
+    if target is None or target.is_closed or giver is None:
+        a["applied"], a["outcome"] = True, "gone"
+        SharedTask.objects.filter(id=task.id).update(arrange=a)
+        return
+    changes = {}
+    if a.get("due_date"):
+        changes["due_date"] = date.fromisoformat(a["due_date"])
+    if a.get("due_time"):
+        changes["due_time"] = time.fromisoformat(a["due_time"])
+    if a.get("duration_minutes"):
+        changes["duration_minutes"] = int(a["duration_minutes"])
+    if not changes:
+        a["applied"] = True
+        SharedTask.objects.filter(id=task.id).update(arrange=a)
+        return
+    old_status, old_due = target.status, (target.due_at, target.due_date)
+    _apply_changes(target, changes)
+    target.save()
+    if isinstance(target, SharedTask):
+        _log_changes(by, target, old_status, old_due)
+        if target.assignee_user_id and target.assignee_user_id != giver.id:
+            _tell_assignee_of_change(giver, target, old_status, old_due)
+    # Does the new time collide with something else of the giver's? Said, not stopped: the person was asked to arrange it.
+    from . import scheduling  # noqa: PLC0415
+    clash = ""
+    if target.due_at:
+        end = target.scheduled_end or target.due_at + timedelta(minutes=scheduling.minutes_for(target.kind, target.estimated_minutes))
+        hits = [c for c in scheduling.clashes(giver, target.due_at, end, get_prefs(giver), exclude_ids=[str(target.id)])
+                if c.get("routine") or c.get("kind") in (Kind.MEETING, Kind.CALL)]
+        if hits:
+            clash = hits[0]["title"]
+    a.update({"applied": True, "outcome": "moved"})
+    SharedTask.objects.filter(id=task.id).update(arrange=a)
+    name, name_hi = giver_words(by)
+    to, to_hi = address_of(giver), address_hi_of(giver)
+    when = tu.due_phrase(target.due_kind, target.due_date, target.due_at)
+    when_hi = tu.due_phrase_hi(target.due_kind, target.due_date, target.due_at)
+    en = f"{to}, {name} has moved your {target.title} to {when}." + (f" It overlaps {clash}." if clash else "")
+    hi = f"{to_hi}, {name_hi} ने आपकी {target.title} {when_hi} पर कर दी।" + (f" ये {clash} से ओवरलैप होती है।" if clash else "")
+    Alert.objects.create(recipient=giver, sender=by, kind=Alert.Kind.STAFF_UPDATE, priority=Priority.HIGH,
+                         title=f"{name} moved your meeting"[:200], body=target.title, spoken_text=en[:400], spoken_text_hi=hi[:400],
+                         ref_type="shared_task" if isinstance(target, SharedTask) else "private_task", ref_id=str(target.id))
 
 
 @transaction.atomic
@@ -2733,6 +2873,9 @@ PREF_SCHEMA = {
     "quietEndHour": {"type": "int", "min": 0, "max": 23, "default": 7, "say": "quiet hours end"},
     "wakeWordEnabled": {"type": "bool", "default": False, "say": "Hey JARVIS listening"},
     "meetingMode": {"type": "bool", "default": False, "say": "meeting mode"},
+    # In a meeting (meeting mode, or a meeting in the diary): JARVIS still saves and sends, but answers on the screen
+    # only, with a vibration, instead of speaking.
+    "meetingQuietReplies": {"type": "bool", "default": True, "say": "silent replies in a meeting"},
     # Set by the server when meeting mode is switched OFF during a diary meeting: that meeting no longer counts
     # as "in a meeting" (until this time). Kept here so it survives the app being closed and reopened.
     "meetingOverrideUntil": {"type": "text", "default": "", "say": "diary meeting override", "hidden": True},

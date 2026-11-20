@@ -115,8 +115,21 @@ export function setLiveSink(sink: LiveSink | null) {
   liveSink = sink;
 }
 
+/** In a meeting (meeting mode, or one in the diary) with silent replies on: nothing is spoken; the words stay on the
+ *  screen and whatever follows a sentence (listen again, close) happens at once. */
+let quiet = false;
+
+export function setSpeechQuiet(on: boolean) {
+  quiet = on;
+  if (on) stopSpeaking();
+}
+
+export function speechQuiet() {
+  return quiet;
+}
+
 export function say(text: string, opts: { interrupt?: boolean; onDone?: () => void; lang?: SpeakLang; fallback?: string } = {}) {
-  if (!text?.trim()) {
+  if (!text?.trim() || quiet) {
     opts.onDone?.();
     return;
   }

@@ -272,6 +272,19 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
           </Txt>
         ) : null}
         {item.notes ? <Txt variant="body" style={{ marginTop: 10 }}>{item.notes}</Txt> : null}
+        {item.arrangement ? (
+          // An ask to move a meeting: which one, where it is now, where it should go; Done moves it.
+          <View style={[s.box, { borderColor: colors.gold }]}>
+            <Txt variant="small">
+              <Txt variant="heading" style={{ fontSize: 13 }}>{item.arrangement.about.title}</Txt>
+              {item.arrangement.about.when ? ` · now ${item.arrangement.about.when}` : ''}
+              {item.arrangement.to ? ` → ${item.arrangement.to}` : ''}
+            </Txt>
+            <Txt variant="caption" style={{ marginTop: 4 }}>
+              {item.arrangement.applied ? 'Moved.' : isMine ? `Once it is arranged, tap Done: the meeting moves and ${giver} is told.` : `The meeting stays as it is until ${item.assignee?.staff_name || 'they'} confirm.`}
+            </Txt>
+          </View>
+        ) : null}
         {item.chain?.length ? (
           // Whose hands it passed through, once it was handed on: everyone sees where it came from.
           <View style={s.chainRow}>
@@ -461,10 +474,12 @@ export function TaskSheet({ item, onClose }: { item: TaskItem | null; onClose: (
               ) : (
                 <>
                   <Button
-                    title="Done"
+                    title={item.arrangement && !item.arrangement.applied ? 'Done: moved it' : 'Done'}
                     icon="checkmark-done"
                     loading={busy === 'done'}
-                    onPress={() => run('done', () => paStatus('COMPLETED'), `Done.${toldSir} ${address}.`, `हो गया${ownPaTask ? '' : `, ${mdHi} को बता दिया`}, ${addressHi}।`)}
+                    onPress={() => run('done', () => paStatus('COMPLETED'),
+                      item.arrangement && !item.arrangement.applied ? `Moved, ${address}. ${giver} has been told.` : `Done.${toldSir} ${address}.`,
+                      item.arrangement && !item.arrangement.applied ? `कर दिया, ${addressHi}। ${giver} को बता दिया।` : `हो गया${ownPaTask ? '' : `, ${mdHi} को बता दिया`}, ${addressHi}।`)}
                   />
                   <View style={{ flexDirection: 'row', marginTop: 8 }}>
                     <Button

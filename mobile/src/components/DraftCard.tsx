@@ -38,6 +38,7 @@ const SAVE_LABEL: Partial<Record<DraftAction, string>> = {
   complete: 'Mark done',
   remember: 'Yes, remember',
   change_task: 'Change',
+  arrange_request: 'Ask',
   delete_task: 'Delete',
 };
 

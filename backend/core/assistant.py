@@ -15,7 +15,7 @@ from django.utils import timezone
 from . import ai_brain, datacards, hinglish_parser, recurrence, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
-from .models import Alert, Kind, Priority, PrivateTask, SharedTask, User
+from .models import CLOSED_STATUSES, Alert, Kind, Priority, PrivateTask, SharedTask, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
@@ -25,14 +25,19 @@ TASK_ACTIONS = {"private_task", "md_request", "delegation", "team_delegation", "
 # Everything a card can save (a message is not a task, but it rides on the same card and the same yes).
 SAVE_ACTIONS = TASK_ACTIONS | {"message"}
 # What JARVIS saves by itself when the instruction was complete and clear (see _auto_save).
-AUTO_ACTIONS = {"private_task", "own_task", "person_task", "person_meeting", "md_request", "message"}
+AUTO_ACTIONS = {"private_task", "own_task", "person_task", "person_meeting", "md_request", "message", "arrange_request"}
 EDIT_ACTIONS = {"change_task", "delete_task"}
 _CHANGE_FIELDS = {"title", "due_date", "due_time", "priority", "kind", "duration_minutes"}
 # Drafts that put something in somebody's diary, and whose diary it is: the speaker's own, the person's they give it to,
 # or the MD's (someone putting work in Sir's diary: they only ever hear "busy", never why).
 _SLOT_ACTIONS = {"private_task": "self", "person_meeting": "self", "person_task": "person", "md_request": "md",
-                 "change_task": "self", "own_task": "self",
+                 "change_task": "self", "arrange_request": "self", "own_task": "self",
                  "pa_meeting": "self", "pa_task": "person", "pa_self_task": "self"}
+# "Abhi" / "now" / "turant": on a task or a message it means do it right away (no clock time, never "already passed");
+# on a move ("Sharmaji wali meeting abhi kar do") it means this very moment.
+_NOW_WORDS = re.compile(r"\b(abhi|abhi ke abhi|isi waqt|isi samay|right now|right away|now|turant|immediately|at once|straight away)\b"
+                        r"|अभी|तुरंत|इसी वक़्त|इसी वक्त|इसी समय", re.IGNORECASE)
+NOW_WINDOW = timedelta(minutes=30)  # a clock time this close to now, said with "abhi", is "now", not a deadline
 MAX_SCHEDULE_QUESTIONS = 2  # ask about a clash at most twice, then take his word
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -100,8 +105,9 @@ def _match_items(words: str, items: list[dict]) -> list[dict]:
     return [i for s, i in scored if s == best]
 
 
-def _changes_from(cmd: dict) -> dict:
-    """The validated new values for change_task (only the fields the model listed)."""
+def _changes_from(cmd: dict, text: str = "") -> dict:
+    """The validated new values for change_task (only the fields the model listed). "Abhi kar do" with no other
+    change (and a span of a minute or two) means this very moment."""
     out = {}
     for field in cmd.get("changed_fields") or []:
         if field not in _CHANGE_FIELDS:
@@ -129,8 +135,13 @@ def _changes_from(cmd: dict) -> dict:
         span = max(0, min(int(cmd.get("due_in_minutes") or 0), 7 * 24 * 60))
     except (TypeError, ValueError):
         span = 0
+    said_now = bool(_NOW_WORDS.search(text or ""))
     if span and cmd.get("intent") == "change_task":
-        when = tu.now_local() + timedelta(minutes=span)
+        when = tu.now_local() + timedelta(minutes=0 if said_now and span <= 2 else span)
+        out["due_date"], out["due_time"] = when.date().isoformat(), when.strftime("%H:%M")
+    elif said_now and cmd.get("intent") == "change_task" and not ({"due_date", "due_time", "title", "priority"} & out.keys()):
+        # "Sharmaji wali meeting abhi kar do": the model named no new time, the words did.
+        when = tu.now_local()
         out["due_date"], out["due_time"] = when.date().isoformat(), when.strftime("%H:%M")
     return out
 
@@ -622,6 +633,14 @@ def _just_saved(user: User, action: str, title: str, when: datetime | None, assi
     elif action == "md_request":
         rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.GIVEN,
                                          assignee_type=SharedTask.Assignee.MD, created_at__gte=since)
+    elif action == "arrange_request":
+        # The same change to the same meeting asked of someone moments ago (or still waiting): asked once.
+        target = assignees[-1] if assignees and isinstance(assignees[-1], dict) and assignees[-1].get("about") else None
+        if not target:
+            return False
+        rows = SharedTask.objects.filter(created_by=user, origin=SharedTask.Origin.GIVEN, about_id=target["about"]) \
+            .exclude(status__in=CLOSED_STATUSES)
+        return rows.exists()
     elif action == "message":
         want = " ".join((title or "").split())
         ids = [a.get("id") for a in (assignees or []) if isinstance(a, dict)]
@@ -792,7 +811,7 @@ def _slot_of(user: User, draft: dict):
     if not whose:
         return None
     subject = user
-    if draft["action"] == "change_task":
+    if draft["action"] in ("change_task", "arrange_request"):
         targets = draft.get("targets") or []
         changes = draft.get("changes") or {}
         if len(targets) != 1 or not ({"due_date", "due_time"} & changes.keys()):
@@ -870,7 +889,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     if not minutes and kind == Kind.MEETING:
         # No length said: the person's usual meeting length (what the confirmation tells him), not a fixed hour.
         minutes = int(prefs.get("meetingMinutes") or 0) or None
-        if minutes and whose == "self" and draft["action"] != "change_task" and not draft.get("duration_minutes"):
+        if minutes and whose == "self" and draft["action"] not in ("change_task", "arrange_request") and not draft.get("duration_minutes"):
             draft["duration_minutes"] = minutes  # saved with the length the diary was checked for
     review = scheduling.review(subject, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes, prefs=prefs,
                                exclude_ids=exclude)
@@ -888,9 +907,10 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     pa_name = subject.spoken_name  # the person whose diary it is, when it is someone else's
     address_hi = services.address_hi_of(user)
     sir, sir_hi = services.md_address(), services.md_address_hi()
-    item = (draft.get("targets") or [{}])[0].get("title", "") if draft["action"] == "change_task" else draft.get("title", "")
+    is_move = draft["action"] in ("change_task", "arrange_request")
+    item = (draft.get("targets") or [{}])[0].get("title", "") if is_move else draft.get("title", "")
     item = item or "this"
-    if whose == "person" and draft["action"] != "change_task":
+    if whose == "person" and not is_move:
         item = f"{item} for {pa_name}"
     d = date.fromisoformat(due_date) if due_date else None
     day_en = tu.fmt_day(d) if d else ""
@@ -920,7 +940,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
     question_en = question_hi = ""
     options: dict = {}   # fit / push / move, when a new meeting lands on an existing one
     clashes = review.get("clashes") or []
-    if whose == "self" and draft["action"] != "change_task" and d and kind in (Kind.MEETING, Kind.CALL):
+    if whose == "self" and not is_move and d and kind in (Kind.MEETING, Kind.CALL):
         twin = _similar_item(subject, draft.get("title", ""), d, {c.get("id") for c in clashes}, kinds=(Kind.MEETING, Kind.CALL))
         if twin:
             notes_en.append(f"You already have {twin} {day_en}.")
@@ -947,7 +967,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         tail_en = f" Shall I put it at {alt_en} instead?" if sug else " Shall I save it anyway?"
         tail_hi = f" {alt_hi} रख दूँ?" if sug else " फिर भी सेव कर दूँ?"
         # His own new meeting or call over one already there: fit it in the gap, push the others, or move this one.
-        if whose == "self" and draft["action"] != "change_task" and d and due_time and not c.get("routine"):
+        if whose == "self" and not is_move and d and due_time and not c.get("routine"):
             new_start = tu.combine_local(d, time.fromisoformat(due_time))
             new_end = new_start + timedelta(minutes=review.get("minutes") or 30)
             gap = int((c["start"] - new_start).total_seconds() // 60)
@@ -1273,7 +1293,7 @@ def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: 
         if _safe_date(str(offered.get("due_date") or "")) and _safe_time(str(offered.get("due_time") or "")):
             draft["overrides"] = {"due_date": offered["due_date"], "due_time": offered["due_time"]}
         return draft
-    is_change = pending.get("action") == "change_task"
+    is_change = pending.get("action") in ("change_task", "arrange_request")
     base = (pending.get("changes") or {}) if is_change else pending
     cur_date = _safe_date(str(base.get("due_date") or "")) or _safe_date(str(offered.get("due_date") or "")) \
         or tu.today_local().isoformat()
@@ -1514,7 +1534,10 @@ def _auto_save(user: User, draft: dict, cmd: dict, full_text: str) -> None:
         if it.get("due_date") and it.get("due_time"):
             when = tu.combine_local(date.fromisoformat(it["due_date"]), time.fromisoformat(it["due_time"]))
         key = it.get("message") if it["action"] == "message" else it.get("title", "")
-        if _just_saved(user, it["action"], key, when, it.get("assignees")):
+        who = it.get("assignees")
+        if it["action"] == "arrange_request" and isinstance(it.get("about"), dict):
+            who = list(who or []) + [{"about": it["about"].get("id")}]
+        if _just_saved(user, it["action"], key, when, who):
             continue
         fresh.append(it)
     address, address_hi = services.address_of(user), services.address_hi_of(user)
@@ -1558,6 +1581,7 @@ def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
     kind_en = {"MEETING": "meeting", "CALL": "call", "PAYMENT": "payment", "FOLLOW_UP": "follow-up", "APPROVAL": "approval"}.get(d.get("kind"), "task")
     kind_hi = _KIND_HI.get(d.get("kind"), "टास्क")
     what = {"private_task": f"personal {kind_en}", "md_request": f"{kind_en} for {services.md_address()}",
+            "arrange_request": f"ask {pa_name}",
             "delegation": f"{kind_en} for {staff}" if staff else "task for staff", "team_delegation": f"task for {(d.get('team') or {}).get('label') or 'the team'}",
             "pa_task": f"{kind_en} for {pa_name}", "pa_meeting": f"meeting with {pa_name}", "pa_self_task": f"your own {kind_en}",
             "person_task": f"{kind_en} for {pa_name}", "person_meeting": f"meeting with {pa_name}", "own_task": f"your own {kind_en}",
@@ -1565,6 +1589,7 @@ def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
             "mg_task": f"{kind_en} for {d.get('mg_name') or 'the manager'}",
             "choose_destination": kind_en}.get(d.get("action"), kind_en)
     what_hi = {"private_task": f"पर्सनल {kind_hi}", "md_request": f"{sir_hi} के लिए {kind_hi}",
+               "arrange_request": f"{pa_name} को कहना",
                "delegation": f"{staff} के लिए {kind_hi}" if staff else "स्टाफ़ के लिए टास्क", "team_delegation": "टीम के लिए टास्क",
                "pa_task": f"{pa_name} के लिए {kind_hi}", "pa_meeting": f"{pa_name} के साथ मीटिंग", "pa_self_task": f"आपका अपना {kind_hi}",
                "person_task": f"{pa_name} के लिए {kind_hi}", "person_meeting": f"{pa_name} के साथ मीटिंग", "own_task": f"आपका अपना {kind_hi}",
@@ -1604,6 +1629,31 @@ def _combine_batch(draft: dict, subs: list[dict], address: str, address_hi: str,
     _say(draft, en, hi)
     draft["speak_text"], draft["speak_lang"] = (hi, "hi") if reply_language == "hi" else (en, "en")
     draft["done_reply"] = draft["done_speak"] = ""  # the saved line is built from what was really saved
+
+
+def _prepare_arrange(user: User, draft: dict, person: User, item: dict, address: str, address_hi: str) -> None:
+    """Someone on the team is asked to move an item of the speaker's (usually a meeting) to a new time. The card
+    names the meeting, its time now and the time asked for; it is done at once when nothing is in the way (the
+    diary check still runs on the new time), and the meeting itself stays until the person confirms."""
+    task = _target_task(item)
+    changes = draft["changes"]
+    draft["action"] = "arrange_request"
+    draft["assignees"] = [_person_option(person)]
+    draft["pa_name"] = person.spoken_name
+    now_en = tu.due_phrase(task.due_kind, task.due_date, task.due_at) if task is not None else (item.get("due_label") or "")
+    now_hi = tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at) if task is not None else now_en
+    new_date = changes.get("due_date") or (task.due_date.isoformat() if task is not None and task.due_date else "")
+    new_time = changes.get("due_time") or (tu.to_local(task.due_at).strftime("%H:%M") if task is not None and task.due_at else "")
+    new_en = _due_label(new_date, new_time) if new_date else describe_changes(changes)
+    new_hi = _due_label_hi(new_date, new_time) if new_date else describe_changes_hi(changes)
+    his, his_hi = "your", "आपकी"
+    what = item.get("title") or "the meeting"
+    # The task the person gets: what to move, from when, to when.
+    draft["title"] = f"Move {what} to {new_en}" if new_en else f"Change {what}: {describe_changes(changes)}"
+    draft["arrange"] = {"due_date": new_date, "due_time": new_time, **({"duration_minutes": changes["duration_minutes"]} if changes.get("duration_minutes") else {})}
+    draft["about"] = {"scope": item.get("scope") or "shared", "id": item["id"], "title": what, "when": now_en}
+    _say(draft, f"{address}, ask {person.spoken_name} to move {his} {what}" + (f" ({now_en})" if now_en else "") + f" to {new_en}?",
+         f"{address_hi}, {person.spoken_name} को कहूँ कि {his_hi} {what}" + (f" ({now_hi})" if now_hi else "") + f" {new_hi} पर कर दे?")
 
 
 def _steps_of(raw) -> list[str]:
@@ -1753,6 +1803,23 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     is_reminder = cmd.get("kind") == "REMINDER" and intent in {"create_task", "pa_own"}
     kind = cmd.get("kind") if cmd.get("kind") in _KINDS else Kind.TASK
     priority = cmd.get("priority") if cmd.get("priority") in _PRIORITIES else Priority.NORMAL
+    # "Abhi" / "now" / "turant" (this sentence, not the one before): on a task or a message it means do it right away,
+    # so a clock time the model wrote for "now" is dropped (it is not a deadline, and it has not "already passed");
+    # work given to someone right now is at least high priority. A meeting or call "abhi" starts now.
+    said_now = bool(_NOW_WORDS.search(full_text if not cmd.get("_sub") else (cmd.get("title") or "")))
+    now_local = tu.now_local()
+    if said_now and not is_reminder and intent in {"create_task", "pa_own", "assign_to_person", "request_for_md", "send_alert",
+                                                     "assign_to_team", "assign_to_staff", "needs_destination"}:
+        moment = exact_at or (tu.combine_local(date.fromisoformat(due_date), time.fromisoformat(due_time)) if due_date and due_time else None)
+        near = moment is not None and abs((moment - now_local).total_seconds()) <= NOW_WINDOW.total_seconds()
+        if kind in (Kind.MEETING, Kind.CALL):
+            if not moment or near:
+                exact_at = now_local.replace(second=0, microsecond=0)
+                due_date, due_time, due_in = exact_at.date().isoformat(), exact_at.strftime("%H:%M"), 0
+        elif not moment or near:
+            due_date, due_time, exact_at, due_in = "", "", None, 0
+            if priority == Priority.NORMAL and intent in {"assign_to_person", "request_for_md", "assign_to_team", "assign_to_staff"}:
+                priority = Priority.HIGH
 
     draft = {
         "engine": cmd.get("engine", "rules"),
@@ -1953,7 +2020,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 draft["swap"] = True
                 _say(draft, f"{address}, swap them: '{a['title']}' to {tu.fmt_time(b_when)} and '{b['title']}' to {tu.fmt_time(a_when)}?",
                      f"{address_hi}, दोनों की अदला-बदली: '{a['title']}' {tu.fmt_time_hi(b_when)} और '{b['title']}' {tu.fmt_time_hi(a_when)} कर दूँ?")
-            elif intent == "change_task" and len(matches) > 1 and ({"due_date", "due_time"} & _changes_from(cmd).keys()) \
+            elif intent == "change_task" and len(matches) > 1 and ({"due_date", "due_time"} & _changes_from(cmd, full_text).keys()) \
                     and sum(1 for m in matches if (m.get("kind") in (Kind.MEETING, Kind.CALL))) > 1:
                 # "Dono 12 baje kar do": two meetings cannot share a time. Ask which one, change nothing.
                 draft["targets"], draft["target"] = [], None
@@ -1961,10 +2028,15 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 _ask(draft, f"{address}, two meetings cannot be at the same time. Which one should I move: {names}?",
                      f"{address_hi}, दो मीटिंग एक ही समय पर नहीं हो सकतीं। कौन सी बदलूँ: {names}?")
             elif intent == "change_task":
-                draft["changes"] = _changes_from(cmd)
+                draft["changes"] = _changes_from(cmd, full_text)
+                # "Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de": someone on the team is asked to make
+                # the change; the item stays as it is until they confirm (see _prepare_arrange).
+                askers = [p for p in (_team_person(user, n)[0] for n in _recipients_of(cmd)) if p is not None and p.id != user.id]
                 if not draft["changes"]:
                     _ask(draft, f"{address}, what should I change about '{names}': the time, the day, the priority or the name?",
                          f"{address_hi}, '{names}' में क्या बदलूँ: समय, दिन, प्रायोरिटी या नाम?")
+                elif askers and len(matches) == 1:
+                    _prepare_arrange(user, draft, askers[0], matches[0], address, address_hi)
                 else:
                     _say(draft, f"{address}, {describe_changes(draft['changes'])} for '{names}'?",
                          f"{address_hi}, '{names}' {describe_changes_hi(draft['changes'])}?")
@@ -2241,8 +2313,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         if not (draft["due_date"] and draft["due_time"]) and not draft["needs_clarification"]:
             _ask(draft, f"{address}, when should I remind you?", f"{address_hi}, कब याद दिलाऊँ?")
 
-    if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"] and not draft.get("repeat"):
-        # (A repeating item whose first moment has passed simply starts from its next date.)
+    if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"] and not draft.get("repeat") and not said_now:
+        # (A repeating item whose first moment has passed simply starts from its next date; "abhi" is never "passed".)
         when = tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
         if when <= tu.now_local() and not draft["needs_clarification"]:
             label, label_hi = tu.fmt_time(when), tu.fmt_time_hi(when)

@@ -113,8 +113,23 @@ BENCH = [
     ("md", "November mein maine kaunse tasks complete kiye", {"intent": "query", "view_kind": "done", "view_from": "2026-11-01", "view_to": "2026-11-30"}),
     ("pa", "is mahine kitne kaam poore hue", {"intent": "query", "view_kind": ["done", "stats"], "view_from": "{month_start}"}),
     ("md", "{mg} ne pichhle mahine kya kya complete kiya", {"intent": "query", "view_kind": ["done", "tasks"], "view_who": "{mg}", "view_from": "{last_month_start}", "view_to": "{last_month_end}"}),
-    # --- a stranger inside work for someone else is part of the instruction, never a question
-    ("md", "Nikki ko bolo ki Aman ko bole mujhe call kare abhi", {"intent": "assign_to_person", "recipients": ["Nikki"]}),
+    # --- a stranger inside work for someone else is part of the instruction, never a question (a quick ask said
+    #     with "abhi" is a message now: it reaches Nikki at once, nothing to tick off)
+    ("md", "Nikki ko bolo ki Aman ko bole mujhe call kare abhi", {"intent": ["assign_to_person", "send_alert"], "recipients": ["Nikki"]}),
+    # --- "abhi" (Nov 2026): right away, never a clock time, never "you are busy"; small asks are messages
+    ("md", "Nikki ko bolo abhi mere office aaye", {"intent": "send_alert", "recipients": ["Nikki"], "due_time": "", "due_in_minutes": 0}),
+    ("md", "Nikki ko bolo mere office chai leke aaye", {"intent": "send_alert", "recipients": ["Nikki"], "due_time": ""}),
+    ("md", "Nikki ko bolo papers abhi mere office mein bhej de", {"intent": "send_alert", "recipients": ["Nikki"], "due_time": ""}),
+    ("md", "Nikki ko papers bhejne ka task de do, jab complete ho mujhe bata dena", {"intent": "assign_to_person", "recipients": ["Nikki"]}),
+    ("md", "mujhe kal quotation bhejni hai, meri list mein add karo", {"intent": "create_task", "due_date": M}),
+    ("md", "Nikki ko 3 baje alert bhejna ki courier aa gaya hai", {"intent": "send_alert", "recipients": ["Nikki"], "due_time": "15:00"}),
+    ("md", "Sharmaji ke saath meri meeting kab hai", {"intent": "query", "view_kind": ["tasks", "today"]}, {"items": "meetings"}),
+    ("md", "Sharmaji wali meeting abhi kar do", {"intent": "change_task", "target_refs": ["m-sharma"], "due_time": "", "due_date": ""}, {"items": "meetings"}),
+    ("md", "Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de", {"intent": "change_task", "recipients": ["Nikki"], "target_refs": ["m-sharma"]},
+     {"items": "meetings"}),
+    ("md", "haan, Nikki ko bolo woh meeting abhi arrange kare", {"intent": "change_task", "recipients": ["Nikki"], "target_refs": ["m-sharma"]},
+     {"items": "meetings", "conversation": [{"role": "user", "text": "Sharmaji ke saath meri meeting kab hai"},
+                                            {"role": "jarvis", "text": "Sir, your meeting with Sharmaji is today at 1 PM."}]}),
     # --- messages kept for good
     ("md", "{mg} ne kya message bheja tha", {"intent": "query", "view_kind": "messages", "view_who": "{mg}"}),
     ("md", "maine kal {pa} ko kya kaha tha", {"intent": "query", "view_kind": "messages", "view_who": "{pa}", "view_filter": "sent", "view_from": Y, "view_to": Y}),
@@ -186,7 +201,14 @@ class Command(BaseCommand):
             ctx = dict(contexts[role])
             ctx["conversation"] = []
             ctx["reply_language"] = lang.lang_for(user, text)  # as build_draft tells the model
-            if after and "just_saved" in after:
+            if after and "items" in after:
+                # The 12:10 scenario: Aman's meeting has run, Sharmaji's is at 1; "woh meeting" follows a question about it.
+                ctx["open_items"] = {"overdue": [], "today": [
+                    {"id": "m-aman", "title": "Meeting with Aman", "kind": "MEETING", "priority": "NORMAL", "status": "OPEN", "due_label": "today at 11 AM", "scope": "private", "version": 1},
+                    {"id": "m-sharma", "title": "Meeting with Sharmaji", "kind": "MEETING", "priority": "NORMAL", "status": "OPEN", "due_label": "today at 1 PM", "scope": "private", "version": 1},
+                ], "upcoming": []}
+                ctx["conversation"] = after.get("conversation", [])
+            elif after and "just_saved" in after:
                 ctx["just_saved"] = after["just_saved"]
                 ctx["conversation"] = [{"role": "jarvis", "text": "Done, Sir: given to the PA."}]
             elif after and "awaiting" in after:

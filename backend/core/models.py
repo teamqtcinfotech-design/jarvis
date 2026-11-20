@@ -365,6 +365,13 @@ class SharedTask(TaskFields):
     # Whose hands it passed through: user ids, the giver first, then everyone it was given to in turn
     # ([Sir, Mansi, Nikki] when Mansi handed Sir's task on to Nikki). Shown as the chain on the task.
     handed = models.JSONField(default=list, blank=True)
+    # "Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de" (Nov 2026): this task asks its person to make a
+    # change to another item (the meeting: its scope and id, a private or a shared one) and `arrange` holds the
+    # change asked for ({"due_date", "due_time", "duration_minutes", "applied"}). The meeting stays as it is until
+    # the person marks this done; then the change is applied once and everyone concerned is told.
+    about_scope = models.CharField(max_length=8, blank=True, default="")
+    about_id = models.UUIDField(null=True, blank=True)
+    arrange = models.JSONField(default=dict, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["assignee_type", "status"]), models.Index(fields=["due_at"]),

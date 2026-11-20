@@ -165,6 +165,25 @@ def run_item(user: User, p: dict) -> dict:
             en = f"Done, {address}: given to {who}{when}.{rep_en} I'll tell you when it's done."
             hi = f"हो गया, {address_hi}: {who_hi} को दे दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} पूरा होने पर बताऊँगा।"
         return {"en": en, "hi": hi, "undo": refs, "title": p.get("title", ""), "people": [u.spoken_name for u in names]}
+    if action == "arrange_request":
+        # "Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de": Nikki gets the ask (ringing until seen); the
+        # meeting stays where it is until she marks it done, then it moves and everyone concerned is told.
+        people = _people_of(user, p)
+        about = p.get("about") if isinstance(p.get("about"), dict) else {}
+        if not people or not about.get("id"):
+            raise ServiceError("no_person", "I don't know who should arrange this.", 422)
+        task = services.create_arrange_request(user, people[0], str(about.get("scope") or "shared"), about["id"],
+                                               p.get("arrange") if isinstance(p.get("arrange"), dict) else {}, p.get("transcript") or "")
+        who = people[0].spoken_name
+        meeting = task.arrange.get("about_title") or "the meeting"
+        was, was_hi = task.arrange.get("from_label") or "", task.arrange.get("from_label_hi") or ""
+        to, to_hi = task.arrange.get("to_label") or "", task.arrange.get("to_label_hi") or ""
+        en = (f"Done, {address}: I've asked {who} to move your {meeting}" + (f" ({was})" if was else "") + (f" to {to}" if to else "")
+              + ". It stays as it is until " + ("she" if services.gender_of(people[0]) == "female" else "he" if services.gender_of(people[0]) == "male" else "they")
+              + " confirm" + ("s" if services.gender_of(people[0]) in ("female", "male") else "") + "; I'll tell you then.")
+        hi = (f"हो गया, {address_hi}: {who} को कहा है कि आपकी {meeting}" + (f" ({was_hi})" if was_hi else "") + (f" {to_hi} पर कर दे" if to_hi else "")
+              + "। कन्फ़र्म होने तक वो वैसी ही रहेगी; तब बताऊँगा।")
+        return {"en": en, "hi": hi, "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [who]}
     if action == "organise":
         # A department or section change the speaker confirmed (removing people, deleting, merging): see organise.py.
         from . import organise  # noqa: PLC0415 — organise imports this module

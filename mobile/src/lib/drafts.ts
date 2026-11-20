@@ -7,11 +7,11 @@ export const TASK_DRAFTS: DraftAction[] = ['private_task', 'md_request', 'delega
 /** Cards of the team's kind, saved on the server by the same path the voice uses (/assistant/execute/). Work for the
  *  MD (md_request) is one of them: it goes straight onto the MD's list there, like work for anyone. */
 export const SERVER_SAVED: DraftAction[] = ['person_task', 'person_meeting', 'own_task', 'message', 'pa_task', 'pa_meeting',
-  'pa_self_task', 'mg_task', 'md_request', 'organise'];
+  'pa_self_task', 'mg_task', 'md_request', 'organise', 'arrange_request'];
 
 /** Cards that end with a question ("shall I save it?") and wait for a yes / no / change. */
 export const CONFIRMABLE: DraftAction[] = [...TASK_DRAFTS, 'message', 'accept_request', 'decline_request', 'complete', 'remember',
-  'change_task', 'delete_task', 'organise'];
+  'change_task', 'arrange_request', 'delete_task', 'organise'];
 
 const CHANGE_LABEL: Record<string, string> = {
   title: 'name', due_date: 'day', due_time: 'time', priority: 'priority', kind: 'type', duration_minutes: 'length',
@@ -75,6 +75,12 @@ export function draftHeading(d: Draft, md = 'Sir', him = 'him'): { title: string
       return { title: 'Mark as done', detail: '', icon: 'checkmark-done-outline' };
     case 'change_task':
       return { title: 'Change task', detail: describeChanges(d.changes), icon: 'create-outline' };
+    case 'arrange_request':
+      return {
+        title: `Ask ${pa} to move it`,
+        detail: `${d.about?.title ?? 'The meeting'}${d.about?.when ? ` (${d.about.when})` : ''} → ${describeChanges(d.changes)}. It stays as it is until ${pa} confirms.`,
+        icon: 'swap-horizontal-outline',
+      };
     case 'delete_task':
       return { title: 'Delete task', detail: 'It will be cancelled, not erased.', icon: 'trash-outline' };
     case 'set_setting':

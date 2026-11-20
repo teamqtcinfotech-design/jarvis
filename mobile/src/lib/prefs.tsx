@@ -33,6 +33,8 @@ export interface Prefs {
   wakeWordEnabled: boolean;
   /** Meeting mode: JARVIS stays silent and vibrates only. */
   meetingMode: boolean;
+  /** In a meeting (meeting mode, or one in the diary): replies on the screen only, with a vibration, never spoken. */
+  meetingQuietReplies: boolean;
   /** Work routine (server-side scheduling uses it): office hours, weekly off (Monday = 0), fixed blocks. */
   officeStart: string;
   officeEnd: string;
@@ -88,6 +90,7 @@ const DEFAULTS: Prefs = {
   quietEndHour: 7,
   wakeWordEnabled: false,
   meetingMode: false,
+  meetingQuietReplies: true,
   officeStart: '10:00',
   officeEnd: '19:00',
   weeklyOff: [6],
