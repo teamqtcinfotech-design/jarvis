@@ -199,7 +199,14 @@ export function AlertBanner() {
         ) : null}
 
         <View style={s.actions}>
-          {item.question?.kind === 'signout' ? (
+          {item.question?.kind === 'approve' ? (
+            // An approval asked of him, with the amount in the line: one tap decides, and whoever asked is told.
+            <>
+              <Button title={later} kind="ghost" compact onPress={() => engine.snooze(item).catch(() => undefined)} />
+              <Button title="Decline" kind="danger" compact onPress={() => engine.answerQuestion(item, item.question!, false).catch(() => undefined)} style={{ marginLeft: 6 }} />
+              <Button title="Approve" icon="checkmark" compact onPress={() => engine.answerQuestion(item, item.question!, true).catch(() => undefined)} style={{ marginLeft: 6 }} />
+            </>
+          ) : item.question?.kind === 'signout' ? (
             // "Signed in on another phone — not you?": the sign-out of that phone is one tap away.
             <>
               <Button title="It's me" kind="ghost" compact onPress={() => engine.answerQuestion(item, item.question!, false).catch(() => undefined)} />

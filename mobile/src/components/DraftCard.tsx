@@ -19,7 +19,7 @@ import type { CategoryOption, Draft, DraftAction, Kind, Priority, StaffOption } 
 import { Button, Chip, Icon, Txt } from './ui';
 
 const PRIORITIES: Priority[] = ['URGENT', 'HIGH', 'NORMAL', 'LOW'];
-const KINDS: Kind[] = ['TASK', 'MEETING', 'CALL', 'PAYMENT', 'FOLLOW_UP'];
+const KINDS: Kind[] = ['TASK', 'MEETING', 'CALL', 'PAYMENT', 'FOLLOW_UP', 'APPROVAL'];
 
 const SAVE_LABEL: Partial<Record<DraftAction, string>> = {
   private_task: 'Save',
@@ -187,7 +187,20 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
             ) : null}
             {draft.action === 'delegation' && draft.staff ? <Fact icon="person-outline" text={draft.staff.name} /> : null}
             {forPeople ? <Fact icon={(draft.assignees?.length ?? 0) > 1 ? 'people-outline' : 'person-outline'} text={forPeople} /> : null}
+            {draft.amount_label ? <Fact icon="ribbon-outline" text={draft.amount_label} color={colors.gold} bg={colors.goldSoft} strong /> : null}
+            {draft.repeat_label ? <Fact icon="repeat-outline" text={draft.repeat_label} color={colors.info} bg={colors.infoSoft} /> : null}
           </View>
+          {draft.steps?.length ? (
+            <View style={{ marginTop: 10 }}>
+              <Txt variant="label" style={{ color: colors.inkSoft, marginBottom: 4 }}>Checklist</Txt>
+              {draft.steps.map((st, i) => (
+                <View key={`${st}-${i}`} style={s.targetRow}>
+                  <Icon name="square-outline" size={14} color={colors.inkSoft} />
+                  <Txt variant="small" style={{ flex: 1, marginLeft: 8 }}>{st}</Txt>
+                </View>
+              ))}
+            </View>
+          ) : null}
           {draft.action === 'team_delegation' && draft.team ? (
             <Txt variant="small" style={{ marginTop: 10 }}>
               {draft.team.members.map((m) => m.name).join(', ')}

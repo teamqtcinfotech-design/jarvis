@@ -27,6 +27,7 @@ import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
 import { useSession } from './session';
 import { closeLine, hasCollected, type LineState, lineOpen, lineSpeaking, liveAvailable, openLine, takeCollected } from './liveVoice';
+import { enqueue, flush, queued } from './offlineQueue';
 import { onSpeakingChange, say, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
 import type { AlertAnswer, AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
@@ -201,8 +202,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     wake: () => void;
     barge: () => void;
     liveTool: (name: string, args: Record<string, unknown>) => Promise<string>;
+    flushOffline: () => Promise<void>;
   }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, presentAlert: () => undefined,
-    wake: () => undefined, barge: () => undefined, liveTool: async () => '{}' });
+    wake: () => undefined, barge: () => undefined, liveTool: async () => '{}', flushOffline: async () => undefined });
 
   // Which language the recogniser starts in. 'auto' is Indian English (Hinglish included) and, on Android 14+, the
   // phone switches to Hindi by itself. Older phones cannot switch, so there, once the last several turns were all
@@ -590,10 +592,36 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       handleDraft(res.data);
     } catch (e) {
       setBusy('');
+      // No connection: a fresh instruction is kept on the phone and sent when the server is back (an answer to a
+      // question or a waiting card belongs to this moment and is not kept).
+      if (e instanceof ApiError && e.status === 0 && !awaiting && !choices && !pending && text.trim()) {
+        enqueue(text);
+        const line = twin(`No connection right now, ${address}. I've kept it and will send it as soon as we're back online.`,
+          `${addressHi}, अभी कनेक्शन नहीं है। मैंने रख लिया है, ऑनलाइन आते ही भेज दूँगा।`);
+        push('jarvis', line.fallback, { tone: 'saved' });
+        say(line.text, { interrupt: true, lang: line.lang, fallback: line.fallback });
+        return;
+      }
       const msg = e instanceof ApiError ? e.message : 'Something went wrong.';
       push('jarvis', msg, { tone: 'error' });
       sayOwn(`Sorry ${address}. ${msg}`, `माफ़ कीजिए ${addressHi}। ${msg}`, { interrupt: true });
     }
+  };
+
+  /** What was said offline goes through now, oldest first, each announced as it lands; the rest wait if the server
+   *  is still away. */
+  const flushOffline = async () => {
+    if (!queued().length || !user) return;
+    await flush(async (q) => {
+      const res = await api<Draft>('/assistant/interpret/', {
+        method: 'POST',
+        body: { text: q.text, previous: '', awaiting: '', choices: null, pending: null, history: [], screen: null },
+        timeoutMs: 30000,
+      });
+      push('user', q.text);
+      push('jarvis', `Back online. From earlier: “${q.text}”`);
+      handleDraft(res.data);
+    }, (e) => e instanceof ApiError && e.status === 0);
   };
 
   /** One of the lines the app builds itself, in the language JARVIS is using with this person. */
@@ -759,7 +787,13 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         .catch(() => sayOwn(`Sorry ${address}, I couldn't set that.`, `माफ़ कीजिए ${addressHi}, वो सेट नहीं हो पाया।`, { interrupt: true }));
       return;
     }
-    if (pq) {
+    if (pq && pq.q.kind === 'approve' && d.intent === 'approve_item') {
+      // "Approve kar do" / "mana kar do" said to an approval's banner: the server has already decided it (and told
+      // whoever asked); the banner goes, and JARVIS says the server's line below.
+      questionRef.current = null;
+      expectingRef.current = false;
+      dismiss(pq.item);
+    } else if (pq) {
       // His answer to the alert's question. A yes or no in any words is carried out here; a real instruction
       // instead is handled as itself below, and the alert stays on its banner.
       questionRef.current = null;
@@ -1321,9 +1355,25 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   useEffect(() => {
-    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge, liveTool };
+    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge, liveTool, flushOffline };
   });
   useEffect(() => onBarge(() => fns.current.barge()), []);
+  // Said with no connection: tried again every 20 seconds and whenever the app comes back to the front.
+  useEffect(() => {
+    const tick = () => {
+      fns.current.flushOffline().catch(() => undefined);
+    };
+    const timer = setInterval(tick, 20_000);
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') tick();
+    });
+    const kick = setTimeout(tick, 2_000);
+    return () => {
+      clearInterval(timer);
+      sub.remove();
+      clearTimeout(kick);
+    };
+  }, []);
   // The alert engine hands alerts that carry a question to this conversation (voice and ear live here).
   useEffect(() => {
     setPresenter((item, spoken) => {

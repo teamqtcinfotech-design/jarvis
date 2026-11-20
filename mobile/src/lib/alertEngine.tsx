@@ -1130,6 +1130,24 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         }
         return;
       }
+      if (question.kind === 'approve') {
+        // An approval asked of him: yes approves, no declines; whoever asked is told by the server. Deciding counts
+        // as seen, so the ringing stops too.
+        clearKey(item);
+        try {
+          if (question.task) {
+            await api(`/shared-tasks/${question.task}/approve/`, { method: 'POST', body: { approve: yes }, idempotencyKey: newIdempotencyKey() });
+          }
+          if (item.alertId) await api(`/alerts/${item.alertId}/ack/`, { method: 'POST', body: { seen: false } }).catch(() => undefined);
+          dataChanged.emit();
+          if (yes) sayTwin(`Approved, ${address}. I've told them.`, `मंज़ूर कर दिया, ${addressHi}। उन्हें बता दिया।`, { interrupt: true });
+          else sayTwin(`Declined, ${address}. I've told them.`, `मंज़ूर नहीं किया, ${addressHi}। उन्हें बता दिया।`, { interrupt: true });
+        } catch (e) {
+          const msg = e instanceof ApiError ? e.message : "I couldn't reach the server.";
+          sayTwin(`Sorry ${address}, ${msg}`, `माफ़ कीजिए ${addressHi}, ${msg}`, { interrupt: true });
+        }
+        return;
+      }
       if (question.kind === 'signout') {
         // "Signed in on another phone — not you?": yes signs that phone out at once; no = it was them.
         clearKey(item);

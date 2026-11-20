@@ -40,6 +40,45 @@ class LoginSerializer(TokenObtainPairSerializer):
         return data
 
 
+class StepsField(serializers.ListField):
+    """A checklist: up to 40 steps, each "text" or {"text", "done"}."""
+    child = serializers.JSONField()
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("max_length", 40)
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, data):
+        items = super().to_internal_value(data)
+        out = []
+        for s in items:
+            if isinstance(s, str):
+                s = {"text": s}  # no "done": a plain text keeps the tick it already has (services.set_steps)
+            if not isinstance(s, dict) or not str(s.get("text") or "").strip():
+                raise serializers.ValidationError("Each step needs its text.")
+            clean = {"text": str(s["text"]).strip()[:200]}
+            if "done" in s:
+                clean["done"] = bool(s.get("done"))
+            out.append(clean)
+        return out
+
+
+class AmountField(serializers.Field):
+    """Rupees as a number or as said ("1.5 lakh", "50,000"); None when empty."""
+
+    def to_internal_value(self, data):
+        from .services import clean_amount
+        if data in (None, ""):
+            return None
+        amount = clean_amount(data)
+        if amount is None:
+            raise serializers.ValidationError("Enter an amount in rupees.")
+        return amount
+
+    def to_representation(self, value):
+        return float(value) if value is not None else None
+
+
 class TaskInputSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=200, trim_whitespace=True)
     notes = serializers.CharField(max_length=2000, required=False, allow_blank=True, default="")
@@ -54,6 +93,12 @@ class TaskInputSerializer(serializers.Serializer):
     announcement = serializers.CharField(max_length=300, required=False, allow_blank=True, default="")
     # "In 5 minutes": the exact moment, seconds included (then due_date / due_time are not needed).
     due_at = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    # Nov 2026: a repeat rule ("daily", "weekly:0,2", "monthly:10", "yearly:03-31"), when it ends, the checklist,
+    # and the amount of an approval or a payment (rupees).
+    repeat = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    repeat_until = serializers.DateField(required=False, allow_null=True)
+    steps = StepsField(required=False)
+    amount = AmountField(required=False, allow_null=True)
 
     def validate(self, attrs):
         if attrs.get("due_time") and not attrs.get("due_date") and not attrs.get("due_at"):
@@ -104,6 +149,9 @@ class TaskPatchSerializer(serializers.Serializer):
     duration_minutes = serializers.IntegerField(required=False, allow_null=True, min_value=5, max_value=1440)
     remind_before_minutes = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=1440)
     reason = serializers.CharField(max_length=300, required=False, allow_blank=True, default="")
+    repeat = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    repeat_until = serializers.DateField(required=False, allow_null=True)
+    amount = AmountField(required=False, allow_null=True)
 
     def changes(self) -> dict:
         data = dict(self.validated_data)
@@ -114,6 +162,27 @@ class TaskPatchSerializer(serializers.Serializer):
 
 class VersionSerializer(serializers.Serializer):
     expected_version = serializers.IntegerField(min_value=1)
+
+
+class StepsPatchSerializer(serializers.Serializer):
+    """The checklist: the whole list (steps), or one step ticked (index + done)."""
+    steps = StepsField(required=False)
+    index = serializers.IntegerField(required=False, min_value=0, max_value=39)
+    done = serializers.BooleanField(required=False, default=True)
+
+    def validate(self, attrs):
+        if "steps" not in attrs and "index" not in attrs:
+            raise serializers.ValidationError("Send the steps, or the index of the step to tick.")
+        return attrs
+
+
+class NoteSerializer(serializers.Serializer):
+    text = serializers.CharField(max_length=1000, trim_whitespace=True)
+
+
+class ApproveSerializer(serializers.Serializer):
+    approve = serializers.BooleanField()
+    note = serializers.CharField(max_length=300, required=False, allow_blank=True, default="")
 
 
 class ConversationTurnSerializer(serializers.Serializer):

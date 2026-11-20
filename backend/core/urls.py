@@ -35,6 +35,13 @@ urlpatterns = [
     path("shared-tasks/<uuid:task_id>/", views.SharedTaskDetailView.as_view()),
     path("shared-tasks/<uuid:task_id>/complete/", views.SharedTaskCompleteView.as_view()),
     path("shared-tasks/<uuid:task_id>/history/", views.TaskHistoryView.as_view()),
+    path("shared-tasks/<uuid:task_id>/notes/", views.TaskNoteView.as_view()),
+    path("shared-tasks/<uuid:task_id>/steps/", views.TaskStepsView.as_view(scope="shared")),
+    path("shared-tasks/<uuid:task_id>/approve/", views.TaskApproveView.as_view()),
+    path("shared-tasks/<uuid:task_id>/files/", views.TaskFilesView.as_view(scope="shared")),
+    path("private-tasks/<uuid:task_id>/steps/", views.TaskStepsView.as_view(scope="private")),
+    path("private-tasks/<uuid:task_id>/files/", views.TaskFilesView.as_view(scope="private")),
+    path("files/<uuid:file_id>/", views.FileView.as_view()),
     # MD -> PA tasks (inside JARVIS)
     path("pa-tasks/", views.PaTaskListView.as_view()),
     path("pa-tasks/self/", views.PaSelfTaskView.as_view()),

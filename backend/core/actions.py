@@ -29,10 +29,10 @@ LEGACY = {"pa_task": "person_task", "mg_task": "person_task", "pa_meeting": "per
 
 
 def _task_data(p: dict) -> dict:
-    return {
+    data = {
         "title": (p.get("title") or "").strip(),
         "notes": p.get("notes") or "",
-        "kind": p.get("kind") if p.get("kind") in {"TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"} else "TASK",
+        "kind": p.get("kind") if p.get("kind") in {"TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL"} else "TASK",
         "priority": p.get("priority") if p.get("priority") in {"URGENT", "HIGH", "NORMAL", "LOW"} else "NORMAL",
         "due_date": date.fromisoformat(p["due_date"]) if p.get("due_date") else None,
         "due_time": time.fromisoformat(p["due_time"]) if p.get("due_time") else None,
@@ -42,6 +42,26 @@ def _task_data(p: dict) -> dict:
         "announcement": p.get("announcement") or "",
         "description": (p.get("transcript") or "")[:5000],
     }
+    # Nov 2026: the repeat rule, the checklist, the amount (each only when the card carries it).
+    if p.get("repeat"):
+        data["repeat"] = str(p["repeat"])[:40]
+    if p.get("repeat_until"):
+        try:
+            data["repeat_until"] = date.fromisoformat(str(p["repeat_until"])[:10])
+        except ValueError:
+            pass
+    if isinstance(p.get("steps"), list) and p["steps"]:
+        data["steps"] = [s for s in p["steps"] if isinstance(s, (str, dict))][:40]
+    if p.get("amount"):
+        data["amount"] = p["amount"]
+    return data
+
+
+def _repeat_tail(data: dict) -> tuple[str, str]:
+    """" It repeats every month on the 10th." (and the Hindi twin) for a repeating item, else nothing."""
+    from . import recurrence  # noqa: PLC0415
+    en, hi = recurrence.describe(recurrence.settle(str(data.get("repeat") or ""), data.get("due_date") or tu.today_local()))
+    return (f" It repeats {en}.", f" ये {hi} दोहराया जाएगा।") if en else ("", "")
 
 
 def _people_of(user: User, p: dict) -> list[User]:
@@ -87,16 +107,17 @@ def run_item(user: User, p: dict) -> dict:
     if action in {"person_task", "person_meeting", "own_task", "private_task", "md_request"} and not (p.get("title") or "").strip():
         raise ServiceError("invalid", "the task has no title.", 422)
     data = _task_data(p)
+    rep_en, rep_hi = _repeat_tail(data)
     if action == "private_task":
         task = services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
         when = f" I'll remind you {due_en}." if due_en else ""
-        return {"en": f"Saved, {address}.{when}", "hi": f"सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else ""),
+        return {"en": f"Saved, {address}.{when}{rep_en}", "hi": f"सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
                 "undo": [{"type": "private", "id": str(task.id)}], "title": task.title}
     if action == "own_task":
         task = services.create_own_task(user, data)
         when = f" I'll remind you {due_en}." if due_en else ""
-        return {"en": f"Saved in your own work, {address}.{when}",
-                "hi": f"आपके अपने काम में सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else ""),
+        return {"en": f"Saved in your own work, {address}.{when}{rep_en}",
+                "hi": f"आपके अपने काम में सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
                 "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title}
     if action == "md_request":
         # Work for the MD from anyone else: straight onto his list (ringing until he sees it), like work for anyone.
@@ -105,9 +126,14 @@ def run_item(user: User, p: dict) -> dict:
             raise ServiceError("no_person", "I don't know who should get this.", 422)
         task = services.create_person_task(user, md, data)
         sir, sir_hi, he = services.md_address(), services.md_address_hi(), services.md_pronouns()[0]
+        if task.kind == "APPROVAL":
+            amt = services.rupees(task.amount)
+            return {"en": f"Done, {address}: I've asked {sir}'s approval" + (f" for {amt}" if amt else "") + f". I'll tell you what {he} decides.",
+                    "hi": f"हो गया, {address_hi}: {sir_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।",
+                    "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [md.spoken_name]}
         when = f" for {due_en}" if due_en else ""
-        return {"en": f"Done, {address}: it's on {sir}'s list{when}. I'll tell you when {he} has seen it, and when it's done.",
-                "hi": f"हो गया, {address_hi}: {sir_hi} की लिस्ट में डाल दिया" + (f", {due_hi}" if due_hi else "") + "। देख लेने पर और पूरा होने पर बताऊँगा।",
+        return {"en": f"Done, {address}: it's on {sir}'s list{when}.{rep_en} I'll tell you when {he} has seen it, and when it's done.",
+                "hi": f"हो गया, {address_hi}: {sir_hi} की लिस्ट में डाल दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} देख लेने पर और पूरा होने पर बताऊँगा।",
                 "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [md.spoken_name]}
     if action in {"person_task", "person_meeting"}:
         people = _people_of(user, p)
@@ -128,12 +154,16 @@ def run_item(user: User, p: dict) -> dict:
             names.append(person)
         who, who_hi = services.names_phrase(names), services.names_phrase(names, hindi=True)
         if meeting:
-            en = f"Saved, {address}. I've told {who}, and I'll remind you both."
-            hi = f"सेव हो गया, {address_hi}। {who_hi} को बता दिया है, और आप दोनों को याद दिला दूँगा।"
+            en = f"Saved, {address}. I've told {who}, and I'll remind you both.{rep_en}"
+            hi = f"सेव हो गया, {address_hi}। {who_hi} को बता दिया है, और आप दोनों को याद दिला दूँगा।{rep_hi}"
+        elif data["kind"] == "APPROVAL":
+            amt = services.rupees(services.clean_amount(data.get("amount")))
+            en = f"Done, {address}: I've asked {who}'s approval" + (f" for {amt}" if amt else "") + ". I'll tell you what they decide."
+            hi = f"हो गया, {address_hi}: {who_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।"
         else:
             when = f" for {due_en}" if due_en else ""
-            en = f"Done, {address}: given to {who}{when}. I'll tell you when it's done."
-            hi = f"हो गया, {address_hi}: {who_hi} को दे दिया" + (f", {due_hi}" if due_hi else "") + "। पूरा होने पर बताऊँगा।"
+            en = f"Done, {address}: given to {who}{when}.{rep_en} I'll tell you when it's done."
+            hi = f"हो गया, {address_hi}: {who_hi} को दे दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} पूरा होने पर बताऊँगा।"
         return {"en": en, "hi": hi, "undo": refs, "title": p.get("title", ""), "people": [u.spoken_name for u in names]}
     if action == "organise":
         # A department or section change the speaker confirmed (removing people, deleting, merging): see organise.py.

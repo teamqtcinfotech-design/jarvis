@@ -188,6 +188,70 @@ def suggest(user: User, *, minutes: int, prefs: dict, day: date | None = None, n
     return None
 
 
+def common_free(users: list, day: date, minutes: int, prefs_by_user: dict, not_before: datetime | None = None,
+                exclude_ids=()) -> list[tuple[datetime, datetime]]:
+    """Free stretches on the day where EVERY one of these people is free for at least ``minutes`` (each inside their
+    own office hours and routine; a weekly off for any of them means no slot that day)."""
+    need = timedelta(minutes=minutes)
+    slots = None
+    for u in users:
+        mine = free_slots(u, day, minutes, prefs_by_user.get(u.id) or {}, not_before, exclude_ids)
+        if slots is None:
+            slots = mine
+            continue
+        merged = []
+        for a0, a1 in slots:
+            for b0, b1 in mine:
+                s, e = max(a0, b0), min(a1, b1)
+                if e - s >= need:
+                    merged.append((s, e))
+        slots = merged
+    return slots or []
+
+
+def suggest_common(users: list, *, minutes: int, prefs_by_user: dict, day: date | None = None,
+                   not_before: datetime | None = None, exclude_ids=()) -> dict | None:
+    """The first slot free for all of them: on ``day`` after ``not_before``, else on the following working days."""
+    now = tu.now_local()
+    base = day or now.date()
+    for i in range(LOOKAHEAD_DAYS + 1):
+        d = base + timedelta(days=i)
+        if d < now.date():
+            continue
+        floor = now if d == now.date() else None
+        if i == 0 and not_before and (floor is None or not_before > floor):
+            floor = not_before
+        for start, end in common_free(users, d, minutes, prefs_by_user, floor, exclude_ids):
+            local = tu.to_local(start)
+            return {"due_date": d.isoformat(), "due_time": local.strftime("%H:%M"), "start": start, "end": end,
+                    "same_day": d == base}
+    return None
+
+
+def review_group(users: list, *, kind: str, due_date: str, due_time: str, minutes: int | None, prefs_by_user: dict,
+                 exclude_ids=()) -> dict:
+    """Facts about one proposed slot for several people together (a meeting with two or three of the team): whose
+    diary clashes (each clash carries its person), one slot free for all, and whether the day is anyone's off day."""
+    d = date.fromisoformat(due_date) if due_date else None
+    mins = minutes or DEFAULT_MINUTES.get(kind, 30)
+    out = {"clashes": [], "suggested": None, "load": None, "off_day": False, "needs_slot": False, "minutes": mins}
+    if d and due_time:
+        start = tu.combine_local(d, time.fromisoformat(due_time))
+        end = start + timedelta(minutes=mins)
+        for u in users:
+            for c in clashes(u, start, end, prefs_by_user.get(u.id) or {}, exclude_ids):
+                out["clashes"].append({**c, "person": u})
+        if out["clashes"]:
+            out["suggested"] = suggest_common(users, minutes=mins, prefs_by_user=prefs_by_user, day=d, not_before=start,
+                                             exclude_ids=exclude_ids)
+    elif kind in (Kind.MEETING, Kind.CALL):
+        out["needs_slot"] = True
+        out["suggested"] = suggest_common(users, minutes=mins, prefs_by_user=prefs_by_user, day=d, exclude_ids=exclude_ids)
+    if d:
+        out["off_day"] = any(is_off_day(prefs_by_user.get(u.id) or {}, d) for u in users)
+    return out
+
+
 def day_load(user: User, day: date, prefs: dict, exclude_ids=()) -> dict:
     timed = commitments(user, day, exclude_ids)
     dated = dated_items(user, day, exclude_ids)

@@ -1,7 +1,24 @@
 /** MD; the PA; the manager; TM = every other team member (accountant, farm manager, director ...). */
 export type Role = 'MD' | 'PA' | 'MG' | 'TM';
 export type Priority = 'URGENT' | 'HIGH' | 'NORMAL' | 'LOW';
-export type Kind = 'TASK' | 'MEETING' | 'CALL' | 'PAYMENT' | 'FOLLOW_UP';
+export type Kind = 'TASK' | 'MEETING' | 'CALL' | 'PAYMENT' | 'FOLLOW_UP' | 'APPROVAL';
+
+/** One step of a task's checklist. */
+export interface TaskStep {
+  text: string;
+  done: boolean;
+}
+
+/** A photo, document or voice note on a task (the bytes come from /files/<id>/). */
+export interface TaskFile {
+  id: string;
+  name: string;
+  content_type: string;
+  size: number;
+  kind: 'photo' | 'voice' | 'document';
+  uploader: string;
+  created_at: string;
+}
 export type Status = 'OPEN' | 'IN_PROGRESS' | 'BLOCKED' | 'COMPLETED' | 'CANCELLED';
 
 export interface SessionUser {
@@ -73,6 +90,24 @@ export interface TaskItem {
   section?: string;
   section_id?: number | null;
   section_colour?: string;
+  /** Repeats: the rule ("monthly:10"), how it reads ("every month on the 10th"), when it ends, and the occurrence
+   *  this one was made from. Empty = once. */
+  repeat?: string;
+  repeat_label?: string;
+  repeat_label_hi?: string;
+  repeat_until?: string | null;
+  repeat_of?: string | null;
+  /** The checklist inside the task. */
+  steps?: TaskStep[];
+  steps_done?: number;
+  steps_total?: number;
+  /** An approval's amount (rupees) and how it reads ("₹1,50,000"). */
+  amount?: number | null;
+  amount_label?: string;
+  /** How many photos / files are on it. */
+  files_count?: number;
+  /** Whose hands it passed through ("Sir", "Mansi", "Nikki") once it was handed on; empty otherwise. */
+  chain?: string[];
 }
 
 /** A department: a group of people on the team (never the MD, the manager or the PA). */
@@ -246,7 +281,7 @@ export interface Reminder {
 export interface AlertQuestion {
   /** promise / unseen / reassign take free words ("kal shaam tak", "Sunil ko de do"): the server reads the answer
    *  (POST /alerts/<id>/answer/). The others are a yes or a no, carried out by the app. */
-  kind: 'accept' | 'done' | 'seen' | 'move' | 'promise' | 'unseen' | 'reassign' | 'signout';
+  kind: 'accept' | 'done' | 'seen' | 'move' | 'promise' | 'unseen' | 'reassign' | 'signout' | 'approve';
   /** signout: the sign-in (session) on another phone that "Sign it out" ends. */
   session?: string;
   /** Appended to the spoken line; empty when the line itself already asks (a check-in). */
@@ -255,7 +290,7 @@ export interface AlertQuestion {
   /** move: the item a yes moves, and the day it goes to. */
   target?: { id: string; scope: 'private' | 'shared'; title: string; version?: number };
   to?: string;
-  /** unseen / reassign: the work it is about. */
+  /** unseen / reassign / approve: the work it is about. */
   task?: string;
 }
 
@@ -399,12 +434,13 @@ export interface DataView {
 export interface ScheduleAdvice {
   /** His own meeting over another one: the card cannot be saved until he picks a way out. */
   hard?: boolean;
-  for: 'self' | 'person' | 'pa' | 'md';
+  for: 'self' | 'person' | 'pa' | 'md' | 'group';
   asked: number;
   question: string;
   question_hi: string;
   notes: string[];
-  clashes: { title: string; start: string; end: string; label: string }[];
+  /** `who`: for a meeting with several people, whose diary the clash is in ("You", "Mansi"). */
+  clashes: { title: string; start: string; end: string; label: string; who?: string }[];
   suggested: { due_date: string; due_time: string; label: string } | null;
   load: { count: number; heavy: boolean } | null;
   off_day: boolean;
@@ -428,6 +464,13 @@ export interface Draft {
   duration_minutes: number | null;
   remind_before_minutes: number | null;
   announcement: string;
+  /** Repeats (the rule the server read from the words, and how it reads), the checklist, the amount. */
+  repeat?: string;
+  repeat_label?: string;
+  repeat_label_hi?: string;
+  steps?: string[];
+  amount?: number | null;
+  amount_label?: string;
   /** snooze: when the reminder or alert JARVIS just spoke comes back. */
   snooze_until?: string;
   /** More than one thing in one breath: every further item (its own kind, time, person, destination). One yes saves all. */

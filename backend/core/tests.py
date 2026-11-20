@@ -3389,9 +3389,15 @@ class CommandSchemaSizeTests(TestCase):
         item = ai_brain.COMMAND_SCHEMA["properties"]["more_items"]["items"]
         self.assertLessEqual(len(item["required"]), 9)
         self.assertEqual(set(item["required"]), set(item["properties"]))
-        self.assertLessEqual(len(ai_brain.COMMAND_SCHEMA["required"]), 52)
+        self.assertLessEqual(len(ai_brain.COMMAND_SCHEMA["required"]), 51)
         enums = [k for k, v in ai_brain.COMMAND_SCHEMA["properties"].items() if "enum" in v]
         self.assertLessEqual(len(enums), 4, enums)
+        # 20 Nov 2026: the budget is full. Three new top-level strings (repeat_words, steps, amount) fit only after
+        # "confidence" went and new_contacts became plain strings; one more top-level string is refused (measured).
+        arrays_of_objects = [k for k, v in ai_brain.COMMAND_SCHEMA["properties"].items()
+                             if v.get("type") == "array" and v.get("items", {}).get("type") == "object" and k != "more_items"]
+        self.assertEqual(arrays_of_objects, [])
+        self.assertNotIn("confidence", ai_brain.COMMAND_SCHEMA["properties"])
 
 
 class LiveDefaultsTests(BaseCase):

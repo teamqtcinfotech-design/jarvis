@@ -15,11 +15,12 @@ from .models import Kind, PrivateTask, SharedTask, Status, TaskEvent
 
 VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
               "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person",
-              "department", "departments", "section", "messages"]
+              "department", "departments", "section", "messages", "approvals"]
 
 _PROGRESS = {Status.OPEN: 0, Status.IN_PROGRESS: 50, Status.BLOCKED: 50, Status.COMPLETED: 100, Status.CANCELLED: 0}
 _REMOTE_PROGRESS = {"todo": 0, "working": 50, "waiting": 50, "done": 100}
-_KIND_WORD = {Kind.TASK: "Task", Kind.MEETING: "Meeting", Kind.CALL: "Call", Kind.PAYMENT: "Payment", Kind.FOLLOW_UP: "Follow-up"}
+_KIND_WORD = {Kind.TASK: "Task", Kind.MEETING: "Meeting", Kind.CALL: "Call", Kind.PAYMENT: "Payment", Kind.FOLLOW_UP: "Follow-up",
+              Kind.APPROVAL: "Approval"}
 
 
 def _minutes(dt: datetime) -> int:
@@ -730,6 +731,66 @@ def _history_view(user, include_private: bool, p: dict) -> dict:
     return view
 
 
+def _approvals_view(user, p: dict) -> dict:
+    """Approvals (Nov 2026): what waits for a decision, and what was approved or declined in the period (the last 30
+    days when none was said), with the amounts added up. The MD sees every approval; anyone else those they asked
+    for or were asked to decide."""
+    address, address_hi = _addr(user)
+    today = tu.today_local()
+    start = p.get("from") or today - timedelta(days=30)
+    end = p.get("to") or today
+    qs = services.visible_shared_qs(user).filter(kind=Kind.APPROVAL).order_by("-created_at")
+    if p.get("who") and p["who"].lower() not in listviews_me():
+        subject = services.find_people(p["who"], exclude=None)
+        if subject["status"] in ("known", "close"):
+            ids = [u.id for u in subject["people"]]
+            qs = qs.filter(Q(created_by_id__in=ids) | Q(assignee_user_id__in=ids))
+    day_start, _ = tu.day_bounds(start)
+    _, day_end = tu.day_bounds(end)
+    rows, waiting, approved_total, approved_n, declined_n = [], 0, 0.0, 0, 0
+    for t in qs[:300]:
+        open_ = not t.is_closed
+        decided = t.completed_at or t.updated_at
+        if not open_ and not (decided and day_start <= decided < day_end):
+            continue
+        item = services.shared_item(t)
+        row = _row(item, True)
+        asked_by = "You" if t.created_by_id == user.id else services._person_words(t.created_by)[0]
+        asked_of = "You" if t.assignee_user_id == user.id else services._person_words(t.assignee_user)[0] if t.assignee_user_id else ""
+        row["who"] = f"{asked_by} → {asked_of}"
+        row["amount"] = item["amount_label"]
+        if open_:
+            waiting += 1
+            row["status"] = "Waiting"
+        elif t.status == Status.COMPLETED:
+            approved_n += 1
+            approved_total += float(t.amount or 0)
+            row["status"] = "Approved"
+        else:
+            declined_n += 1
+            row["status"] = "Declined"
+        row["day"] = tu.fmt_day(tu.to_local(decided).date()) if not open_ and decided else (row["day"] or "No date")
+        rows.append(row)
+    rows.sort(key=lambda r: (0 if r["status"] == "Waiting" else 1))
+    period_en, period_hi = _period_words(start, end)
+    view = _table("approvals", "Approvals", rows[:80], [("status", "Status"), ("title", "What"), ("amount", "Amount"), ("who", "Asked by → of")],
+                  subtitle=f"{waiting} waiting · {approved_n} approved · {declined_n} declined, {period_en}")
+    view["stats"] = [
+        {"label": "Waiting", "value": waiting, "tone": "warn" if waiting else "muted", "icon": "hourglass-outline"},
+        {"label": "Approved", "value": approved_n, "tone": "success", "icon": "checkmark-circle-outline"},
+        {"label": "Approved ₹", "value": services.rupees(approved_total) if approved_total else "₹0", "tone": "accent", "icon": "cash-outline"},
+        {"label": "Declined", "value": declined_n, "tone": "danger" if declined_n else "muted", "icon": "close-circle-outline"},
+    ]
+    first = next((r for r in rows if r["status"] == "Waiting"), None)
+    en = (f"{waiting} approval{'s' if waiting != 1 else ''} waiting" + (f", first {first['title']} ({first['amount']})" if first and first["amount"] else f", first {first['title']}" if first else "")
+          + f"; {approved_n} approved ({services.rupees(approved_total) if approved_total else '₹0'}) and {declined_n} declined {period_en}.")
+    hi = (f"{waiting} मंज़ूरी इंतज़ार में" + (f", पहली {first['title']} ({first['amount']})" if first and first["amount"] else f", पहली {first['title']}" if first else "")
+          + f"; {period_hi} {approved_n} मंज़ूर ({services.rupees(approved_total) if approved_total else '₹0'}) और {declined_n} नामंज़ूर।")
+    if not rows:
+        en, hi = f"no approvals {period_en}.", f"{period_hi} कोई मंज़ूरी नहीं।"
+    return _summ(view, address, address_hi, en, hi)
+
+
 def _pending_view(user, dash: dict, include_private: bool, official_only: bool = False) -> dict:
     """Everything still open, late first. Sir's rows say Official or Personal (personal rows only when the phone
     is unlocked, never in the official view); Mansi's say whether Sir gave it or it is her own. She has no
@@ -875,6 +936,8 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         return _done_report(user, include_private, p)  # "Mansi ne pichhle mahine kya complete kiya", however the model files it
     if kind == "messages":
         return _messages_report(user, p)
+    if kind == "approvals":
+        return _approvals_view(user, p)
     if kind == "history":
         view = _history_view(user, include_private, p)
         address, address_hi = _addr(user)

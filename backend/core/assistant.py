@@ -12,7 +12,7 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
-from . import ai_brain, datacards, hinglish_parser, scheduling, services
+from . import ai_brain, datacards, hinglish_parser, recurrence, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
 from .models import Alert, Kind, Priority, PrivateTask, SharedTask, User
@@ -316,6 +316,9 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
     # A plain reminder ("2 minute baad yaad dilana") is the speaker's own: never "whose is it?".
     if cmd.get("kind") == "REMINDER" and intent in {"create_task", "needs_destination", "request_for_md"}:
         return "create_task" if user.is_md else "pa_own"
+    # An approval with nobody named is asked of the MD (the usual case: "50 hazaar ka approval chahiye").
+    if cmd.get("kind") == "APPROVAL" and intent in {"create_task", "needs_destination", "request_for_md"} and not names and not user.is_md:
+        return "request_for_md"
     if intent == "send_alert":
         return intent
     # "All staff / Accounts team" said as a person's name -> work for a group.
@@ -355,7 +358,8 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
             # The words name the person even when the reading did not list them ("meri PA ke saath meeting").
             mates = _team_in_text(user, (cmd.get("title") or "") if one_of_many else text)
         if mates and (said_with or intent == "meet_with_person"):
-            cmd["staff_name"], cmd["recipients"] = mates[0].spoken_name, [mates[0].spoken_name]
+            # Everyone named attends ("Nikki aur Mansi ke saath meeting"): one meeting, every diary looked at.
+            cmd["staff_name"], cmd["recipients"] = mates[0].spoken_name, [m.spoken_name for m in mates]
             if mates[0].is_md and not user.is_md:
                 intent = "request_for_md"
             else:
@@ -809,10 +813,15 @@ def _slot_of(user: User, draft: dict):
         return whose, kind, due_date, due_time, task.estimated_minutes, [str(task.id)], subject
     if whose == "md":
         subject = services.get_md()
+    elif draft.get("action") == "person_meeting":
+        # A meeting with people on the team: everyone's diary, the speaker's included (see _advise_schedule).
+        ids = [a.get("id") for a in (draft.get("assignees") or []) if isinstance(a, dict)]
+        others = [p for p in User.objects.filter(id__in=ids, is_active=True) if p.id != user.id]
+        subject = [user] + others if others else user
     elif whose == "person":
         ids = [a.get("id") for a in (draft.get("assignees") or []) if isinstance(a, dict)]
         if len(ids) != 1:
-            return None  # work for several people: nobody's diary in particular
+            return None  # a task for several people is given whatever their diaries hold: nobody's slot in particular
         subject = User.objects.filter(id=ids[0]).first()
         if subject is None:
             return None
@@ -846,6 +855,17 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         return  # a task with no day needs no slot
     if subject is None:
         return
+    if isinstance(subject, list):
+        # A meeting with others: when the speaker's own diary is clear (or there are several others), everyone's
+        # diary is read together and the time offered is free for all; the speaker's own clash keeps the usual
+        # choices (keep it short, move the others, move this one).
+        own = scheduling.review(user, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes,
+                                prefs=services.get_prefs(user), exclude_ids=exclude) if due_date and due_time else {}
+        own_clash = any(c.get("routine") or c.get("kind") in (Kind.MEETING, Kind.CALL) for c in own.get("clashes") or [])
+        if len(subject) > 2 or not own_clash:
+            _advise_group(user, draft, address, subject, kind, due_date, due_time, minutes, exclude, asked)
+            return
+        subject = user
     prefs = services.get_prefs(subject)
     if not minutes and kind == Kind.MEETING:
         # No length said: the person's usual meeting length (what the confirmation tells him), not a fixed hour.
@@ -995,6 +1015,92 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         draft["spoken_reply"] = _insert_notes(draft["spoken_reply"], notes_en)
 
 
+def _advise_group(user: User, draft: dict, address: str, people: list, kind: str, due_date: str, due_time: str,
+                  minutes: int | None, exclude: list, asked: int) -> None:
+    """A meeting with two or more of the team: everyone's diary is looked at together. Whoever is busy is named
+    (the MD only as busy, never with what); the time offered is the first one free for all of them. Nothing moves
+    until the speaker answers."""
+    address_hi = services.address_hi_of(user)
+    sir, sir_hi = services.md_address(), services.md_address_hi()
+    prefs_by_user = {p.id: services.get_prefs(p) for p in people}
+    if not minutes and kind == Kind.MEETING:
+        minutes = int(prefs_by_user[user.id].get("meetingMinutes") or 0) or None
+        if minutes and not draft.get("duration_minutes"):
+            draft["duration_minutes"] = minutes
+    review = scheduling.review_group(people, kind=kind, due_date=due_date, due_time=due_time, minutes=minutes,
+                                     prefs_by_user=prefs_by_user, exclude_ids=exclude)
+    # Only a meeting or a call (or a fixed routine block) stands in a meeting's way.
+    clashes = [c for c in review.get("clashes") or [] if c.get("routine") or c.get("kind") in (Kind.MEETING, Kind.CALL)]
+    sug = review.get("suggested")
+    d = date.fromisoformat(due_date) if due_date else None
+    day_en = tu.fmt_day(d) if d else ""
+    day_hi = tu.fmt_day_hi(d) if d else ""
+    when_en = _due_label(due_date, due_time)
+    when_hi = f"{day_hi} {tu.fmt_time_hi(tu.combine_local(d, time.fromisoformat(due_time)))}" if d and due_time else day_hi
+    alt_en = alt_hi = ""
+    if sug:
+        s_local = tu.to_local(sug["start"])
+        alt_en = tu.fmt_time(sug["start"]) if sug["same_day"] or not d else f"{tu.fmt_day(s_local.date())} at {tu.fmt_time(sug['start'])}"
+        alt_hi = tu.fmt_time_hi(sug["start"]) if sug["same_day"] or not d else f"{tu.fmt_day_hi(s_local.date())} {tu.fmt_time_hi(sug['start'])}"
+    item = draft.get("title") or "the meeting"
+    who_all = services.names_phrase([p for p in people if p.id != user.id])
+    who_all_hi = services.names_phrase([p for p in people if p.id != user.id], hindi=True)
+    notes_en, notes_hi, warnings = [], [], []
+    if review.get("off_day"):
+        notes_en.append(f"{day_en[:1].upper() + day_en[1:]} is a weekly off for someone in it.")
+        notes_hi.append(f"{day_hi} किसी की छुट्टी का दिन है।")
+        warnings.append(f"{day_en} is a weekly off for someone")
+    question_en = question_hi = ""
+    busy_en, busy_hi, hard = [], [], False
+    seen = set()
+    for c in clashes:
+        p = c["person"]
+        if p.id in seen:
+            continue
+        seen.add(p.id)
+        if p.id == user.id:
+            busy_en.append(f"you have {c['title']}")
+            busy_hi.append(f"आपकी {c['title']} है")
+            hard = hard or not c.get("routine")
+        elif p.is_md and not user.is_md:
+            busy_en.append(f"{sir} is busy")
+            busy_hi.append(f"{sir_hi} बिज़ी हैं")
+        else:
+            busy_en.append(f"{p.spoken_name} has {c['title']}")
+            busy_hi.append(f"{p.spoken_name} की {c['title']} है")
+        warnings.append(f"{'You' if p.id == user.id else p.spoken_name}: {c['title']} ({tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])})")
+    if busy_en:
+        head_en = f"{address}, {item} with {who_all} {when_en}: " + "; ".join(busy_en) + " then."
+        head_hi = f"{address_hi}, {when_hi} {who_all_hi} के साथ {item}: उस समय " + "; ".join(busy_hi) + "।"
+        tail_en = f" Shall I put it at {alt_en}, when all of you are free?" if sug else " Shall I save it anyway?"
+        tail_hi = f" {alt_hi} रख दूँ, जब सब फ्री हैं?" if sug else " फिर भी सेव कर दूँ?"
+        question_en, question_hi = _insert_notes(head_en + tail_en, notes_en), _insert_notes(head_hi + tail_hi, notes_hi, hindi=True)
+    elif review.get("needs_slot") and sug:
+        s_en, e_en = tu.fmt_time(sug["start"]), tu.fmt_time(sug["end"])
+        s_hi, e_hi = tu.fmt_time_hi(sug["start"]), tu.fmt_time_hi(sug["end"])
+        s_day = tu.to_local(sug["start"]).date()
+        if d:
+            question_en = f"{address}, {item} with {who_all} {day_en}: all of you are free {s_en}–{e_en}. Shall I put it at {s_en}?"
+            question_hi = f"{address_hi}, {day_hi} आप सब {s_hi} से {e_hi} तक फ्री हैं। {s_hi} रख दूँ?"
+        else:
+            question_en = f"{address}, {item} with {who_all}: all of you are free {tu.fmt_day(s_day)} {s_en}–{e_en}. Shall I put it then?"
+            question_hi = f"{address_hi}, {tu.fmt_day_hi(s_day)} आप सब {s_hi} से {e_hi} तक फ्री हैं। तब रख दूँ?"
+        question_en, question_hi = _insert_notes(question_en, notes_en), _insert_notes(question_hi, notes_hi, hindi=True)
+    draft["schedule"] = {
+        "for": "group", "asked": asked, "question": question_en, "question_hi": question_hi, "notes": notes_en, "notes_hi": notes_hi,
+        "clashes": [{"title": "" if (c["person"].is_md and not user.is_md) else c["title"], "start": c["start"].isoformat(),
+                     "end": c["end"].isoformat(), "label": f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}",
+                     "who": "You" if c["person"].id == user.id else c["person"].spoken_name} for c in clashes[:4]],
+        "suggested": ({"due_date": sug["due_date"], "due_time": sug["due_time"], "label": alt_en} if sug else None),
+        "options": {}, "hard": hard, "load": None, "off_day": bool(review.get("off_day")), "base_reply": draft.get("spoken_reply", ""),
+    }
+    draft["warnings"] = list(draft.get("warnings") or []) + warnings
+    if question_en:
+        draft["spoken_reply"] = question_en
+    elif notes_en and draft.get("spoken_reply"):
+        draft["spoken_reply"] = _insert_notes(draft["spoken_reply"], notes_en)
+
+
 def _similar_item(user: User, title: str, day: date, skip_ids=(), kinds=None) -> str:
     """The title of an open item on that day that looks like the same thing ("Meeting with Sharma ji" twice)."""
     want = " ".join(re.findall(r"\w+", (title or "").lower()))
@@ -1027,13 +1133,12 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
     moment") — asked once, never as a gate; if they carry on without answering, the name is kept as an outside
     contact so it is not asked again. For an item given to someone else nothing is asked at all."""
     saved = []
-    for c in (cmd.get("new_contacts") or [])[:3]:
-        if isinstance(c, dict) and str(c.get("name") or "").strip():
-            try:
-                services.add_contact(user, str(c["name"]), str(c.get("note") or ""))
-                saved.append(_person_label(str(c["name"])))
-            except services.ServiceError:
-                pass
+    for c in _contacts_of(cmd):
+        try:
+            services.add_contact(user, c["name"], c["note"])
+            saved.append(_person_label(c["name"]))
+        except services.ServiceError:
+            pass
     # The person doing the work (or getting the message) is resolved by its own step, which asks its own "which
     # Rahul?" question; the people it is WITH or ABOUT are looked at here.
     doers = {services.norm_person(n) for n in _recipients_of(cmd)} if draft["action"] in _FOR_SOMEONE_ELSE else set()
@@ -1072,13 +1177,12 @@ def _check_people(user: User, cmd: dict, draft: dict, address: str, history: lis
 def _save_contacts(user: User, cmd: dict, draft: dict) -> list[str]:
     """"Aman hamara vendor hai" said on its own (an answer to the soft word, or just mentioned): remembered now."""
     saved = []
-    for c in (cmd.get("new_contacts") or [])[:3]:
-        if isinstance(c, dict) and str(c.get("name") or "").strip():
-            try:
-                services.add_contact(user, str(c["name"]), str(c.get("note") or ""))
-                saved.append(_person_label(str(c["name"])))
-            except services.ServiceError:
-                pass
+    for c in _contacts_of(cmd):
+        try:
+            services.add_contact(user, c["name"], c["note"])
+            saved.append(_person_label(c["name"]))
+        except services.ServiceError:
+            pass
     if saved:
         draft["contacts_saved"] = saved
         draft["warnings"] = list(draft.get("warnings") or []) + [f"Saved as a contact: {', '.join(saved)}"]
@@ -1451,7 +1555,7 @@ def _item_phrase(d: dict, sir_hi: str) -> tuple[str, str]:
     """One item of a list read back: "Personal meeting: Meeting with Aman, today at 4 PM" (and its Hindi twin)."""
     pa_name = d.get("pa_name") or "your PA"
     staff = (d.get("staff") or {}).get("name")
-    kind_en = {"MEETING": "meeting", "CALL": "call", "PAYMENT": "payment", "FOLLOW_UP": "follow-up"}.get(d.get("kind"), "task")
+    kind_en = {"MEETING": "meeting", "CALL": "call", "PAYMENT": "payment", "FOLLOW_UP": "follow-up", "APPROVAL": "approval"}.get(d.get("kind"), "task")
     kind_hi = _KIND_HI.get(d.get("kind"), "टास्क")
     what = {"private_task": f"personal {kind_en}", "md_request": f"{kind_en} for {services.md_address()}",
             "delegation": f"{kind_en} for {staff}" if staff else "task for staff", "team_delegation": f"task for {(d.get('team') or {}).get('label') or 'the team'}",
@@ -1500,6 +1604,133 @@ def _combine_batch(draft: dict, subs: list[dict], address: str, address_hi: str,
     _say(draft, en, hi)
     draft["speak_text"], draft["speak_lang"] = (hi, "hi") if reply_language == "hi" else (en, "en")
     draft["done_reply"] = draft["done_speak"] = ""  # the saved line is built from what was really saved
+
+
+def _steps_of(raw) -> list[str]:
+    """The checklist of one task as the model gives it: "Hotel | Flights | Car" (the schema's form), or a list."""
+    if isinstance(raw, str):
+        raw = re.split(r"\s*[|;]\s*|\s*\n\s*", raw)
+    return [str(s).strip()[:200] for s in (raw or []) if isinstance(s, str) and str(s).strip()][:40]
+
+
+def _contacts_of(cmd: dict) -> list[dict]:
+    """new_contacts as {"name", "note"}: the model writes "Name - who they are" (older readings: objects)."""
+    out = []
+    for c in (cmd.get("new_contacts") or [])[:3]:
+        if isinstance(c, dict):
+            name, note = str(c.get("name") or "").strip(), str(c.get("note") or "").strip()
+        else:
+            name, _, note = str(c or "").partition(" - ")
+            if not _:
+                name, _, note = str(c or "").partition(": ")
+            name, note = name.strip(), note.strip()
+        if name:
+            out.append({"name": name, "note": note})
+    return out
+
+
+def _act_on_item(user: User, cmd: dict, intent: str, draft: dict, ctx: dict, on_screen: dict | None, full_text: str,
+                 address: str, address_hi: str) -> None:
+    """Done at once on one existing item (Nov 2026): an update on it (update_task: the other side hears it), a step of
+    its checklist ticked (tick_step: the last one offers "mark it done?"), or an approval decided (approve_item)."""
+    draft["action"], draft["needs_clarification"], draft["question"] = "answer", False, ""
+    open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
+    by_id = {i["id"]: i for i in open_items}
+    for i in list((on_screen or {}).get("items", [])) + list(ctx.get("tasks_i_gave") or []):
+        by_id.setdefault(i["id"], i)
+    # An id the model (or the live form) names that is not in the lists above: any work item this person may see.
+    for ref in [r for r in (cmd.get("target_refs") or []) if isinstance(r, str)] + [str(cmd.get("target_ref") or "")]:
+        if ref and ref not in by_id and re.fullmatch(r"[0-9a-fA-F-]{36}", ref):
+            found = services.visible_shared_qs(user).filter(id=ref).first()
+            if found is not None:
+                by_id[ref] = services.shared_item(found)
+    chosen = _chosen(cmd, by_id)
+    words = draft.get("title") or ""
+    matches = chosen or _match_items(words or full_text, list(by_id.values()))
+    if intent == "approve_item" and not chosen:
+        approvals = [i for i in by_id.values() if i.get("kind") == Kind.APPROVAL]
+        matches = [m for m in matches if m.get("kind") == Kind.APPROVAL] or (approvals if len(approvals) == 1 else approvals if not words else [])
+    if intent == "tick_step" and not chosen:
+        # The step's words name the item too ("hotel ho gaya" -> the item whose checklist has Hotel).
+        with_steps = [i for i in by_id.values() if i.get("steps")]
+        hits = [i for i in with_steps if any(set(re.findall(r"[a-z0-9]+", (words or full_text).lower())) & set(re.findall(r"[a-z0-9]+", str(s).lower()))
+                                                 for s in i["steps"])]
+        matches = hits or [m for m in matches if m.get("steps")]
+    if len(matches) != 1:
+        verb = {"update_task": "update", "tick_step": "tick", "approve_item": "decide"}[intent]
+        verb_hi = {"update_task": "अपडेट करूँ", "tick_step": "टिक करूँ", "approve_item": "तय करूँ"}[intent]
+        draft["target_candidates"] = matches[:5]
+        if matches:
+            names = "; ".join(m["title"] for m in matches[:3])
+            _ask(draft, f"{address}, which one should I {verb}: {names}?", f"{address_hi}, कौन सा {verb_hi}: {names}?")
+        else:
+            _ask(draft, f"{address}, which item is that about?", f"{address_hi}, ये किस काम के बारे में है?")
+        return
+    item = matches[0]
+    draft["target"], draft["targets"] = item, [item]
+    task = _target_task(item)
+    if task is None:
+        _say(draft, f"{address}, I can't find that item any more.", f"{address_hi}, वो काम अब नहीं मिल रहा।")
+        return
+    try:
+        if intent == "update_task":
+            text = " ".join(str(cmd.get("note_text") or cmd.get("notes") or "").split())
+            if not text:
+                draft["target_candidates"] = []
+                _ask(draft, f"{address}, what should the update on '{task.title}' say?", f"{address_hi}, '{task.title}' पर क्या अपडेट लिखूँ?")
+                return
+            if not isinstance(task, SharedTask):
+                _say(draft, f"{address}, that is your personal item; there is nobody to tell. I've added it to the notes.",
+                     f"{address_hi}, ये आपका पर्सनल काम है; बताने के लिए कोई नहीं। नोट्स में जोड़ दिया।")
+                task.notes = (task.notes + "\n" if task.notes else "") + text
+                task.save(update_fields=["notes"])
+                draft["booked"] = True
+                return
+            services.add_task_note(user, task.id, text)
+            told = services.names_phrase([u for u in (task.created_by, task.assignee_user) if u is not None and u.id != user.id and u.is_active])
+            _say(draft, f"Noted, {address}." + (f" I've told {told}." if told else ""), f"नोट कर लिया, {address_hi}।" + (f" {told} को बता दिया।" if told else ""))
+            draft["booked"] = True
+        elif intent == "tick_step":
+            idx = services.find_step(task, words or full_text)
+            if idx is None:
+                steps = "; ".join(s["text"] for s in task.steps[:6]) or "none"
+                _ask(draft, f"{address}, which step of '{task.title}': {steps}?", f"{address_hi}, '{task.title}' का कौन सा स्टेप: {steps}?")
+                return
+            scope = "private" if isinstance(task, PrivateTask) else "shared"
+            task = services.set_steps(user, scope, task.id, tick=(idx, True))
+            steps = task.steps
+            done, total = sum(1 for s in steps if s["done"]), len(steps)
+            step = steps[idx]["text"]
+            draft["booked"] = True
+            if done == total:
+                # The last step: the item itself is probably done; a yes completes it (the complete card).
+                draft["action"] = "complete"
+                draft["target"] = draft["targets"][0] = {**item, "version": task.version}
+                _say(draft, f"{address}, {step} ticked: that was the last step of '{task.title}'. Mark it done?",
+                     f"{address_hi}, {step} हो गया: '{task.title}' का आख़िरी स्टेप था। पूरा मार्क कर दूँ?")
+            else:
+                _say(draft, f"{address}, {step} ticked: {done} of {total} done on '{task.title}'.",
+                     f"{address_hi}, {step} हो गया: '{task.title}' के {total} में से {done} पूरे।")
+        else:
+            if not isinstance(task, SharedTask) or task.kind != Kind.APPROVAL:
+                _say(draft, f"{address}, '{task.title}' is not an approval.", f"{address_hi}, '{task.title}' कोई मंज़ूरी नहीं है।")
+                return
+            word = str(cmd.get("setting_value") or "").strip().lower()
+            approve = cmd.get("approve") if isinstance(cmd.get("approve"), bool) else word in {"approve", "approved", "yes", "haan", "ok"}
+            note = " ".join(str(cmd.get("note_text") or cmd.get("notes") or "").split())
+            task = services.approve_task(user, task.id, approve, note)
+            amt = services.rupees(task.amount)
+            asker = services.giver_words(task.created_by)[0] if task.created_by_id and task.created_by_id != user.id else ""
+            asker_hi = services.giver_words(task.created_by)[1] if asker else ""
+            draft["booked"] = True
+            if approve:
+                _say(draft, f"Approved, {address}: {task.title}" + (f", {amt}" if amt else "") + "." + (f" {asker} has been told." if asker else ""),
+                     f"मंज़ूर, {address_hi}: {task.title}" + (f", {amt}" if amt else "") + "।" + (f" {asker_hi} को बता दिया।" if asker_hi else ""))
+            else:
+                _say(draft, f"Declined, {address}: {task.title}." + (f" {asker} has been told." if asker else ""),
+                     f"नामंज़ूर, {address_hi}: {task.title}।" + (f" {asker_hi} को बता दिया।" if asker_hi else ""))
+    except services.ServiceError as err:
+        _say(draft, f"Sorry {address}, {err.message}", f"माफ़ कीजिए {address_hi}, {err.message}")
 
 
 def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_language: str, ctx: dict, on_screen: dict | None,
@@ -1587,6 +1818,14 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     summary_hi = ""  # Hindi twin of a server-written answer (lists and charts), for the Hindi voice
     draft["assignees"] = []      # the people on the team it is for (person_task / person_meeting / message)
     draft["message"] = ""        # a message's own words, kept whole
+    # Nov 2026: how often it repeats (read by the server from the speaker's words), the checklist, the amount.
+    anchor = date.fromisoformat(due_date) if due_date else None
+    draft["repeat"] = recurrence.parse_words(str(cmd.get("repeat_words") or ""), anchor=anchor) if not is_reminder else ""
+    draft["repeat_label"], draft["repeat_label_hi"] = recurrence.describe(recurrence.settle(draft["repeat"], anchor or tu.today_local()))
+    draft["steps"] = _steps_of(cmd.get("steps"))
+    amount = services.clean_amount(cmd.get("amount"))
+    draft["amount"] = float(amount) if amount is not None else None
+    draft["amount_label"] = services.rupees(amount)
 
     if intent == "send_alert":
         _prepare_message(user, cmd, draft, exact_at, address, address_hi)
@@ -1666,6 +1905,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 names = "; ".join(t["title"] for t in draft["targets"])
                 _say(draft, f"{address}, {verb} these {len(draft['targets'])} requests: {names}?",
                      f"{address_hi}, ये {len(draft['targets'])} रिक्वेस्ट {verb_hi}: {names}?")
+    elif intent in {"update_task", "tick_step", "approve_item"}:
+        _act_on_item(user, cmd, intent, draft, ctx, on_screen, full_text, address, address_hi)
     elif intent == "complete_task":
         draft["action"] = "complete"
         open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
@@ -2000,7 +2241,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         if not (draft["due_date"] and draft["due_time"]) and not draft["needs_clarification"]:
             _ask(draft, f"{address}, when should I remind you?", f"{address_hi}, कब याद दिलाऊँ?")
 
-    if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"]:
+    if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"] and not draft.get("repeat"):
+        # (A repeating item whose first moment has passed simply starts from its next date.)
         when = tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
         if when <= tu.now_local() and not draft["needs_clarification"]:
             label, label_hi = tu.fmt_time(when), tu.fmt_time_hi(when)
@@ -2061,10 +2303,17 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 "person_task": f"{pa_name} के लिए टास्क",
                 "own_task": "आपका अपना काम",
             }[draft["action"]]
-            bits = [b for b in (draft["due_label"], f"{priority.lower()} priority" if priority != "NORMAL" else "") if b]
-            bits_hi = [b for b in (due_hi, f"{_PRIORITY_HI[priority]} प्रायोरिटी" if priority != "NORMAL" else "") if b]
-            _say(draft, f"{address}, {what}: {draft['title']}" + (f", {', '.join(bits)}" if bits else "") + ". Shall I save it?",
-                 f"{address_hi}, {what_hi}: {draft['title']}" + (f", {', '.join(bits_hi)}" if bits_hi else "") + "। सेव कर दूँ?")
+            if draft["kind"] == Kind.APPROVAL:
+                of = services.md_address() if draft["action"] == "md_request" else pa_name
+                of_hi = sir_hi if draft["action"] == "md_request" else pa_name
+                what, what_hi = f"Approval from {of}", f"{of_hi} से मंज़ूरी"
+            bits = [b for b in (draft["amount_label"], draft["due_label"], draft["repeat_label"],
+                                f"{priority.lower()} priority" if priority != "NORMAL" else "") if b]
+            bits_hi = [b for b in (draft["amount_label"], due_hi, draft["repeat_label_hi"],
+                                   f"{_PRIORITY_HI[priority]} प्रायोरिटी" if priority != "NORMAL" else "") if b]
+            steps_en = f" Steps: {', '.join(draft['steps'][:6])}." if draft["steps"] else ""
+            _say(draft, f"{address}, {what}: {draft['title']}" + (f", {', '.join(bits)}" if bits else "") + f".{steps_en} Shall I save it?",
+                 f"{address_hi}, {what_hi}: {draft['title']}" + (f", {', '.join(bits_hi)}" if bits_hi else "") + f"।{steps_en} सेव कर दूँ?")
         # The staff door is closed or in test mode: said once in the confirmation, not hidden in a warning.
         door = draft.pop("door_note", None)
         if door and draft.get("reply_en") and draft["spoken_reply"] == draft["reply_en"]:

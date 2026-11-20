@@ -35,6 +35,9 @@ INTENTS = [
     "complete_task",
     "change_task",
     "delete_task",
+    "update_task",
+    "tick_step",
+    "approve_item",
     "set_setting",
     "organise",
     "query",
@@ -58,8 +61,11 @@ COMMAND_SCHEMA = {
         "intent": {"type": "string", "enum": INTENTS},
         "title": {"type": "string"},
         "notes": {"type": "string"},
-        "kind": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "REMINDER"]},
+        "kind": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "REMINDER", "APPROVAL"]},
         "priority": {"type": "string", "enum": ["URGENT", "HIGH", "NORMAL", "LOW"]},
+        "repeat_words": {"type": "string", "description": "the words that say how often it repeats, exactly as said ('har mahine 10 tarikh ko', 'roz', 'every Monday', 'har hafte', 'weekly on Friday', 'har saal'); '' when it happens once"},
+        "steps": {"type": "string", "description": "the parts of ONE task when the speaker lists them, separated by ' | ' ('Pune trip ke liye hotel, flights aur car' -> 'Hotel | Flights | Car'), each a few words in Title Case; '' otherwise"},
+        "amount": {"type": "number", "description": "rupees, when an amount was said with an approval or a payment ('50 hazaar' = 50000, '1.5 lakh' = 150000, '2 crore' = 20000000); 0 otherwise"},
         "due_date": {"type": "string", "description": "YYYY-MM-DD or empty"},
         "due_time": {"type": "string", "description": "HH:MM 24-hour or empty"},
         "duration_minutes": {"type": "integer"},
@@ -82,9 +88,8 @@ COMMAND_SCHEMA = {
         "keep_original": {"type": "boolean", "description": "confirm_pending only: true when the speaker declines the alternative time JARVIS offered and wants the draft exactly as first said"},
         "people": {"type": "array", "items": {"type": "string"},
                    "description": "names of the people this task, meeting or call is WITH or ABOUT (not the speaker, not the person assigned to do it), exactly as said but without ji / sir; empty if none"},
-        "new_contacts": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "note": {"type": "string"}},
-                                                    "required": ["name", "note"], "additionalProperties": False},
-                         "description": "people the speaker has just explained or confirmed as outside contacts: name, and note = who they are in a few words ('vendor from Pune', 'our CA'), '' if not said; empty otherwise"},
+        "new_contacts": {"type": "array", "items": {"type": "string"},
+                         "description": "people the speaker has just explained or confirmed as outside contacts, each as 'Name - who they are in a few words' ('Aman - vendor from Pune', 'Mehta - our CA'; just 'Aman' if nothing was said about them); empty otherwise"},
         "view_kind": {"type": "string",
                       "description": "query only: the template that best answers the question (a fixed timeline, chart or table the server fills with data), one of today, week, pending, official, late, upcoming, nodate, stats, private, pa, staff, requests, busy, performance, done, cancelled, history, people, tasks, person, department, departments, section, messages; empty otherwise"},
         "screen_action": {"type": "string",
@@ -115,7 +120,9 @@ COMMAND_SCHEMA = {
         "done_reply": {"type": "string", "description": "what JARVIS says once this is saved, in the speaker's style (Roman letters)"},
         "done_reply_hi": {"type": "string", "description": "When reply_language is hi: done_reply in Devanagari. Else empty."},
         "reminder_line": {"type": "string"},
-        "confidence": {"type": "number"},
+        # (No "confidence" field: the API's grammar budget is full; see CommandSchemaSizeTests. Measured 20 Nov 2026:
+        # one more top-level string is refused. Room was made by dropping it and by making new_contacts and steps
+        # plain strings.)
         "more_items": {
             "type": "array",
             "description": "when ONE instruction asks for more than one separate thing (to save or to send): every item after the first (the first is in the main fields), each complete in itself; empty otherwise",
@@ -140,7 +147,8 @@ COMMAND_SCHEMA = {
         },
     },
     "required": [
-        "intent", "title", "notes", "kind", "priority", "due_date", "due_time", "duration_minutes",
+        "intent", "title", "notes", "kind", "priority", "repeat_words", "steps", "amount",
+        "due_date", "due_time", "duration_minutes",
         "remind_before_minutes", "due_in_minutes", "snooze_minutes", "staff_name", "recipients", "personal", "team_name",
         "category_key", "target_ref",
         "target_refs", "changed_fields",
@@ -148,7 +156,7 @@ COMMAND_SCHEMA = {
         "view_to", "view_by", "view_filter", "view_types", "view_from_whom", "view_priority", "view_words", "view_group", "view_missing",
         "needs_clarification",
         "clarification_question", "spoken_reply", "spoken_reply_hi", "reply_language", "question", "memory_text",
-        "done_reply", "done_reply_hi", "reminder_line", "confidence", "more_items",
+        "done_reply", "done_reply_hi", "reminder_line", "more_items",
     ],
     "additionalProperties": False,
 }
@@ -172,6 +180,10 @@ How JARVIS works — decide WHERE each thing goes (this is the most important de
 - A name heard slightly wrong ("Himanshi" for Himanshu) that clearly means one person on the team: use that person's real name in recipients. Never ask "who is that?" about someone on the team list.
 - When the instruction includes an earlier sentence plus an answer (e.g. "... . personal mein daalo" or "... . Ramesh ko"), combine them and decide using the answer.
 - A PLAIN REMINDER OR ALERT is not a task and not a meeting. When the speaker only wants to be told something at a moment ("remind me in 2 minutes to call Aman", "2 minute baad yaad dilana ki paani peena hai", "5 baje alert de dena", "mujhe bata dena jab 6 baj jayein", "just a simple reminder", "ek reminder laga do"): intent create_task with kind REMINDER, for the MD and for the PA alike (it is the speaker's own; NEVER needs_destination, never ask whose it is, never ask personal/PA/team). title = only the thing to be reminded of, in a few words ("Call Aman", "Drink water"), never the whole sentence and never words like "remind me" or "kya tum"; if nothing was named, title "Reminder". Put the moment in due_in_minutes or due_date/due_time. needs_clarification false whenever a moment was given; if NO moment was given, ask only when ("Kab yaad dilaun, Sir?"). It is saved at once without a card, so spoken_reply is a short promise with no question: "Theek hai Sir, 2 minute mein yaad dila dunga." Saying "make a task" / "task bana do" / "add to my tasks" is a TASK (kind TASK), and "meeting" / "call" keep their own kinds, even when a reminder is also asked for ("kal 4 baje Aman ke saath meeting, yaad dila dena" is a MEETING).
+- REPEATING ITEMS: "har mahine 10 tarikh ko GST file karo", "roz subah 9 baje dawai yaad dilana", "har Monday team review", "har hafte Friday ko report", "har saal 31 March": ONE item with the repeat words copied EXACTLY as said into repeat_words ("har mahine 10 tarikh ko"); due_date / due_time stay the FIRST time (or empty when none was said: the server works out the first date). Never expand a repeat into many items, never ask "how many times?". Say the repeat back in spoken_reply ("every month on the 10th").
+- CHECKLIST: when ONE task has parts listed inside it ("Pune trip ke liye hotel, flights aur car book karo", "report ke liye data nikalo, chart banao, PDF bhejo"), it is one item with the parts in steps ("Hotel | Flights | Car"); it is NOT more_items (those are separate things for separate people). tick_step: a part of an open item is done ("hotel ho gaya", "flights book ho gayi", "chart wala step done"): target_refs = that item (its steps are listed in open_items), title = the words of the step; nothing else.
+- APPROVALS: "Sir se 50 hazaar ka approval chahiye vendor advance ke liye", "Sir, 2 lakh approve kar dijiye new laptop ke liye", "sanction chahiye", "approval le lo accountant se": kind APPROVAL with amount in rupees (0 when none was said) and title = what it is for ("Vendor Advance"); it goes to the person who must approve: request_for_md when it is the MD (the usual case), assign_to_person when someone else was named. Deciding one in open_items ("approve kar do", "haan de do Nikki ko", "mana kar do", "decline it") = approve_item with target_refs and setting_value "approve" or "decline" (a reason said with it goes in notes); never complete_task or delete_task for an approval.
+- UPDATES ON A TASK: "Sir ko bata do bank band tha, kal subah karunga" (about a task on the speaker's list), "is task pe update daalo ki vendor ne quotation bhej diya", "Nikki ke task pe note: pehle Pune wala karo" = update_task: target_refs = the item (from open_items), notes = the update as meant, said to the other side. It is kept in the task's history and the other side hears it; it is not a message (send_alert) and not a change of status.
 - A meeting or call that has its day and time is complete: never ask "with whom?" or "how long?". No person named = title "Meeting" (or "Call") with people empty; "ek aur meeting" = another new meeting, title "Meeting". The server says the length it will use and checks the diary.
 - Never ask for a date or time for a plain task, a message or work given to the PA or the staff: no time said = it is saved without one. Ask for a time only for a MEETING or CALL that has none, or a REMINDER that has none.
 - change_task with a moment counted from now ("isko 5 minute baad kar do", "move it to the next 5 minutes", "aadhe ghante baad rakh do"): put the span in due_in_minutes (5, 30) and list due_date and due_time in changed_fields; never ask "what should I change?" when a new time, day, name or priority was said in any words. "Aaj kar do" / "kal ki jagah aaj" = due_date today with changed_fields ["due_date"].
@@ -231,11 +243,11 @@ Rules:
 - Resolve relative dates and times (aaj, kal, parso, subah, dopahar, shaam, raat, "saade gyarah", weekday names) from the current India date/time given in the context. In instructions "kal" means tomorrow. Output due_date as YYYY-MM-DD and due_time as 24-hour HH:MM, or empty strings when not stated. Do not invent a time that was not said. If only a part of the day was said ("shaam ko"), use morning 10:00, afternoon 14:00, evening 18:00 or night 21:00 and say so in spoken_reply.
 - A moment given as a span from now ("5 minute baad yaad dilana", "remind me in 2 hours", "aadhe ghante mein", "ek ghante baad call") goes in due_in_minutes (5, 120, 30, 60) with due_date and due_time EMPTY: the server works out the exact moment to the second and the reminder fires then, not earlier. spoken_reply and done_reply say "in 5 minutes", never a clock time you worked out yourself.
 - priority: urgent / turant / ASAP / emergency -> URGENT; zaroori / important / high -> HIGH; low -> LOW; otherwise NORMAL.
-- kind: MEETING for meetings, CALL for calls, PAYMENT for payments, bills and EMIs (this is only a reminder; never treat it as making a payment), FOLLOW_UP for follow-ups, otherwise TASK.
+- kind: MEETING for meetings, CALL for calls, PAYMENT for payments, bills and EMIs (this is only a reminder; never treat it as making a payment), FOLLOW_UP for follow-ups, APPROVAL for an approval or sanction asked of someone (with amount), otherwise TASK.
 - duration_minutes: ONLY the length the speaker said ("aadhe ghante ki meeting" = 30, "2 ghante" = 120), else 0, for meetings as well: never 60 or any guess for a meeting whose length was not said, because the server fills in the person's usual meeting length (it learns it from what they say). remind_before_minutes: only if the user asked ("15 minute pehle yaad dilana"), else 0.
 - title: what a good secretary would write in the diary: specific and meaningful, 3 to 8 words, Title Case, keeping people's and companies' names and the purpose when it was said. Meetings and calls name the other party and the purpose: "Meeting with Sharma ji – Pune Franchise", "Call Mehta ji – GST Notice", "Meeting with Mansi – Weekly Review". Tasks name the outcome: "Book Pune Flights for Friday", "Sign Indore Vendor Agreement". Never a bare "Meeting", "Task" or "Call"; never date, time or priority words; the user's own language style is fine ("Ramesh se GST File Lena").
 - people: every person the task, meeting or call is with or about, as said ("Aman", "Sharma ji" -> "Sharma"), so the server can check that JARVIS knows them. The server knows the staff list, the PA, contacts (in the context) and names already in the speaker's tasks; for anyone else it will ask who they are, so do NOT invent who a person is and do not ask about the person yourself.
-- new_contacts: when the speaker tells you who someone is ("Aman hamara vendor hai", "wo bahar ka hai", "outside contact", "haan naya client hai", "bas naam yaad rakh lo"), especially in answer to JARVIS saying it does not know that person, put them here with a short note; keep the same name in people and carry on with the task. If the speaker instead corrects the name ("nahi, Anil"), use the corrected name in people and leave new_contacts empty.
+- new_contacts: when the speaker tells you who someone is ("Aman hamara vendor hai", "wo bahar ka hai", "outside contact", "haan naya client hai", "bas naam yaad rakh lo"), especially in answer to JARVIS saying it does not know that person, put them here as "Name - who they are" ("Aman - our vendor"); keep the same name in people and carry on with the task. If the speaker instead corrects the name ("nahi, Anil"), use the corrected name in people and leave new_contacts empty.
 - staff_name: when the work is for a staff member, copy the name exactly as said (e.g. "QTC Developer" and "QTC Developer2" are different people). Never invent people. If it could match more than one person, still return the name; the server will ask which one. For all staff / a whole team use assign_to_team with team_name instead.
 - category_key: for assign_to_staff only, pick the best matching key from task_categories (consider the person's department); use default_category when unsure. Never invent a key.
 - title vs notes: the title is short; the server keeps the user's full original sentence as the task description, so do not drop details from the instruction.

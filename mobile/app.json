@@ -24,6 +24,13 @@
       },
       "predictiveBackGestureEnabled": false,
       "softwareKeyboardLayoutMode": "pan",
+      "intentFilters": [
+        {
+          "action": "SEND",
+          "category": ["DEFAULT"],
+          "data": [{ "mimeType": "image/*" }, { "mimeType": "application/pdf" }, { "mimeType": "audio/*" }]
+        }
+      ],
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.POST_NOTIFICATIONS",
@@ -56,6 +63,13 @@
         }
       ],
       "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "JARVIS attaches the photos you choose to your tasks.",
+          "cameraPermission": "JARVIS takes a photo to attach to a task."
+        }
+      ],
       [
         "expo-local-authentication",
         {

@@ -25,6 +25,7 @@ from .permissions import IsMD, IsMDOrPA, IsPA
 from .reminders import reminders_for
 from .serializers import (
     AckSerializer,
+    ApproveSerializer,
     ToldSerializer,
     AskSerializer,
     MemoryInputSerializer,
@@ -34,11 +35,13 @@ from .serializers import (
     LiveToolSerializer,
     LiveUsageSerializer,
     LoginSerializer,
+    NoteSerializer,
     PaTaskInputSerializer,
     PaTaskStatusSerializer,
     DiagnosticsSerializer,
     RequestInputSerializer,
     SnoozeSerializer,
+    StepsPatchSerializer,
     TeamDelegationSerializer,
     TaskInputSerializer,
     TaskPatchSerializer,
@@ -1249,3 +1252,100 @@ class TaskHistoryView(APIView):
     def get(self, request, task_id):
         task = services.visible_shared_qs(request.user).get(id=task_id)
         return Response({"results": services.task_history(task)})
+
+
+# ------------------------------------------------------------------ updates, checklists, approvals, files (Nov 2026)
+class TaskNoteView(APIView):
+    """An update on a work item ("bank band tha, kal subah karunga"): into its history, and the other side hears it."""
+    permission_classes = [IsMDOrPA]
+
+    @idempotent("tasks.note")
+    def post(self, request, task_id):
+        s = NoteSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        r = services.add_task_note(request.user, task_id, s.validated_data["text"])
+        return Response({"task": services.shared_item(r["task"]), "told": r["told"],
+                         "history": services.task_history(r["task"])}, status=201)
+
+
+class TaskStepsView(APIView):
+    """The checklist inside an item: replace it, or tick one step. `scope` is set per URL (shared / private)."""
+    permission_classes = [IsMDOrPA]
+    scope = "shared"
+
+    def post(self, request, task_id):
+        s = StepsPatchSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        tick = (s.validated_data["index"], s.validated_data.get("done", True)) if "index" in s.validated_data else None
+        task = services.set_steps(request.user, self.scope, task_id, steps=s.validated_data.get("steps"), tick=tick)
+        item = services.private_item(task) if self.scope == "private" else services.shared_item(task)
+        return Response({"task": item, "all_done": bool(item["steps_total"]) and item["steps_done"] == item["steps_total"]})
+
+
+class TaskApproveView(APIView):
+    """"Approve it?": yes or no on an approval, by the person it was asked of (or the MD); whoever asked is told."""
+    permission_classes = [IsMDOrPA]
+
+    @idempotent("tasks.approve")
+    def post(self, request, task_id):
+        s = ApproveSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        task = services.approve_task(request.user, task_id, s.validated_data["approve"], s.validated_data.get("note", ""))
+        return Response(services.shared_item(task))
+
+
+class TaskFilesView(APIView):
+    """The photos, documents and voice notes on an item: list them, add one (multipart "file"). `scope` per URL."""
+    permission_classes = [IsMDOrPA]
+    scope = "shared"
+
+    def get(self, request, task_id):
+        from . import filestore
+        task = filestore.task_for(request.user, self.scope, task_id)
+        return Response({"results": filestore.list_files(task)})
+
+    def post(self, request, task_id):
+        from . import filestore
+        task = filestore.task_for(request.user, self.scope, task_id)
+        upload = request.FILES.get("file")
+        if upload is None:
+            return error("no_file", "Attach a file.", 422)
+        if upload.size > filestore.MAX_BYTES:
+            return error("too_big", "A file can be at most 15 MB.", 422)
+        name = str(request.data.get("name") or upload.name or "")
+        row = filestore.add_file(request.user, task, name, upload.content_type or "", upload.read())
+        return Response(filestore.file_item(row), status=201)
+
+
+class FileView(APIView):
+    """One file: its bytes (whoever may see the item), or its removal (whoever added it, the item's people, the MD)."""
+    permission_classes = [IsMDOrPA]
+
+    def _row(self, request, file_id):
+        from . import filestore
+        from .models import TaskFile
+        row = TaskFile.objects.select_related("shared_task", "private_task", "uploader").get(id=file_id)
+        task = row.shared_task or row.private_task
+        if task is None:
+            raise Http404
+        # Visible only to whoever may see the item it is on.
+        filestore.task_for(request.user, "private" if row.private_task_id else "shared", task.id)
+        return row
+
+    def get(self, request, file_id):
+        from . import filestore
+        row = self._row(request, file_id)
+        data = filestore.read_file(row)
+        response = HttpResponse(data, content_type=row.content_type)
+        inline = row.content_type.startswith(("image/", "audio/")) or row.content_type == "application/pdf"
+        safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", row.name)[:120] or "file"
+        response["Content-Disposition"] = f"{'inline' if inline else 'attachment'}; filename=\"{safe}\""
+        response["Content-Length"] = str(len(data))
+        response["Cache-Control"] = "private, max-age=0"
+        return response
+
+    def delete(self, request, file_id):
+        from . import filestore
+        row = self._row(request, file_id)
+        filestore.remove_file(request.user, row)
+        return Response(status=204)

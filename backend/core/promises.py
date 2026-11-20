@@ -291,7 +291,8 @@ def _give(by: User, task: SharedTask, words: str, kind: str, said_in: str) -> di
 
 def _promise(user: User, alert: Alert, read: dict, said_in: str) -> dict:
     address, address_hi = services.address_of(user), services.address_hi_of(user)
-    task = services.task_of(alert)
+    q = alert.question if isinstance(alert.question, dict) else {}
+    task = services.task_of(alert) or _task(q.get("task"))  # a chasing nudge names its task in the question
     answer = read["answer"]
     if answer == "other":
         services.mark_seen(user, alert)  # they heard it and went on to something else: it was seen

@@ -77,8 +77,13 @@ _WHEN = {
     "in_minutes": {"type": "integer", "description": "a span from now ('10 minute baad', 'in two hours' = 120, 'aadhe ghante mein' = 30); 0 otherwise"},
 }
 _PRIORITY = {"type": "string", "enum": ["URGENT", "HIGH", "NORMAL", "LOW"]}
-_KIND = {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"]}
+_KIND = {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL"]}
 _SAID = _s("the speaker's whole sentence as heard, for the record (any script)")
+_REPEAT = _s("how often it repeats, in the speaker's own words, Latin letters ('har mahine 10 tarikh ko', 'roz', 'every Monday', "
+             "'har hafte'); '' when it happens once. Never expand a repeat into several items.")
+_STEPS = {"type": "array", "items": {"type": "string"},
+          "description": "the parts of this ONE item when the speaker lists them ('hotel, flights aur car' -> ['Hotel', 'Flights', 'Car']); else empty"}
+_AMOUNT = {"type": "number", "description": "rupees when an amount was said ('50 hazaar' = 50000, '1.5 lakh' = 150000); 0 otherwise"}
 
 TOOLS = [
     {"type": "function", "name": "give_work",
@@ -89,7 +94,9 @@ TOOLS = [
              "to": _s("who does it: a name as on the team list (or a job: PA, manager, accountant), several comma-separated, "
                       "'everyone', a department name, or 'me' when the speaker will do it themselves"),
              "what": _s("the work in a few clear words, Latin letters, as the team would write it"),
-             "kind": _KIND, "priority": _PRIORITY, "notes": _s("extra details said, else ''"), **_WHEN},
+             "kind": _KIND, "priority": _PRIORITY, "notes": _s("extra details said, else ''"),
+             "repeat_words": _REPEAT, "steps": _STEPS,
+             "amount": {**_AMOUNT, "description": "APPROVAL or PAYMENT: the rupees asked for; 0 otherwise"}, **_WHEN},
              "required": ["to", "what", "when_words"]}},
          "said": _SAID}, "required": ["items", "said"]}},
     {"type": "function", "name": "set_meeting",
@@ -105,18 +112,39 @@ TOOLS = [
          "push_others": {"type": "boolean",
                          "description": "true when the speaker says this meeting takes its time and whatever is in the way moves on "
                                         "('isko 4 baje rakho, baaki aage kar do', 'reschedule the others', 'ye priority hai'); false otherwise"},
+         "repeat_words": _REPEAT,
          **_WHEN, "said": _SAID}, "required": ["title", "when_words", "said"]}},
     {"type": "function", "name": "own_item",
      "description": "The speaker's OWN task, payment or follow-up (not given to anyone): 'mujhe bank jaana hai', 'I have to send the report'.",
      "parameters": {"type": "object", "properties": {
          "what": _s("the item in a few clear words, Latin letters"), "kind": _KIND, "priority": _PRIORITY,
          "personal": {"type": "boolean", "description": "true when it is personal life (family, health, home, personal errands); false for office work"},
-         "notes": _s(), **_WHEN, "said": _SAID}, "required": ["what", "when_words", "said"]}},
+         "notes": _s(), "repeat_words": _REPEAT, "steps": _STEPS, "amount": _AMOUNT, **_WHEN, "said": _SAID},
+         "required": ["what", "when_words", "said"]}},
     {"type": "function", "name": "remind_me",
      "description": "A plain reminder at a moment ('remind me in 10 minutes to call Aman', '5 baje yaad dilana'): nothing to tick off.",
      "parameters": {"type": "object", "properties": {
          "what": _s("the thing to be reminded of, a few words ('Call Aman'); 'Reminder' if nothing was named"),
-         **_WHEN, "said": _SAID}, "required": ["what", "when_words", "said"]}},
+         "repeat_words": _REPEAT, **_WHEN, "said": _SAID}, "required": ["what", "when_words", "said"]}},
+    {"type": "function", "name": "update_task",
+     "description": "An update on an existing item, for the other side to hear ('Sir ko bata do bank band tha, kal karunga', 'is task pe update: "
+                    "vendor ne quotation bhej diya'). Not a message, not a change of status.",
+     "parameters": {"type": "object", "properties": {
+         "which_id": _s("the id from the open items list, else ''"), "which_words": _s("words that pick the item out, else ''"),
+         "text": _s("the update as meant, said to the other side, Latin letters"), "said": _SAID},
+         "required": ["which_words", "text", "said"]}},
+    {"type": "function", "name": "tick_step",
+     "description": "A part of an item's checklist is done ('hotel ho gaya', 'flights book ho gayi'); the open items list shows each item's steps.",
+     "parameters": {"type": "object", "properties": {
+         "which_id": _s("the id of the item whose step it is, else ''"), "step_words": _s("the step's words as said ('hotel')"), "said": _SAID},
+         "required": ["step_words", "said"]}},
+    {"type": "function", "name": "approve",
+     "description": "Yes or no on an approval asked of the speaker ('approve kar do', 'mana kar do', 'haan de do Nikki ko'). Asking someone's "
+                    "approval is give_work with kind APPROVAL and the amount.",
+     "parameters": {"type": "object", "properties": {
+         "which_id": _s("the approval's id from the open items, else ''"), "which_words": _s("words that pick it out, else ''"),
+         "approve": {"type": "boolean"}, "note": _s("a reason or condition said with it, else ''"), "said": _SAID},
+         "required": ["approve", "said"]}},
     {"type": "function", "name": "send_message",
      "description": "A message to people on the team (not work: nothing to tick off). It rings their phone until seen. A moment makes it wait until then.",
      "parameters": {"type": "object", "properties": {
@@ -136,7 +164,7 @@ TOOLS = [
          "from_day": _s("YYYY-MM-DD, first day of a period asked about, else ''"), "to_day": _s("YYYY-MM-DD, last day, else ''"),
          "by": {"type": "string", "enum": ["", "due", "given", "done"]},
          "filter": {"type": "string", "enum": ["", "open", "done", "late", "personal", "official", "inbox", "sent", "on_leave"]},
-         "types": {"type": "array", "items": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP"]}},
+         "types": {"type": "array", "items": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL"]}},
          "from_whom": {"type": "string", "enum": ["", "sir", "pa", "me", "staff"]},
          "priority": {"type": "string", "enum": ["", "urgent", "high", "important"]},
          "words": _s("words from the item's own title that pick it out, else ''"),
@@ -210,7 +238,7 @@ def blank_cmd() -> dict:
     for key, spec in ai_brain.COMMAND_SCHEMA["properties"].items():
         t = spec.get("type")
         out[key] = [] if t == "array" else False if t == "boolean" else 0 if t in ("integer", "number") else ""
-    out.update({"intent": "unknown", "kind": "TASK", "priority": "NORMAL", "reply_language": "en", "confidence": 0.9, "engine": "ai"})
+    out.update({"intent": "unknown", "kind": "TASK", "priority": "NORMAL", "reply_language": "en", "engine": "ai"})
     return out
 
 
@@ -254,6 +282,14 @@ def _kind(value, default: str = "TASK") -> str:
     return value if value in assistant._KINDS else default
 
 
+def _extras(cmd: dict, a: dict) -> None:
+    """The repeat words, the checklist and the amount of one form item (Nov 2026)."""
+    cmd["repeat_words"] = " ".join(str(a.get("repeat_words") or "").split())[:120]
+    cmd["steps"] = [" ".join(str(s).split())[:200] for s in (a.get("steps") or []) if isinstance(s, str) and str(s).strip()][:40]
+    amount = a.get("amount")
+    cmd["amount"] = float(amount) if isinstance(amount, (int, float)) and not isinstance(amount, bool) and amount > 0 else 0
+
+
 def _priority(value) -> str:
     return value if value in assistant._PRIORITIES else "NORMAL"
 
@@ -276,6 +312,7 @@ def cmd_for(user: User, name: str, a: dict, ctx: dict | None = None) -> dict:
             one["notes"] = str(it.get("notes") or "").strip()[:2000]
             one["kind"] = _kind(it.get("kind"))
             one["priority"] = _priority(it.get("priority"))
+            _extras(one, it)
             _when(one, it)
             if n:
                 extras.append({k: one[k] for k in assistant._ITEM_KEYS if k in one})
@@ -297,6 +334,7 @@ def cmd_for(user: User, name: str, a: dict, ctx: dict | None = None) -> dict:
             cmd["intent"] = "create_task"
         if a.get("push_others"):
             cmd["setting_value"] = "push"  # this one keeps its time; whatever clashes is moved on in turn (assistant._book_and_push)
+        _extras(cmd, a)
         _when(cmd, a)
     elif name == "own_item":
         cmd["intent"] = "create_task"
@@ -305,11 +343,31 @@ def cmd_for(user: User, name: str, a: dict, ctx: dict | None = None) -> dict:
         cmd["kind"] = _kind(a.get("kind"))
         cmd["priority"] = _priority(a.get("priority"))
         cmd["personal"] = bool(a.get("personal"))
+        _extras(cmd, a)
         _when(cmd, a)
     elif name == "remind_me":
         cmd["intent"], cmd["kind"] = "create_task", "REMINDER"
         cmd["title"] = str(a.get("what") or "").strip()[:200] or "Reminder"
+        _extras(cmd, a)
         _when(cmd, a)
+    elif name == "update_task":
+        cmd["intent"] = "update_task"
+        which = str(a.get("which_id") or "").strip()
+        cmd["target_refs"] = [which] if which else []
+        cmd["title"] = " ".join(str(a.get("which_words") or "").split())[:200]
+        cmd["note_text"] = " ".join(str(a.get("text") or "").split())[:1000]
+    elif name == "tick_step":
+        cmd["intent"] = "tick_step"
+        which = str(a.get("which_id") or "").strip()
+        cmd["target_refs"] = [which] if which else []
+        cmd["title"] = " ".join(str(a.get("step_words") or "").split())[:200]
+    elif name == "approve":
+        cmd["intent"] = "approve_item"
+        which = str(a.get("which_id") or "").strip()
+        cmd["target_refs"] = [which] if which else []
+        cmd["title"] = " ".join(str(a.get("which_words") or "").split())[:200]
+        cmd["approve"] = bool(a.get("approve"))
+        cmd["note_text"] = " ".join(str(a.get("note") or "").split())[:300]
     elif name == "send_message":
         cmd["intent"] = "send_alert"
         names = _names(a.get("to"))
@@ -414,7 +472,16 @@ def _he(gender: str) -> str:
 
 
 def _items_line(items: list[dict]) -> str:
-    return "; ".join(f"[{i['id'][:8]}] {i['title']}" + (f" ({i['due_label']})" if i.get("due_label") else "") for i in items)
+    def one(i: dict) -> str:
+        out = f"[{i['id'][:8]}] {i['title']}"
+        if i.get("kind") == "APPROVAL":
+            out += " (approval" + (f" {i['amount']}" if i.get("amount") else "") + ")"
+        if i.get("due_label"):
+            out += f" ({i['due_label']})"
+        if i.get("steps"):
+            out += " steps left: " + ", ".join(i["steps"])
+        return out
+    return "; ".join(one(i) for i in items)
 
 
 def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str:
@@ -458,11 +525,16 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
         "given, whatever else is in the diary at that time); set_meeting for a meeting or call (with push_others when the speaker "
         "says this one takes the time and the rest move); own_item for the speaker's own task; remind_me for a plain reminder; "
         "send_message for a message (not work); "
-        "show for ANY question about tasks, meetings, people, messages, progress or performance (the data lives on the server: never "
-        "answer those from memory, never count or guess); change / complete / cancel_item for an existing item (its id from the open "
-        "items when it is one of them, else the words that pick it out); answer when JARVIS has just asked something; undo; remember; "
+        "show for ANY question about tasks, meetings, people, messages, progress, approvals or performance (the data lives on the server: "
+        "never answer those from memory, never count or guess); change / complete / cancel_item for an existing item (its id from the open "
+        "items when it is one of them, else the words that pick it out); update_task for an update on an item the other side should hear "
+        "('bank band tha, kal karunga'); tick_step when a part of an item's checklist is done ('hotel ho gaya'); approve for yes / no on an "
+        "approval asked of the speaker; answer when JARVIS has just asked something; undo; remember; "
         "organise for departments and sections; setting; screen for PDF, share, open an item, settings, the walkie-talkie, home; "
         "briefing; dismiss; end for 'bas', 'thank you', 'bye' (call it, then say a short goodbye).",
+        "Repeats ('har mahine 10 tarikh ko', 'roz subah 9 baje', 'har Monday') go in repeat_words exactly as said, on ONE item; the parts of "
+        "one task ('hotel, flights aur car') go in steps; an approval asked of someone ('Sir se 50 hazaar ka approval chahiye') is give_work "
+        "with kind APPROVAL and the amount in rupees, to the person who approves.",
         "Fill the form in Latin letters (Roman Hinglish or English), the way the team writes on WhatsApp. People: the name as on the "
         "team list (a name heard slightly wrong means the closest team member), or their job, 'me' for the speaker, 'everyone' or a "
         "department for a group. when_words: the speaker's own time words, exactly as said, in Latin letters; never turn them into a "

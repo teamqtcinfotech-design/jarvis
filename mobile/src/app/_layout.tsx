@@ -8,6 +8,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AlertBanner } from '@/components/AlertBanner';
 import { AppLock } from '@/components/AppLock';
 import { HeldSheet } from '@/components/HeldSheet';
+import { ShareIntake } from '@/components/ShareIntake';
 import { UpdateKeeper } from '@/components/UpdateKeeper';
 import { AlertEngineProvider } from '@/lib/alertEngine';
 import { startUpdates } from '@/lib/appUpdates';
@@ -40,6 +41,7 @@ function Shell() {
               {stack}
               <AlertBanner />
               <HeldSheet />
+              <ShareIntake />
               <UpdateKeeper />
               <AppLock />
             </View>

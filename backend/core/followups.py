@@ -3,6 +3,9 @@
 - a staff task with no update for 2 days          -> Sir (and Mansi, who can chase)
 - a request from Mansi unanswered for 4 hours     -> Sir
 - a task Sir gave Mansi not started after 1 day   -> Mansi
+- a promised time has passed, work still open     -> the person (once per promise), in the giver's name
+- at the giver's summary time: what they gave     -> the giver, once a day ("3 things you gave haven't moved")
+  that is not seen / not started / past its promise or time
 - 18:30: the day's slipped items                  -> Sir
 
 Each nudge is an Alert; the phone speaks it when he is with the phone (or shows it quietly in a meeting).
@@ -14,10 +17,13 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from django.db.models import Q
+
 from . import ai_brain, scheduling, services
 from . import timeutils as tu
 from .models import Alert, Priority, Status, TaskRequest, User
-from .services import delegated_qs, get_md, get_pa, get_prefs, md_private_qs, person_tasks_qs, private_qs, shared_md_tasks_qs
+from .services import (delegated_qs, get_md, get_pa, get_prefs, given_qs, md_private_qs, person_tasks_qs, private_qs,
+                       shared_md_tasks_qs)
 
 log = logging.getLogger("jarvis.followups")
 
@@ -215,11 +221,64 @@ def run(now=None) -> int:
                              spoken_hi=f"{name}, {giver_hi} का टास्क '{task.title}' अभी शुरू नहीं हुआ। "
                                        f"आप कह सकते हैं: शुरू करो, या कारण के साथ होल्ड पर रखो।")
 
-    # 4) End of day: what slipped, for each person about their own list, at each one's own summary time
     today = local.date()
 
     def due_day(t):
         return tu.to_local(t.due_at).date() if t.due_at else t.due_date
+
+    # 3b) Chasing (Nov 2026), the person's side: a time they promised has passed and the work is still open. Asked
+    # once per promise, in the giver's name; the answer (a new time, "can't", or "done" as a command) goes back.
+    for person in services.team():
+        promised = person_tasks_qs(person).filter(status__in=OPEN).exclude(origin__in=services.OWN_ORIGINS + services.MEET_ORIGINS) \
+            .filter(Q(promise_at__lt=now) | Q(promise_at__isnull=True, promise_date__lt=today))
+        for task in promised:
+            giver, giver_hi = services.giver_words(task.created_by)
+            label = tu.due_phrase(task.promise_kind, task.promise_date, task.promise_at)
+            label_hi = tu.due_phrase_hi(task.promise_kind, task.promise_date, task.promise_at)
+            stamp = (task.promise_at or task.promise_date).isoformat()[:16]
+            name = person.spoken_name
+            raised += _raise(person, f"promise:{task.id}:{stamp}", f"Promised {label}: {task.title}", task.title,
+                             f"{name}, you said you'd do {giver}'s task '{task.title}' by {label}. Is it done, or by when now?",
+                             Priority.HIGH,
+                             spoken_hi=f"{name}, आपने कहा था {giver_hi} का काम '{task.title}' {label_hi} तक कर देंगे। हो गया, या अब कब तक?",
+                             question={"kind": "promise", "en": "", "hi": "", "task": str(task.id)})
+
+    # 3c) Chasing, the giver's side: at their summary time, once a day, the work they gave that has not moved: not
+    # seen for hours, not started for a day, a promise gone by, or past its time. One line, with what to say next.
+    for giver in services.team():
+        key = f"chase:{today.isoformat()}"
+        if not digest_due(get_prefs(giver)) or _already(key + f"@{giver.id}"):
+            continue
+        stuck, stuck_hi = [], []
+        for t in given_qs(giver).filter(status__in=OPEN).exclude(origin__in=services.MEET_ORIGINS).select_related("assignee_user"):
+            who = t.assignee_user.spoken_name if t.assignee_user else "someone"
+            age = now - t.created_at
+            d = due_day(t)
+            if t.seen_at is None and age >= timedelta(hours=4):
+                why, why_hi = "not seen yet", "अभी तक देखा नहीं"
+            elif (t.promise_at and t.promise_at < now) or (t.promise_at is None and t.promise_date and t.promise_date < today):
+                label = tu.due_phrase(t.promise_kind, t.promise_date, t.promise_at)
+                why, why_hi = f"promised {label}", f"{tu.due_phrase_hi(t.promise_kind, t.promise_date, t.promise_at)} का वादा"
+            elif d and d < today:
+                days = (today - d).days
+                why, why_hi = f"{days} day{'s' if days != 1 else ''} late", f"{days} दिन लेट"
+            elif t.status == Status.OPEN and age >= PA_NOT_STARTED and not t.promise_date:
+                why, why_hi = "not started", "शुरू नहीं हुआ"
+            else:
+                continue
+            stuck.append(f"{t.title} ({who}, {why})")
+            stuck_hi.append(f"{t.title} ({who}, {why_hi})")
+        if stuck:
+            n = len(stuck)
+            address, address_hi = services.address_of(giver), services.address_hi_of(giver)
+            spoken = (f"{address}, {n} thing{'s' if n > 1 else ''} you gave {'have' if n > 1 else 'has'}n't moved: " + "; ".join(stuck[:4])
+                      + ". You can say: remind them, move the date, or give it to someone else.")
+            spoken_hi = (f"{address_hi}, आपके दिए {n} काम रुके हुए हैं: " + "; ".join(stuck_hi[:4])
+                         + "। आप कह सकते हैं: याद दिलाओ, तारीख़ बदलो, या किसी और को दो।")
+            raised += _raise(giver, key, f"{n} thing{'s' if n > 1 else ''} you gave hasn't moved", "; ".join(stuck[:4]), spoken,
+                             spoken_hi=spoken_hi)
+
+    # 4) End of day: what slipped, for each person about their own list, at each one's own summary time
 
     key = f"digest:{today.isoformat()}"
     for person in members:

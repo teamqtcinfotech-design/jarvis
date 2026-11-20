@@ -65,6 +65,7 @@ export const kindLabel: Record<string, string> = {
   CALL: 'Call',
   PAYMENT: 'Payment reminder',
   FOLLOW_UP: 'Follow-up',
+  APPROVAL: 'Approval',
 };
 
 export const kindIcon: Record<string, string> = {
@@ -73,6 +74,7 @@ export const kindIcon: Record<string, string> = {
   CALL: 'call-outline',
   PAYMENT: 'card-outline',
   FOLLOW_UP: 'return-up-forward-outline',
+  APPROVAL: 'ribbon-outline',
 };
 
 /** Tone names used by stat tiles and charts coming from the server. */

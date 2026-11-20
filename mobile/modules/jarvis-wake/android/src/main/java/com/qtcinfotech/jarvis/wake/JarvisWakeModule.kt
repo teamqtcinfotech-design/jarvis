@@ -238,6 +238,13 @@ class JarvisWakeModule : Module() {
             key
         }
 
+        /** A photo or file shared into JARVIS (Android's Share sheet), as JSON, once; null otherwise. */
+        Function("consumePendingShare") {
+            val share = WakeBus.pendingShare
+            WakeBus.pendingShare = null
+            share
+        }
+
         /** The app was woken by "Hey JARVIS" and nothing was said after the greeting (a false wake, most likely). */
         Function("noteEmptyWake") { WakeBus.countEmptyWake(context) }
 
@@ -275,11 +282,33 @@ class JarvisWakeModule : Module() {
         }
     }
 
-    /** What the intent that brought the app up says: woken by "Hey JARVIS", or a tapped reminder / alert notification. */
+    /** What the intent that brought the app up says: woken by "Hey JARVIS", a tapped reminder / alert notification,
+     *  or a photo / file shared into JARVIS from another app. */
     private fun takeExtras(intent: Intent) {
         if (intent.getBooleanExtra(WakeService.EXTRA_WAKE, false)) {
             intent.removeExtra(WakeService.EXTRA_WAKE)
             WakeBus.pendingWake = true
+        }
+        if (intent.action == Intent.ACTION_SEND && intent.type != null) {
+            // "Share to JARVIS": the file's content URI (kept readable for this app by the sharing app's grant) and
+            // any words sent with it. Read once; the intent is then plain so a later return does not repeat it.
+            @Suppress("DEPRECATION")
+            val uri: Uri? = intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+            if (uri != null) {
+                var name = uri.lastPathSegment ?: "shared"
+                try {
+                    appContext.reactContext?.contentResolver?.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                        if (c.moveToFirst()) c.getString(0)?.let { n -> if (n.isNotBlank()) name = n }
+                    }
+                } catch (_: Exception) {
+                    // the name is only for the label
+                }
+                WakeBus.pendingShare = JSONObject().put("uri", uri.toString()).put("mime", intent.type ?: "").put("name", name).put("text", text).toString()
+            }
+            intent.action = Intent.ACTION_MAIN
+            intent.removeExtra(Intent.EXTRA_STREAM)
+            intent.removeExtra(Intent.EXTRA_TEXT)
         }
         intent.getStringExtra(WakeService.EXTRA_OPEN_KEY)?.let {
             intent.removeExtra(WakeService.EXTRA_OPEN_KEY)

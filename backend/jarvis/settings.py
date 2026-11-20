@@ -195,6 +195,11 @@ JARVIS_GROK_VOICE = env_bool("JARVIS_GROK_VOICE", True)
 # (the model's default) for the most careful form, "" = the model's default.
 JARVIS_LIVE_VOICE = env_bool("JARVIS_LIVE_VOICE", True)
 XAI_LIVE_REASONING = os.environ.get("XAI_LIVE_REASONING", "")
+# Photos, documents and voice notes on tasks (core/filestore.py): kept on disk here, every byte encrypted with the
+# field key, so the folder is as unreadable as the database. Outside the repository by default.
+JARVIS_FILES_DIR = os.environ.get("JARVIS_FILES_DIR", str(BASE_DIR.parent / "files-store"))
+DATA_UPLOAD_MAX_MEMORY_SIZE = 16 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 16 * 1024 * 1024
 JARVIS_TTS_DAILY_CHAR_LIMIT = int(os.environ.get("JARVIS_TTS_DAILY_CHAR_LIMIT", "60000"))
 JARVIS_TTS_MAX_CHARS = int(os.environ.get("JARVIS_TTS_MAX_CHARS", "700"))  # one spoken reply, cut at a sentence end
 

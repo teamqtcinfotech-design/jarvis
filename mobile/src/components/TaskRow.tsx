@@ -22,6 +22,18 @@ export function plainStatus(label: string) {
   return STATUS_STYLE[label] ?? { label, color: colors.info, bg: colors.infoSoft };
 }
 
+/** "every month on the 10th" -> "Monthly · 10th"; "every Monday and Thursday" -> "Mon, Thu"; short enough for a tag. */
+export function shortRepeat(label: string): string {
+  const m = label.match(/^every month on the (\w+)$/);
+  if (m) return `Monthly · ${m[1]}`;
+  if (label === 'every day') return 'Daily';
+  if (label === 'every working day') return 'Weekdays';
+  if (label === 'every week') return 'Weekly';
+  if (label.startsWith('every year')) return 'Yearly';
+  if (label.startsWith('every ')) return label.slice(6).split(' and ').map((d) => d.slice(0, 3)).join(', ');
+  return label;
+}
+
 /** How far along a staff / PA task is, from its status words. */
 export function progressOf(item: TaskItem): number {
   if (item.status === 'COMPLETED') return 100;
@@ -64,6 +76,16 @@ export function TaskRow({ item, onPress, showStaffStatus, flat, last }: {
           {staff ? <Tag label={staff} icon="person-outline" /> : null}
           {item.section ? <Tag label={item.section} icon="folder-outline" color={item.section_colour || colors.accent} bg={colors.accentSoft} /> : null}
           {showStaffStatus && status ? <Tag label={status.label} color={status.color} bg={status.bg} /> : null}
+          {/* Nov 2026: an approval's amount, a repeat, the checklist's count, files on it, the chain of hands. */}
+          {item.kind === 'APPROVAL' ? <Tag label={item.amount_label || 'Approval'} icon="ribbon-outline" color={colors.gold} bg={colors.goldSoft} /> : null}
+          {item.repeat_label ? <Tag label={shortRepeat(item.repeat_label)} icon="repeat-outline" color={colors.info} bg={colors.infoSoft} /> : null}
+          {item.steps_total ? (
+            <Tag label={`${item.steps_done ?? 0} of ${item.steps_total}`} icon="list-outline"
+              color={item.steps_done === item.steps_total ? colors.success : colors.inkSoft}
+              bg={item.steps_done === item.steps_total ? colors.successSoft : colors.surfaceAlt} />
+          ) : null}
+          {item.files_count ? <Tag label={String(item.files_count)} icon="attach-outline" /> : null}
+          {item.chain?.length ? <Tag label={item.chain.join(' → ')} icon="git-branch-outline" color={colors.inkSoft} /> : null}
         </View>
         {showStaffStatus ? (
           <View style={s.progress}>

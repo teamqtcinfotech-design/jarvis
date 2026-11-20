@@ -3,6 +3,7 @@
     python manage.py taskpanel_worker
 
 - rings work and messages again until they are seen (core/ringing.py), and pushes reminders at their moment
+- every 10 minutes: the next occurrence of each repeating item (core/recurrence.py) and the follow-up nudges
 - delivers queued / unconfirmed task commands (same command id on every retry)
 - pulls TaskPanel's change feed: every 5 s in working hours, every 30 s otherwise
 - refreshes the staff directory every 60 s
@@ -15,7 +16,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 
-from core import followups, reminderpush, ringing, services
+from core import followups, recurrence, reminderpush, ringing, services
 from core import timeutils as tu
 from core.taskpanel import dispatcher, sync
 
@@ -65,6 +66,10 @@ class Command(BaseCommand):
                     self.stdout.write(f"{tu.now_local():%H:%M:%S}  rang {rang['rung']}, stopped {rang['stopped']}, "
                                       f"not seen {rang['given_up']}")
                 if now - last_follow >= FOLLOWUP_EVERY_SECONDS:
+                    # Repeating items: the next occurrence of each one whose turn has come (core/recurrence.py).
+                    made = recurrence.run()
+                    if made:
+                        self.stdout.write(f"{tu.now_local():%H:%M:%S}  made {made} repeat occurrence(s)")
                     raised = followups.run()
                     last_follow = now
                     if raised:

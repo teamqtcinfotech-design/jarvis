@@ -237,6 +237,51 @@ export async function api<T = any>(path: string, opts: ApiOptions = {}): Promise
   return { status: res.status, data: data as T };
 }
 
+/** The bearer header for a request made outside api() (an <Image> of a file, a download). */
+export function authHeaders(): Record<string, string> {
+  return { Authorization: `Bearer ${accessToken}` };
+}
+
+/** Where a file on a task is fetched from (with authHeaders()). */
+export function fileUrl(fileId: string): string {
+  return `${serverUrl}/api/v1/files/${fileId}/`;
+}
+
+/** A file picked on the phone (a photo, a document), as fetch's FormData takes it. */
+export interface LocalFile {
+  uri: string;
+  name: string;
+  type: string;
+}
+
+/** Upload one file to a task (multipart "file"); the usual sign-in refresh applies. */
+export async function apiUpload<T = any>(path: string, file: LocalFile, fields: Record<string, string> = {}): Promise<{ status: number; data: T }> {
+  const doFetch = () => {
+    const form = new FormData();
+    form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
+    for (const [k, v] of Object.entries(fields)) form.append(k, v);
+    return rawFetch(path, {
+      method: 'POST',
+      headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}` },
+      body: form,
+      timeoutMs: 90000,
+    });
+  };
+  let res = await doFetch();
+  if (res.status === 401) {
+    const ok = await refreshAccess();
+    if (!ok) {
+      authLostHandler?.();
+      throw new ApiError(401, 'auth_lost', 'Your session has expired. Please sign in again.');
+    }
+    res = await doFetch();
+  }
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new ApiError(res.status, data?.code ?? 'error', data?.message ?? `Upload failed (${res.status}).`, data);
+  return { status: res.status, data: data as T };
+}
+
 /** Diagnostics hook (set by lib/diag, which imports this file: no import cycle). Short lines, never task titles. */
 let diagNote: ((level: 'error' | 'warn' | 'info', where: string, message: string) => void) | null = null;
 export function setDiagNote(fn: typeof diagNote) {

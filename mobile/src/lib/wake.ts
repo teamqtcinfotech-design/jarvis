@@ -75,6 +75,7 @@ type Native = {
   resume: () => void;
   consumePendingWake: () => boolean;
   consumePendingOpen?: () => string | null;
+  consumePendingShare?: () => string | null;
   noteEmptyWake?: () => void;
   openOverlaySettings: () => void;
   openBatterySettings: () => void;
@@ -218,6 +219,26 @@ export function wakeConsumePending(): boolean {
 export function wakeConsumeOpenKey(): string | null {
   try {
     return native?.consumePendingOpen?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** A photo or file shared into JARVIS from another app (the Share sheet), once; null otherwise. */
+export interface SharedIn {
+  uri: string;
+  mime: string;
+  name: string;
+  text: string;
+}
+
+export function wakeConsumeShare(): SharedIn | null {
+  try {
+    const raw = native?.consumePendingShare?.();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SharedIn>;
+    if (!parsed.uri) return null;
+    return { uri: parsed.uri, mime: parsed.mime || 'application/octet-stream', name: parsed.name || 'shared', text: parsed.text || '' };
   } catch {
     return null;
   }

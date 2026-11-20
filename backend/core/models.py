@@ -4,6 +4,7 @@ Privacy boundary: ``PrivateTask`` is a separate, encrypted table that only the M
 can reach. PA-facing code paths never return its content; the only PA-visible
 derivative is anonymous busy time (start/end, no title).
 """
+import json
 import uuid
 
 from django.conf import settings
@@ -153,6 +154,8 @@ class Kind(models.TextChoices):
     CALL = "CALL", "Call"
     PAYMENT = "PAYMENT", "Payment"
     FOLLOW_UP = "FOLLOW_UP", "Follow-up"
+    # Nov 2026: something the MD (or whoever it is for) approves or declines, with the amount asked for.
+    APPROVAL = "APPROVAL", "Approval"
 
 
 class DueKind(models.TextChoices):
@@ -184,12 +187,46 @@ class TaskFields(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Repeats (Nov 2026): "" = once; "daily"; "weekly:0,2" (Monday = 0); "monthly:10" (the 10th; "last" = month end);
+    # "yearly:MM-DD". The next copy is made by core/recurrence.py once this one is closed or its time has passed;
+    # repeat_until (inclusive) ends the series.
+    repeat = models.CharField(max_length=40, blank=True, default="")
+    repeat_until = models.DateField(null=True, blank=True)
+    # An approval (Kind.APPROVAL) carries the amount asked for, in rupees; other kinds leave it empty.
+    amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # The checklist inside the task ("Pune trip: hotel, flights, car"): JSON [{"text": "...", "done": false}],
+    # encrypted at rest like the title.
+    steps_json = EncryptedTextField(blank=True, default="")
+
     class Meta:
         abstract = True
 
     @property
     def is_closed(self) -> bool:
         return self.status in CLOSED_STATUSES
+
+    @property
+    def steps(self) -> list[dict]:
+        """The checklist as a list of {"text", "done"}; [] when there is none."""
+        try:
+            raw = json.loads(self.steps_json) if self.steps_json else []
+        except ValueError:
+            return []
+        out = []
+        for s in raw if isinstance(raw, list) else []:
+            if isinstance(s, dict) and str(s.get("text") or "").strip():
+                out.append({"text": str(s["text"]).strip()[:200], "done": bool(s.get("done"))})
+        return out[:40]
+
+    @steps.setter
+    def steps(self, value) -> None:
+        clean = []
+        for s in value or []:
+            if isinstance(s, str):
+                s = {"text": s, "done": False}
+            if isinstance(s, dict) and str(s.get("text") or "").strip():
+                clean.append({"text": str(s["text"]).strip()[:200], "done": bool(s.get("done"))})
+        self.steps_json = json.dumps(clean[:40], ensure_ascii=False) if clean else ""
 
 
 class PrivateTask(TaskFields):
@@ -207,6 +244,8 @@ class PrivateTask(TaskFields):
     source = models.CharField(max_length=6, choices=Source.choices, default=Source.MANUAL)
     # One of the owner's own personal sections (never a work section): the folder it is filed in, if any.
     section = models.ForeignKey(Section, null=True, blank=True, on_delete=models.SET_NULL, related_name="private_tasks")
+    # The occurrence this one was made from (a repeating item), so no occurrence is made twice.
+    repeat_of = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="repeats")
 
     class Meta:
         indexes = [models.Index(fields=["owner", "status"]), models.Index(fields=["due_at"])]
@@ -321,6 +360,11 @@ class SharedTask(TaskFields):
     seen_at = models.DateTimeField(null=True, blank=True)
     promise_date = models.DateField(null=True, blank=True)
     promise_at = models.DateTimeField(null=True, blank=True)  # set when a time was said, else only the day
+    # The occurrence this one was made from (a repeating item), so no occurrence is made twice.
+    repeat_of = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="repeats")
+    # Whose hands it passed through: user ids, the giver first, then everyone it was given to in turn
+    # ([Sir, Mansi, Nikki] when Mansi handed Sir's task on to Nikki). Shown as the chain on the task.
+    handed = models.JSONField(default=list, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["assignee_type", "status"]), models.Index(fields=["due_at"]),
@@ -353,6 +397,9 @@ class TaskEvent(models.Model):
         REOPENED = "REOPENED", "Reopened"
         CANCELLED = "CANCELLED", "Cancelled"
         FILED = "FILED", "Filed in a section"
+        NOTE = "NOTE", "Update"              # a short line from whoever has it or gave it ("bank closed today, kal subah")
+        APPROVED = "APPROVED", "Approved"    # an approval item: yes
+        DECLINED = "DECLINED", "Declined"    # an approval item: no
 
     task = models.ForeignKey(SharedTask, on_delete=models.CASCADE, related_name="events")
     kind = models.CharField(max_length=10, choices=Kind.choices)
@@ -360,11 +407,32 @@ class TaskEvent(models.Model):
     # What the step needs to be told again: {"to": user id, "from": user id, "label": "tomorrow at 6 PM",
     # "label_hi": ..., "reason": ..., "staff": name}. Work items only: never anything personal.
     data = models.JSONField(default=dict, blank=True)
+    # The words of an update (NOTE): task text, so encrypted at rest like the title.
+    note = EncryptedTextField(blank=True, default="")
     at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["at", "id"]
         indexes = [models.Index(fields=["task", "at"])]
+
+
+class TaskFile(models.Model):
+    """A photo, a document or a voice note on a work item or a personal item (Nov 2026). The bytes live on disk,
+    encrypted with the field key (core/filestore.py); the row holds only the name, the type and the size. Who may
+    see it is whoever may see the item."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    shared_task = models.ForeignKey(SharedTask, null=True, blank=True, on_delete=models.CASCADE, related_name="files")
+    private_task = models.ForeignKey(PrivateTask, null=True, blank=True, on_delete=models.CASCADE, related_name="files")
+    uploader = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    name = models.CharField(max_length=200)
+    content_type = models.CharField(max_length=100, default="application/octet-stream")
+    size = models.PositiveIntegerField(default=0)
+    stored = models.CharField(max_length=200)  # the file's name in the store (its id plus the kind's extension)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
 
 
 class TaskPanelLink(models.Model):

@@ -124,6 +124,8 @@ object WakeBus {
 
     /** The talk behind the incoming card that opened the app (consumed once by the app). */
     @Volatile var pendingWalkieTalk: String? = null
+    /** A photo or file shared into JARVIS from another app, as JSON {uri, mime, name, text} (consumed once by the app). */
+    @Volatile var pendingShare: String? = null
     const val KEY_PUSH_TOKEN = "push_token"
     /** Which Grok voice JARVIS speaks with (the MD's choice in Settings; male voices only). */
     const val KEY_VOICE_NAME = "voice_name"

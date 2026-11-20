@@ -17,6 +17,7 @@ import logging
 import re
 import uuid
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
@@ -26,6 +27,7 @@ from django.utils import timezone
 
 from django.conf import settings
 
+from . import recurrence
 from . import timeutils as tu
 from .models import (
     CLOSED_STATUSES,
@@ -466,6 +468,8 @@ def is_overdue(task, now: datetime | None = None) -> bool:
 
 # --------------------------------------------------------------------------- serialisation
 def _base_item(task, scope: str) -> dict:
+    steps = task.steps
+    repeat_en, repeat_hi = recurrence.describe(task.repeat)
     return {
         "id": str(task.id),
         "scope": scope,
@@ -488,7 +492,69 @@ def _base_item(task, scope: str) -> dict:
         "version": task.version,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "created_at": task.created_at.isoformat() if task.created_at else None,
+        # Nov 2026: a repeating item, its checklist, the amount of an approval, the files on it.
+        "repeat": task.repeat,
+        "repeat_label": repeat_en,
+        "repeat_label_hi": repeat_hi,
+        "repeat_until": task.repeat_until.isoformat() if task.repeat_until else None,
+        "repeat_of": str(task.repeat_of_id) if task.repeat_of_id else None,
+        "steps": steps,
+        "steps_done": sum(1 for s in steps if s["done"]),
+        "steps_total": len(steps),
+        "amount": float(task.amount) if task.amount is not None else None,
+        "amount_label": rupees(task.amount),
+        "files_count": task.files.count() if task.pk else 0,
     }
+
+
+def rupees(amount) -> str:
+    """₹1,50,000 (Indian grouping; paise only when there are any); "" for no amount."""
+    if amount is None:
+        return ""
+    q = Decimal(amount).quantize(Decimal("0.01"))
+    whole = int(abs(q))
+    paise = int((abs(q) - whole) * 100)
+    s = str(whole)
+    if len(s) > 3:
+        head, tail = s[:-3], s[-3:]
+        groups = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            groups.insert(0, head)
+        s = ",".join(groups + [tail])
+    return f"{'-' if q < 0 else ''}₹{s}" + (f".{paise:02d}" if paise else "")
+
+
+_AMOUNT_WORDS = (("crore", 10_000_000), ("karod", 10_000_000), ("cr", 10_000_000), ("lakh", 100_000), ("lac", 100_000),
+                 ("lakhs", 100_000), ("hazaar", 1_000), ("hazar", 1_000), ("thousand", 1_000), ("k", 1_000))
+_AMOUNT_NUM = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def clean_amount(value) -> Decimal | None:
+    """A rupee amount as said or typed: 50000, "50,000", "₹1.5 lakh", "2 crore", "50k"; None for nothing."""
+    if value is None or value == "" or value is False:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        amount = Decimal(str(value))
+    else:
+        text = str(value).lower().replace(",", "").replace("₹", " ").replace("rs.", " ").replace("rs", " ").replace("rupees", " ")
+        text = text.replace("रुपये", " ").replace("रु", " ").translate(str.maketrans("०१२३४५६७८९", "0123456789"))
+        m = _AMOUNT_NUM.search(text)
+        if not m:
+            return None
+        amount = Decimal(m.group(1))
+        tail = text[m.end():].strip()
+        for word, mult in _AMOUNT_WORDS:
+            if re.match(rf"^{word}\b", tail):
+                amount *= mult
+                break
+    if amount <= 0 or amount >= Decimal("1000000000000"):
+        return None
+    return amount.quantize(Decimal("0.01"))
 
 
 def private_item(task: PrivateTask) -> dict:
@@ -537,9 +603,20 @@ def shared_item(task: SharedTask) -> dict:
             "section": task.section.name if task.section_id and task.section.active else "",
             "section_id": task.section_id if task.section_id and task.section.active else None,
             "section_colour": task.section.colour if task.section_id else "",
+            # Whose hands it passed through, when more than giver and doer ("Sir → Mansi → Nikki").
+            "chain": chain_names(task),
         }
     )
     return item
+
+
+def chain_names(task: SharedTask) -> list[str]:
+    """The people a task went through, in order, when it was handed on at least once (else empty)."""
+    ids = [i for i in (task.handed or []) if isinstance(i, int)]
+    if len(ids) < 3:
+        return []
+    people = {u.id: u for u in User.objects.filter(id__in=ids)}
+    return [_person_words(people[i])[0] if i in people else "someone" for i in ids]
 
 
 def request_item(req: TaskRequest) -> dict:
@@ -634,6 +711,13 @@ def alert_question(alert: Alert) -> dict | None:
         giver = alert.sender or (task.created_by if task else None)
         if giver is not None and giver.id != alert.recipient_id:
             who, who_hi = giver_words(giver)
+            # An approval asked of them: yes approves, no declines (both go back to whoever asked).
+            if task is not None and task.kind == Kind.APPROVAL:
+                if task.is_closed or task.assignee_user_id != alert.recipient_id:
+                    return None
+                amt = rupees(task.amount)
+                return {"kind": "approve", "en": f"Approve {amt}?" if amt else "Approve it?",
+                        "hi": f"{amt} मंज़ूर करूँ?" if amt else "मंज़ूर करूँ?", "task": str(task.id)}
             # Work given to them (not a meeting): when will they do it? The answer goes back to the giver, and it
             # counts as seen. Once they have said, or once it is no longer theirs, nothing is asked.
             if task is not None and task.kind != Kind.MEETING:
@@ -670,7 +754,13 @@ _TITLE_HI = (
     ("will do it", "{who} कब तक करेंगे"),
     ("can't do it", "{who} नहीं कर पाएँगे"),
     ("gave your task to", "आपका काम किसी और को दिया गया"),
+    ("handed your task on", "{who} ने आपका काम आगे दिया"),
     ("completed a task", "{who} ने काम पूरा किया"),
+    ("approved", "{who} ने मंज़ूर किया"),
+    ("declined an approval", "{who} ने मंज़ूरी नहीं दी"),
+    ("update on", "{who} का अपडेट"),
+    ("hasn't moved", "दिया हुआ काम रुका है"),
+    ("promised", "{who} का वादा बीत गया"),
     ("put a task on hold", "{who} ने काम होल्ड पर रखा"),
     ("started a task", "{who} ने काम शुरू किया"),
     ("reopened a task", "{who} ने काम फिर से खोला"),
@@ -700,6 +790,8 @@ def alert_title_hi(alert: Alert) -> str:
     who_hi = (md_address_hi() if sender.is_md else sender.spoken_name) if sender is not None else ""
     title = alert.title or ""
     if alert.kind == Alert.Kind.TASK_ASSIGNED and who_hi:
+        if title.startswith("Approval"):
+            return f"{who_hi} ने मंज़ूरी माँगी"
         return f"{who_hi} के साथ मीटिंग" if title.startswith("Meeting with") else f"{who_hi} से नया टास्क"
     if alert.kind == Alert.Kind.NEW_REQUEST and who_hi:
         return f"{who_hi} की रिक्वेस्ट" if title.startswith("New task") else f"{who_hi} का बदलाव का सुझाव"
@@ -1081,6 +1173,7 @@ def create_private_task(md: User, data: dict, source: str = PrivateTask.Source.M
     )
     apply_schedule(task, {**data, "_prefs": get_prefs(md)}, creating=True)
     task.announcement = (data.get("announcement") or "")[:300]
+    _apply_extras(task, data, creating=True)
     task.save()
     if task.kind == Kind.MEETING and data.get("duration_minutes"):
         learn_meeting_minutes(md, int(data["duration_minutes"]))
@@ -1088,6 +1181,36 @@ def create_private_task(md: User, data: dict, source: str = PrivateTask.Source.M
     _sections.file_private(task, f"{task.title} {task.notes}", md, said=data.get("section") or "")
     audit(md, "private_task.create", "private_task", task.id)  # no title in audit, by design
     return task
+
+
+def _apply_extras(task, data: dict, *, creating: bool) -> None:
+    """The repeat rule, the checklist and the amount (Nov 2026), on creation and on a change. A repeating item with
+    no date, or whose first moment has already passed, starts on the next date its rule names."""
+    if "repeat" in data:
+        rule = str(data.get("repeat") or "").strip().lower()
+        if rule and not recurrence.valid(recurrence.settle(rule, task.due_date or tu.today_local())):
+            raise ServiceError("repeat", "I did not understand how often it repeats.", 422)
+        task.repeat = recurrence.settle(rule, task.due_date or tu.today_local())
+    if "repeat_until" in data:
+        task.repeat_until = data.get("repeat_until") or None
+    if "amount" in data:
+        task.amount = clean_amount(data.get("amount"))
+    if "steps" in data and data.get("steps") is not None:
+        task.steps = data["steps"]
+    if creating and task.repeat:
+        now, today = timezone.now(), tu.today_local()
+        if task.due_at and task.due_at < now:
+            local = tu.to_local(task.due_at)
+            nxt = recurrence.next_date(task.repeat, local.date())
+            task.due_date, task.due_at = nxt, tu.combine_local(nxt, local.time().replace(second=0, microsecond=0))
+            if task.kind == Kind.MEETING and task.scheduled_start:
+                length = task.scheduled_end - task.scheduled_start
+                task.scheduled_start, task.scheduled_end = task.due_at, task.due_at + length
+        elif task.due_date and task.due_date < today and not task.due_at:
+            task.due_date = recurrence.next_date(task.repeat, task.due_date)
+        elif not task.due_date:
+            task.due_kind, task.due_date = DueKind.DATE, recurrence.next_date(task.repeat, today - timedelta(days=1))
+        task.original_due_date, task.original_due_at = task.due_date, task.due_at
 
 
 EDITABLE_FIELDS = {"title", "notes", "priority", "kind", "status"}
@@ -1109,6 +1232,7 @@ def _apply_changes(task, changes: dict):
         if "due_time" in changes and "due_date" not in changes and changes["due_time"]:
             changes = {**changes, "due_date": task.due_date or tu.today_local()}
         apply_schedule(task, changes, creating=False)
+    _apply_extras(task, changes, creating=False)
     if task.status == Status.COMPLETED and not task.completed_at:
         task.completed_at = timezone.now()
     if task.status != Status.COMPLETED:
@@ -1184,6 +1308,8 @@ def create_person_task(giver: User, person: User, data: dict, *, meeting: bool =
     )
     apply_schedule(task, {**data, "kind": task.kind, "_prefs": get_prefs(giver)}, creating=True)
     task.announcement = (data.get("announcement") or "")[:300]
+    _apply_extras(task, data, creating=True)
+    task.handed = [giver.id, person.id]
     task.save()
     if task.kind == Kind.MEETING and data.get("duration_minutes"):
         learn_meeting_minutes(giver, int(data["duration_minutes"]))
@@ -1195,14 +1321,23 @@ def create_person_task(giver: User, person: User, data: dict, *, meeting: bool =
     when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
     when_hi = tu.due_phrase_hi(task.due_kind, task.due_date, task.due_at)
     pr_en, pr_hi = _priority_words(task.priority)
+    repeat_en, repeat_hi = recurrence.describe(task.repeat)
     if meeting:
         title = f"Meeting with {who}"
         spoken = f"{name}, {who} has scheduled a meeting with you" + (f" {when}" if when else "") + f": {task.title}."
         spoken_hi = f"{name}, {who_hi} ने आपके साथ मीटिंग रखी है" + (f" {when_hi}" if when_hi else "") + f": {task.title}।"
+    elif task.kind == Kind.APPROVAL:
+        amt = rupees(task.amount)
+        title = f"Approval asked by {who}"
+        spoken = f"{name}, {who} asks your approval" + (f" for {amt}" if amt else "") + f": {task.title}."
+        spoken_hi = f"{name}, {who_hi} ने" + (f" {amt} की" if amt else "") + f" मंज़ूरी माँगी है: {task.title}।"
+        compose_note = False  # the amount and the words must reach them exactly as said
     else:
         title = f"New task from {who}"
         spoken = f"{name}, {who} has given you a new {pr_en}task: {task.title}" + (f", {when}" if when else "") + "."
         spoken_hi = f"{name}, {who_hi} ने आपको एक नया {pr_hi}टास्क दिया है: {task.title}" + (f", {when_hi}" if when_hi else "") + "।"
+    if repeat_en:
+        spoken, spoken_hi = spoken[:-1] + f", {repeat_en}.", spoken_hi[:-1] + f", {repeat_hi}।"
     message, message_hi = spoken, spoken_hi
     if compose_note:
         # A brief professional note in the giver's name (the template above if the AI is unavailable).
@@ -1258,6 +1393,8 @@ def create_own_task(user: User, data: dict) -> SharedTask:
     if task.kind == Kind.MEETING and data.get("duration_minutes"):
         learn_meeting_minutes(user, int(data["duration_minutes"]))
     task.announcement = (data.get("announcement") or "")[:300]
+    _apply_extras(task, data, creating=True)
+    task.handed = [user.id]
     task.save()
     from . import sections as _sections  # local import: sections builds on this module
     _sections.file_task(task, f"{task.title} {task.description} {task.notes}", giver=user, person=user,
@@ -1368,17 +1505,28 @@ def _seen_by_touching(user: User, task: SharedTask) -> None:
     Alert.objects.filter(recipient=user, ref_type="shared_task", ref_id=str(task.id), seen_at__isnull=True).update(seen_at=now)
 
 
-def _tell_giver_of_change(actor: User, task: SharedTask, old_status: str, old_due) -> None:
+def _tell_giver_of_change(actor: User, task: SharedTask, old_status: str, old_due, note: str = "") -> None:
     """Whoever gave this person the task hears what they did with it: done, declined (cancelled), on hold, moved to
     another time; started and reopened are quiet news. Their own work tells nobody. The MD is named by the form of
-    address ("Sir has declined: …"), anyone else by name."""
+    address ("Sir has declined: …"), anyone else by name. An approval is said as approved / declined, with the amount."""
     giver = task.created_by if task.created_by_id and task.created_by_id != actor.id else None
     if giver is None or task.origin in OWN_ORIGINS or not giver.is_active:
         return
     name, name_hi = giver_words(actor)
     to, to_hi = address_of(giver), address_hi_of(giver)
     kind, spoken_hi = Alert.Kind.STAFF_UPDATE, ""
-    if task.status != old_status:
+    if task.kind == Kind.APPROVAL and task.status != old_status and task.status in (Status.COMPLETED, Status.CANCELLED):
+        amt = rupees(task.amount)
+        what = f"{amt} for {task.title}" if amt else task.title
+        what_hi = f"{task.title} के {amt}" if amt else task.title
+        tail, tail_hi = (f" Note: {note}", f" नोट: {note}") if note else ("", "")
+        if task.status == Status.COMPLETED:
+            title, priority = f"{name} approved {what}", Priority.HIGH
+            spoken, spoken_hi = f"{to}, {name} has approved {what}.{tail}", f"{to_hi}, {name_hi} ने {what_hi} मंज़ूर कर दिया।{tail_hi}"
+        else:
+            title, priority = f"{name} declined an approval", Priority.HIGH
+            spoken, spoken_hi = f"{to}, {name} has declined {what}.{tail}", f"{to_hi}, {name_hi} ने {what_hi} मंज़ूर नहीं किया।{tail_hi}"
+    elif task.status != old_status:
         if task.status == Status.COMPLETED:
             title, priority, spoken = f"{name} completed a task", Priority.NORMAL, f"{to}, {name} has completed: {task.title}."
             spoken_hi = f"{to_hi}, {name_hi} ने पूरा कर दिया: {task.title}।"
@@ -1409,6 +1557,115 @@ def _tell_giver_of_change(actor: User, task: SharedTask, old_status: str, old_du
 def update_pa_task_status(pa: User, task_id, new_status: str, expected_version: int, note: str = "") -> SharedTask:
     """Kept for older phones: see update_task_status."""
     return update_task_status(pa, task_id, new_status, expected_version, note)
+
+
+# --------------------------------------------------------------------------- approvals, updates, checklists (Nov 2026)
+@transaction.atomic
+def approve_task(user: User, task_id, approve: bool, note: str = "") -> SharedTask:
+    """"Approve it?": yes closes the approval as approved, no as declined; whoever asked hears which, with the amount
+    and the note. Only the person it was asked of (or the MD) decides. Deciding is seeing: the ringing stops."""
+    task = SharedTask.objects.select_for_update().get(id=task_id, kind=Kind.APPROVAL)
+    if not (user.is_md or task.assignee_user_id == user.id):
+        raise ServiceError("forbidden", "only the person it was asked of can decide this.", 403)
+    if task.is_closed:
+        raise ServiceError("closed", "this was already decided.", 409)
+    note = " ".join(str(note or "").split())[:300]
+    old = task.status
+    task.status = Status.COMPLETED if approve else Status.CANCELLED
+    task.completed_at = timezone.now() if approve else None
+    task.version += 1
+    task.save()
+    _seen_by_touching(user, task)
+    log_event(task, TaskEvent.Kind.APPROVED if approve else TaskEvent.Kind.DECLINED, user, note=note)
+    close_task_alerts(task)
+    _tell_giver_of_change(user, task, old, (task.due_at, task.due_date), note=note)
+    audit(user, "task.approve" if approve else "task.decline", "shared_task", task.id)
+    return task
+
+
+NOTE_MAX_CHARS = 1000
+
+
+@transaction.atomic
+def add_task_note(user: User, task_id, text: str) -> dict:
+    """A short update on a work item ("bank band tha, kal subah karunga"), by whoever has it, whoever gave it, or the
+    MD: kept in the task's history, and the other side hears it at once. From the person it is for, it also counts
+    as seen, and as movement (the "no update for N days" nudge starts again)."""
+    text = " ".join(str(text or "").split())[:NOTE_MAX_CHARS]
+    if not text:
+        raise ServiceError("empty", "say what the update is.", 422)
+    task = SharedTask.objects.select_for_update().get(id=task_id)
+    if not visible_shared_qs(user).filter(id=task_id).exists():
+        raise SharedTask.DoesNotExist("not visible")
+    if not (user.is_md or task.assignee_user_id == user.id or task.created_by_id == user.id):
+        raise ServiceError("forbidden", "only the task's people can add an update.", 403)
+    log_event(task, TaskEvent.Kind.NOTE, user, note=text)
+    if task.assignee_user_id == user.id:
+        _seen_by_touching(user, task)
+    task.save(update_fields=["updated_at"])  # movement: the stale-work nudge counts from now
+    name, name_hi = giver_words(user)
+    others = {u.id: u for u in (task.created_by, task.assignee_user) if u is not None and u.id != user.id and u.is_active}
+    for other in others.values():
+        to, to_hi = address_of(other), address_hi_of(other)
+        Alert.objects.create(
+            recipient=other, sender=user, kind=Alert.Kind.STAFF_UPDATE, priority=Priority.NORMAL,
+            title=f"{name}: update on {task.title}"[:200], body=text[:2000],
+            spoken_text=f"{to}, {name} on {task.title}: {text}"[:400], spoken_text_hi=f"{to_hi}, {name_hi}, {task.title} पर: {text}"[:400],
+            ref_type="shared_task", ref_id=str(task.id),
+        )
+    audit(user, "task.note", "shared_task", task.id)
+    return {"task": task, "told": [u.spoken_name for u in others.values()]}
+
+
+@transaction.atomic
+def set_steps(user: User, scope: str, task_id, steps: list | None = None, tick: tuple | None = None):
+    """The checklist inside an item: the whole list replaced (steps), or one step ticked / unticked (tick = (index,
+    done)). A personal item: its owner. A work item: whoever has it, whoever gave it, or the MD. From the person it
+    is for, ticking counts as seen. Returns the task (every step done = the caller may offer "mark it done?")."""
+    if scope == "private":
+        task = PrivateTask.objects.select_for_update().get(id=task_id, owner=user)
+    else:
+        if not visible_shared_qs(user).filter(id=task_id).exists():
+            raise SharedTask.DoesNotExist("not visible")
+        task = SharedTask.objects.select_for_update().get(id=task_id)
+        if not (user.is_md or task.assignee_user_id == user.id or task.created_by_id == user.id):
+            raise ServiceError("forbidden", "only the task's people can change its checklist.", 403)
+    current = task.steps
+    if steps is not None:
+        done_before = {s["text"].lower(): s["done"] for s in current}
+        fresh = []
+        for s in steps[:40]:
+            text = (s if isinstance(s, str) else str((s or {}).get("text") or "")).strip()[:200]
+            if not text:
+                continue
+            done = bool(s.get("done")) if isinstance(s, dict) and "done" in s else done_before.get(text.lower(), False)
+            fresh.append({"text": text, "done": done})
+        current = fresh
+    if tick is not None:
+        index, done = tick
+        if not (isinstance(index, int) and 0 <= index < len(current)):
+            raise ServiceError("no_step", "there is no such step on this item.", 422)
+        current[index]["done"] = bool(done)
+    task.steps = current
+    task.version += 1
+    task.save()
+    if isinstance(task, SharedTask) and task.assignee_user_id == user.id:
+        _seen_by_touching(user, task)
+    audit(user, "task.steps", "shared_task" if isinstance(task, SharedTask) else "private_task", task.id)
+    return task
+
+
+def find_step(task, words: str) -> int | None:
+    """The index of the checklist step the words mean ("hotel ho gaya" -> "Book hotel"), or None."""
+    keys = {w for w in re.findall(r"[a-z0-9ऀ-ॿ]+", str(words or "").lower()) if len(w) > 2}
+    if not keys:
+        return None
+    best, best_hits = None, 0
+    for i, s in enumerate(task.steps):
+        hits = len(keys & {w for w in re.findall(r"[a-z0-9ऀ-ॿ]+", s["text"].lower())})
+        if hits > best_hits:
+            best, best_hits = i, hits
+    return best
 
 
 def change_shared_task(user: User, task_id, changes: dict, expected_version: int, reason: str = ""):
@@ -2061,12 +2318,13 @@ def record_cannot(user: User, task_id, reason: str = "") -> SharedTask:
 
 @transaction.atomic
 def reassign_task(by: User, task_id, person: User) -> SharedTask:
-    """Give a task to someone else instead (after "can't do it" or "not seen yet", or any time): only whoever gave it,
-    or the MD. It starts afresh with the new person (rings until seen, asks them by when); the one who had it is told
-    and its alerts go quiet; the history keeps both."""
+    """Give a task to someone else instead (after "can't do it" or "not seen yet", or any time): whoever gave it, the
+    MD, or the person who has it (handing it on: the giver is told, and the chain shows Sir → Mansi → Nikki). It
+    starts afresh with the new person (rings until seen, asks them by when); the one who had it is told and its
+    alerts go quiet; the history keeps both."""
     task = SharedTask.objects.select_for_update().get(id=task_id)
-    if not (by.is_md or task.created_by_id == by.id):
-        raise ServiceError("forbidden", "only whoever gave it can give it to someone else.", 403)
+    if not (by.is_md or task.created_by_id == by.id or task.assignee_user_id == by.id):
+        raise ServiceError("forbidden", "only whoever gave it, or has it, can give it to someone else.", 403)
     if task.assignee_type != SharedTask.Assignee.USER or task.origin not in GIVEN_ORIGINS + MEET_ORIGINS:
         raise ServiceError("invalid", "only work given to someone on the team can be given to someone else.", 422)
     if task.is_closed:
@@ -2089,6 +2347,11 @@ def reassign_task(by: User, task_id, person: User) -> SharedTask:
     task.assignee_type = bucket_of(person)
     task.status, task.hold_reason, task.completed_at = Status.OPEN, "", None
     task.seen_at, task.promise_date, task.promise_at = None, None, None
+    # The chain of hands: giver, then everyone it went to in turn (older tasks start theirs here).
+    chain = [i for i in (task.handed or []) if isinstance(i, int)] or [task.created_by_id] + ([old.id] if old else [])
+    if chain[-1] != person.id:
+        chain.append(person.id)
+    task.handed = chain[-20:]
     task.version += 1
     task.save()
     log_event(task, TaskEvent.Kind.REASSIGNED, by, to=person.id, **({"from": old.id} if old else {}))
@@ -2100,6 +2363,17 @@ def reassign_task(by: User, task_id, person: User) -> SharedTask:
             title=f"{who} gave your task to {name}"[:200], body=task.title,
             spoken_text=f"{old.spoken_name}, {who} has given {task.title} to {name} instead."[:400],
             spoken_text_hi=f"{old.spoken_name}, {who_hi} ने {task.title} अब {name} को दे दिया है।"[:400],
+            ref_type="reassigned", ref_id=str(task.id),
+        )
+    giver = task.created_by
+    if old is not None and old.id == by.id and giver is not None and giver.id != by.id and giver.is_active:
+        # The person who had it handed it on: whoever gave it hears where it went.
+        to, to_hi = address_of(giver), address_hi_of(giver)
+        Alert.objects.create(
+            recipient=giver, sender=by, kind=Alert.Kind.INFO, priority=Priority.NORMAL,
+            title=f"{who} handed your task on to {name}"[:200], body=task.title,
+            spoken_text=f"{to}, {who} has handed {task.title} on to {name}."[:400],
+            spoken_text_hi=f"{to_hi}, {who_hi} ने {task.title} आगे {name} को दे दिया है।"[:400],
             ref_type="reassigned", ref_id=str(task.id),
         )
     when = tu.due_phrase(task.due_kind, task.due_date, task.due_at)
@@ -2123,13 +2397,14 @@ def reassign_task(by: User, task_id, person: User) -> SharedTask:
 
 
 # --------------------------------------------------------------------------- a task's history
-def log_event(task, kind: str, actor: User | None = None, **data) -> None:
-    """One step in a work item's history (see TaskEvent). Never stops the work itself: a failure is only logged."""
+def log_event(task, kind: str, actor: User | None = None, note: str = "", **data) -> None:
+    """One step in a work item's history (see TaskEvent). Never stops the work itself: a failure is only logged.
+    `note` is the words of an update or a decision (encrypted at rest, like the title); `data` the plain facts."""
     if not isinstance(task, SharedTask) or task.pk is None:
         return
     try:
         with transaction.atomic():
-            TaskEvent.objects.create(task_id=task.pk, kind=kind, actor=actor, data=jsonable(data))
+            TaskEvent.objects.create(task_id=task.pk, kind=kind, actor=actor, data=jsonable(data), note=(note or "")[:NOTE_MAX_CHARS])
     except Exception:  # noqa: BLE001 — the history must never undo the work it describes
         log.exception("task history step not recorded")
 
@@ -2140,9 +2415,11 @@ _STATUS_EVENT = {Status.IN_PROGRESS: TaskEvent.Kind.STARTED, Status.BLOCKED: Tas
 
 
 def _log_changes(actor: User, task: SharedTask, old_status: str, old_due) -> None:
-    """The steps a change made: a new status, a new time."""
+    """The steps a change made: a new status, a new time (an approval closed is approved / declined)."""
     if task.status != old_status:
         kind = _STATUS_EVENT[task.status]
+        if task.kind == Kind.APPROVAL and kind in (TaskEvent.Kind.DONE, TaskEvent.Kind.CANCELLED):
+            kind = TaskEvent.Kind.APPROVED if kind == TaskEvent.Kind.DONE else TaskEvent.Kind.DECLINED
         extra = {"reason": task.hold_reason} if kind == TaskEvent.Kind.HOLD and task.hold_reason else {}
         if kind == TaskEvent.Kind.DONE:
             # The deadline it had when it was finished, so a later move never changes whether it was on time.
@@ -2170,6 +2447,10 @@ def _history_text(kind: str, actor: User | None, data: dict, task: SharedTask, p
     K = TaskEvent.Kind
     sec = data.get("section") or ""
     in_sec, in_sec_hi = (f" · in {sec}", f" · {sec} में") if sec else ("", "")
+    if data.get("repeat"):
+        # The next occurrence of a repeating item: made by JARVIS from the one before it.
+        in_sec += f" · repeats {data['repeat']}"
+        in_sec_hi += f" · {recurrence.describe(task.repeat)[1] or data['repeat']}"
     if kind == K.GIVEN:
         if task.kind == Kind.MEETING:
             return f"Meeting set by {a} with {to}{in_sec}", f"{a_hi} ने {to_hi} के साथ मीटिंग रखी{in_sec_hi}"
@@ -2214,6 +2495,15 @@ def _history_text(kind: str, actor: User | None, data: dict, task: SharedTask, p
         if data.get("from"):
             return f"Moved from {data['from']} to {sec} by {a}", f"{a_hi} ने {data['from']} से {sec} में रखा"
         return f"Put in {sec} by {a}", f"{a_hi} ने {sec} में रखा"
+    note = data.get("note") or ""
+    if kind == K.NOTE:
+        return f"{a}: {note}", f"{a_hi}: {note}"
+    if kind == K.APPROVED:
+        amt = rupees(task.amount)
+        return (f"Approved by {a}" + (f" ({amt})" if amt else "") + (f": {note}" if note else ""),
+                f"{a_hi} ने मंज़ूर किया" + (f" ({amt})" if amt else "") + (f": {note}" if note else ""))
+    if kind == K.DECLINED:
+        return (f"Declined by {a}" + (f": {note}" if note else ""), f"{a_hi} ने मंज़ूर नहीं किया" + (f": {note}" if note else ""))
     return kind.title(), kind.title()
 
 
@@ -2221,7 +2511,8 @@ def task_history(task: SharedTask) -> list[dict]:
     """The task's steps, oldest first, each as a short line in English and Hindi with its time. A task older than the
     history gets its start (and its finish) from the task itself."""
     K = TaskEvent.Kind
-    steps = [(e.kind, e.at, e.actor, e.data or {}) for e in task.events.select_related("actor")]
+    steps = [(e.kind, e.at, e.actor, {**(e.data or {}), **({"note": e.note} if e.note else {})})
+             for e in task.events.select_related("actor")]
     if not any(k in (K.GIVEN, K.ADDED, K.REQUESTED, K.DELEGATED) for k, *_ in steps):
         if task.assignee_type == SharedTask.Assignee.STAFF:
             start = (K.DELEGATED, {"staff": task.staff.name if task.staff_id else ""})
@@ -2319,7 +2610,9 @@ def ai_context(user: User, include_private: bool = True) -> dict:
     def brief(item):
         return {k: item.get(k) for k in ("id", "title", "kind", "priority", "status", "due_label", "scope", "version")} | (
             {"assignee": item["assignee"].get("staff_name")} if item.get("assignee", {}).get("staff_name") else {}
-        )
+        ) | ({"steps": [s["text"] for s in item["steps"] if not s["done"]][:8]} if item.get("steps") else {}) | (
+            {"amount": item["amount_label"]} if item.get("amount_label") else {}
+        ) | ({"repeats": item["repeat_label"]} if item.get("repeat_label") else {})
     # Kept short on purpose: every item here is sent to the model on every command, and size costs seconds.
     def keep(item):
         return include_private or item.get("scope") != "private"
