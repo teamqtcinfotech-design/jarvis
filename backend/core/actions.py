@@ -356,6 +356,20 @@ def _undo_one(user: User, ref: dict) -> int:
             task.save(update_fields=["status", "version", "updated_at"])
             return 1
         return 0
+    if kind == "moved":
+        # "Jab free ho tab rakh do" done at once: undo puts the item back at its old day and time.
+        before = ref.get("before") if isinstance(ref.get("before"), dict) else {}
+        d, t = str(before.get("due_date") or ""), str(before.get("due_time") or "")
+        if not d:
+            return 0
+        changes = {"due_date": date.fromisoformat(d), "due_time": time.fromisoformat(t) if t else None}
+        if ref.get("scope") == "private":
+            task = PrivateTask.objects.get(id=ref["id"], owner=user)
+            services.update_private_task(user, ref["id"], changes, task.version)
+        else:
+            task = SharedTask.objects.get(id=ref["id"])
+            services.change_shared_task(user, ref["id"], changes, task.version)
+        return 1
     if kind == "organise":
         from . import organise  # noqa: PLC0415 — organise imports this module
         return organise.undo(user, ref.get("inverse") or {})

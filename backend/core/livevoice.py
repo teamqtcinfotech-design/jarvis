@@ -45,6 +45,7 @@ _DEVANAGARI_WORDS = [
     ("एक", "1"), ("दो", "2"), ("तीन", "3"), ("चार", "4"), ("पाँच", "5"), ("पांच", "5"), ("छह", "6"), ("छः", "6"), ("सात", "7"),
     ("आठ", "8"), ("नौ", "9"), ("दस", "10"), ("ग्यारह", "11"), ("बारह", "12"), ("पंद्रह", "15"), ("बीस", "20"), ("तीस", "30"),
     ("आधे", "aadhe"), ("आधा", "aadha"),
+    ("साढ़े", "saade"), ("साढे", "saade"), ("सवा", "sawa"), ("पौने", "paune"), ("ढाई", "dhai"), ("डेढ़", "dedh"), ("डेढ", "dedh"),
 ]
 _DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
@@ -210,7 +211,10 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {
          "reply": {"type": "string", "enum": ["yes", "no", "later"]},
          "choice": {"type": "string", "enum": ["", "fit", "push", "move"],
-                    "description": "fit = keep this one short; push = keep this one, move the others; move = put this one at the time offered"},
+                    "description": "to a clash question: '' for a plain yes (the server does what it proposed); move = put the NEW one at the "
+                                   "time offered or wherever it is free ('isko aage kabhi bhi rakh do', 'jab free ho', 'kahin bhi daal do'); "
+                                   "push = the new one stays where said and the OTHER meeting moves on ('SBI wali ko aage karo', 'doosri shift karo'); "
+                                   "fit = keep the new one short. Put the speaker's words in said: the server also reads which meeting they named."},
          "keep_original": {"type": "boolean", "description": "true when the speaker declines the time JARVIS offered and wants it exactly as first said"},
          "which_ids": {"type": "array", "items": {"type": "string"}, "description": "for 'which one?': the ids chosen, else empty"},
          "all": {"type": "boolean", "description": "for 'which one?': 'both' / 'all of them'"},
@@ -548,6 +552,11 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
         "Every tool returns \"say\": read it to the speaker EXACTLY as written, in full, with nothing added before or after, in the "
         "script it is written in. If it returns \"error\", say it was not done and why. If the speaker then answers a question the "
         "say text asked, that answer goes through the answer tool.",
+        "SEVERAL THINGS IN ONE BREATH: call a tool for each of them, in the order said. The server saves what is clear by itself and "
+        "asks about ONE clash at a time; while that question is open the other results come back with ok and no say. Read only the "
+        "say texts you get, in order; a result with no say needs no words at all: do not say done, do not name or repeat the items, "
+        "do not describe what you did. Then stop and listen for the answer. The speaker's answer goes through the answer tool; the "
+        "server's next say tells what was saved and asks the next question, if there is one.",
         "",
         "WHICH TOOL: give_work for work given to people on the team (one call with every item of the sentence; a task is always "
         "given, whatever else is in the diary at that time); set_meeting for a meeting or call (with push_others when the speaker "

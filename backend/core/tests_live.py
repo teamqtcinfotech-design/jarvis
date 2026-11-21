@@ -18,6 +18,14 @@ class TimeWordsTests(BaseCase):
         self.assertEqual(livevoice.when_from_words("परसों चार बजे"), {"due_date": parso, "due_time": "16:00"})
         self.assertEqual(livevoice.when_from_words("parso 4 baje"), {"due_date": parso, "due_time": "16:00"})
         self.assertEqual(livevoice.when_from_words("kal subah"), {"due_date": kal, "due_time": "10:00"})
+        # The half and quarter hours as they are really said (Nov 2026): "saadhe gyarah" is 11:30, not 10:00.
+        self.assertEqual(livevoice.when_from_words("kal subah saadhe gyarah baje")["due_time"], "11:30")
+        self.assertEqual(livevoice.when_from_words("dopahar saadhe barah baje")["due_time"], "12:30")
+        self.assertEqual(livevoice.when_from_words("साढ़े ग्यारह बजे")["due_time"], "11:30")
+        self.assertEqual(livevoice.when_from_words("paune char baje")["due_time"], "15:45")
+        self.assertEqual(livevoice.when_from_words("sawa paanch baje")["due_time"], "17:15")
+        self.assertEqual(livevoice.when_from_words("kal do baje")["due_time"], "14:00")
+        self.assertEqual(livevoice.when_from_words("kar do"), {"due_date": "", "due_time": ""})
         self.assertEqual(livevoice.when_from_words("कल शाम"), {"due_date": kal, "due_time": "18:00"})
         self.assertEqual(livevoice.when_from_words(""), {"due_date": "", "due_time": ""})
         # A calendar date, however far: "12 December ko 11 baje" is the coming 12 December, never today.

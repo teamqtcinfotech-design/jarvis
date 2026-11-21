@@ -7,9 +7,10 @@ from unittest import mock
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from core import services
-from core.models import Kind, Message
-from core.tests import BaseCase, _cmd
+from core import livevoice, services
+from core import timeutils as tu
+from core.models import Kind, Message, Priority, PrivateTask
+from core.tests import BaseCase, _cmd, _workday
 
 
 class FarFutureTests(BaseCase):
@@ -215,11 +216,128 @@ class BatchClashTests(BaseCase):
         self.assertNotIn("push", d["schedule"]["options"])
         self.assertTrue(d["schedule"]["suggested"], d["schedule"])  # the way out offered: another time, taken with a plain yes
         self.assertIn("Shall I put it at", d["spoken_reply"])
-        # A yes with "push" cannot move it: asked again, nothing booked.
+        # A yes with "push" cannot move it: said so, asked again, nothing booked.
         d2 = self.interpret("board review aage kar do", _cmd(intent="confirm_pending", setting_value="push", spoken_reply="Ji."),
                             awaiting="JARVIS asked about the clash", pending=d)
         self.assertFalse(d2.get("booked"))
-        self.assertIn("not possible", d2["spoken_reply"])
+        self.assertIn("Board review is urgent and stays", d2["spoken_reply"])
+        self.assertIn("Shall I put it at", d2["spoken_reply"])
+
+
+class OneBreathTests(BaseCase):
+    """The live voice brings the things of one breath one by one, each its own form. The first clash is asked about and
+    nothing else is read out until it is answered: a clear item said after it is saved quietly, a second clash waits
+    its turn, and the answer settles the card, names what was saved and asks the next question (Nov 2026)."""
+
+    def setUp(self):
+        super().setUp()
+        self.day = _workday(2)
+        self.next = _workday(3) if _workday(3) != self.day else _workday(4)
+        self.board = services.create_private_task(self.md, {"title": "Board meeting", "kind": Kind.MEETING, "priority": Priority.URGENT,
+                                                            "due_date": self.day, "due_time": time(11, 0), "duration_minutes": 90})
+        self.sbi = services.create_private_task(self.md, {"title": "Call with SBI branch manager", "kind": Kind.CALL, "priority": Priority.HIGH,
+                                                          "due_date": self.next, "due_time": time(10, 0), "duration_minutes": 30})
+
+    def tool(self, name, args, pending=None):
+        with mock.patch("core.ai_brain.interpret", side_effect=AssertionError("no model must be asked")):
+            return livevoice.run_tool(self.md, name, args, pending=pending, awaiting="JARVIS asked about a clash" if pending else "")
+
+    def titles(self):
+        return {t.title: t for t in PrivateTask.objects.filter(owner=self.md)}
+
+    def test_one_clash_at_a_time_and_the_rest_follows(self):
+        day, nxt = self.day.isoformat(), self.next.isoformat()
+        # 1. Khanna at 11:30 lands on the urgent board meeting: one question, one proposal (the new one bends).
+        d1 = self.tool("set_meeting", {"people": ["Khanna"], "title": "Meeting with Khanna", "kind": "MEETING", "when_words": "",
+                                       "due_date": day, "due_time": "11:30", "said": "Monday saadhe gyarah baje Khanna ji ke saath meeting"})
+        self.assertTrue(d1["schedule"]["hard"], d1["say"])
+        self.assertIn("URGENT meeting then, Board meeting at 11 AM; that stays", d1["spoken_reply"])
+        self.assertIn("Shall I put it at", d1["spoken_reply"])
+        self.assertTrue(d1["say"])  # the Hindi twin, since he spoke Hinglish
+        self.assertEqual(d1["schedule"]["default"], "move")
+        # 2. A payment the same breath: saved at once, nothing said (the question stands), the card comes back as it was.
+        d2 = self.tool("own_item", {"what": "Payment to Rohit", "kind": "PAYMENT", "when_words": "", "due_date": day, "due_time": "14:30",
+                                    "said": "Wednesday dhai baje Rohit ko payment karni hai"}, pending=d1)
+        self.assertEqual(d2["say"], "")
+        self.assertEqual(d2["title"], "Meeting with Khanna")
+        self.assertTrue(d2["keep_card"] and d2["saved_now"])
+        self.assertEqual(len(d2["quiet"]), 1)
+        self.assertIn("Payment to Rohit", self.titles())
+        self.assertNotIn("Meeting with Khanna", self.titles())
+        # 3. A call over the SBI call: another clash, kept in line behind the open question; still nothing said.
+        d3 = self.tool("set_meeting", {"people": ["CA"], "title": "Call with CA", "kind": "CALL", "when_words": "", "due_date": nxt, "due_time": "10:00",
+                                       "said": "Thursday subah 10 baje CA ke saath call"}, pending=d2)
+        self.assertEqual(d3["say"], "")
+        self.assertEqual([q["title"] for q in d3["queue"]], ["Call with CA"])
+        self.assertNotIn("Call with CA", self.titles())
+        # 4. A clear meeting: saved quietly too.
+        d4 = self.tool("set_meeting", {"people": ["Mehra"], "title": "Meeting with Mehra", "kind": "MEETING", "when_words": "", "due_date": day,
+                                       "due_time": "17:00", "said": "Saturday shaam 5 baje Mehra ji se milna hai"}, pending=d3)
+        self.assertEqual(d4["say"], "")
+        self.assertEqual(len(d4["quiet"]), 2)
+        self.assertIn("Meeting with Mehra", self.titles())
+        # 5. "Haan": Khanna goes where proposed; then the next clash is asked, with the done line first and nothing repeated.
+        d5 = self.tool("answer", {"reply": "yes", "said": "haan"}, pending=d4)
+        khanna = self.titles()["Meeting with Khanna"]
+        self.assertGreaterEqual(khanna.due_at, self.board.scheduled_end)
+        self.assertTrue(d5["spoken_reply"].startswith("Done, Sir: Meeting with Khanna"), d5["spoken_reply"])
+        self.assertIn("Call with CA", d5["spoken_reply"])
+        self.assertIn("Call with SBI branch manager", d5["spoken_reply"])
+        self.assertEqual(d5["spoken_reply"].count("Shall I"), 1)
+        self.assertTrue(d5["say"])
+        self.assertEqual(d5["title"], "Call with CA")
+        self.assertTrue(d5["keep_card"] and d5["saved_now"] and not d5.get("card_done"))
+        self.assertEqual(len(d5["quiet"]), 2)
+        self.assertNotIn("Call with CA", self.titles())
+        # 6. "SBI wali ko aage karo": the one already there moves on, the new one stays; the quiet ones are named once.
+        d6 = self.tool("answer", {"reply": "yes", "said": "SBI wali ko aage kar do"}, pending=d5)
+        self.assertTrue(d6["booked"] and d6["card_done"], d6["say"])
+        self.sbi.refresh_from_db()
+        self.assertEqual(tu.to_local(self.sbi.due_at).strftime("%H:%M"), "10:15")
+        self.assertEqual(tu.to_local(self.titles()["Call with CA"].due_at).strftime("%H:%M"), "10:00")
+        self.assertIn("Call with SBI branch manager moved to 10:15 AM", d6["spoken_reply"])
+        self.assertIn("The other 2 saved too: Payment to Rohit", d6["spoken_reply"])
+        self.assertIn("Meeting with Mehra", d6["spoken_reply"])
+
+    def test_the_answer_heard_as_a_new_meeting_is_still_the_answer(self):
+        day = self.day.isoformat()
+        d1 = self.tool("set_meeting", {"people": ["Khanna"], "title": "Meeting with Khanna", "kind": "MEETING", "when_words": "",
+                                       "due_date": day, "due_time": "11:30", "said": "11:30 Khanna ji ke saath meeting"})
+        # "Khanna ji ko 3 baje rakho" read by the voice as another meeting with Khanna: it is the time for the one waiting.
+        d2 = self.tool("set_meeting", {"people": ["Khanna"], "title": "Meeting with Khanna", "kind": "MEETING", "when_words": "",
+                                       "due_date": day, "due_time": "15:00", "said": "Khanna ji ko 3 baje rakho"}, pending=d1)
+        self.assertTrue(d2["booked"] and d2["card_done"], d2["say"])
+        khanna = [t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Meeting with Khanna"]
+        self.assertEqual(len(khanna), 1)
+        self.assertEqual(tu.to_local(khanna[0].due_at).strftime("%H:%M"), "15:00")
+
+    def test_no_to_the_clash_drops_only_the_new_one(self):
+        day = self.day.isoformat()
+        d1 = self.tool("set_meeting", {"people": ["Khanna"], "title": "Meeting with Khanna", "kind": "MEETING", "when_words": "",
+                                       "due_date": day, "due_time": "11:30", "said": "x"})
+        d2 = self.tool("own_item", {"what": "Buy flowers", "when_words": "", "personal": True, "said": "flowers lene hain"}, pending=d1)
+        d3 = self.tool("answer", {"reply": "no", "said": "nahi rehne do"}, pending=d2)
+        self.assertTrue(d3["card_done"])
+        self.assertIn("dropped Meeting with Khanna", d3["spoken_reply"])
+        self.assertIn("The other 1 saved too: Buy flowers", d3["spoken_reply"])
+        self.assertNotIn("Meeting with Khanna", self.titles())
+        self.assertIn("Buy flowers", self.titles())
+
+    def test_whenever_free_moves_an_item_to_the_next_free_time_at_once(self):
+        sharma = services.create_private_task(self.md, {"title": "Meeting with Sharma", "kind": Kind.MEETING, "due_date": self.day,
+                                                        "due_time": time(16, 0), "duration_minutes": 60})
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="change_task", title="Sharma", changed_fields=[], spoken_reply="Ji.")):
+            r = self.md_client.post("/api/v1/assistant/interpret/", {"text": "Sharma wali meeting jab free ho tab rakh do"}, format="json")
+        d = r.json()
+        self.assertTrue(d["booked"] and d["card_done"], d["spoken_reply"])
+        self.assertIn("Meeting with Sharma moved to", d["spoken_reply"])
+        sharma.refresh_from_db()
+        self.assertGreater(sharma.due_at, tu.combine_local(self.day, time(16, 0)))
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="undo", spoken_reply="Ji.")):
+            r = self.md_client.post("/api/v1/assistant/interpret/", {"text": "undo"}, format="json")
+        self.assertIn("Undone", r.json()["spoken_reply"])
+        sharma.refresh_from_db()
+        self.assertEqual(tu.to_local(sharma.due_at).strftime("%H:%M"), "16:00")
 
 
 class MessageRepliesTests(BaseCase):

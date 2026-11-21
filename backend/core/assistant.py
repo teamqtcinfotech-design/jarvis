@@ -674,6 +674,11 @@ def _clean_pending(pending) -> dict | None:
         p["targets"] = [p["target"]]
     p["schedule"] = p.get("schedule") if isinstance(p.get("schedule"), dict) else {}
     p["warnings"] = [str(w) for w in p.get("warnings") or []] if isinstance(p.get("warnings"), list) else []
+    # What came in while this card waited (several things in one breath): further cards in line, and the names of
+    # what was saved quietly meanwhile (said in one line once the card is settled).
+    p["queue"] = [q for q in p.get("queue") if isinstance(q, dict) and isinstance(q.get("action"), str)][:MAX_ITEMS] \
+        if isinstance(p.get("queue"), list) else []
+    p["quiet"] = [str(x)[:160] for x in p.get("quiet") if isinstance(x, str)][:MAX_ITEMS] if isinstance(p.get("quiet"), list) else []
     return p
 
 
@@ -797,8 +802,10 @@ def _day_readback(user: User, day: date, from_time: datetime) -> tuple[str, str]
     return en, hi
 
 
-def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: str) -> None:
-    """Book the new meeting where he said and move the others in order; the draft becomes the read-back."""
+def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: str) -> tuple[str, str] | None:
+    """Book the new meeting where he said and move the others in order. Returns the done line (and its Hindi twin):
+    the new one and where each moved one now is, nothing else (the whole day read back after every move was too
+    much). None when it could not be booked: the draft then says why."""
     address_hi = services.address_hi_of(user)
     try:
         booked = _book_now(user, card, str(card.get("transcript") or ""))
@@ -806,30 +813,28 @@ def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: st
         draft["action"] = "answer"
         _say(draft, f"Sorry {address}, I could not book that: {getattr(exc, 'message', 'it was not clear')}",
              f"माफ़ कीजिए {address_hi}, बुक नहीं हो पाई।")
-        return
+        return None
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    actions.remember_done(user, booked.get("refs") or [], booked["title"])
+    draft["_refs"] = list(booked.get("refs") or [])
     failed = _apply_moves(user, moves)
-    # The rest of what was said in the same breath is saved with it (each where it belongs; one that would land on
-    # yet another meeting is left out and named, see actions.run_card).
-    batch = [b for b in (card.get("batch") or []) if isinstance(b, dict)]
-    rest = None
-    if batch:
-        from . import actions  # noqa: PLC0415 — actions imports this module
-        rest = actions.run_card(user, {**batch[0], "batch": batch[1:]})
     day = tu.to_local(booked["start"]).date()
-    en_list, hi_list = _day_readback(user, day, booked["start"])
-    n = len(moves) - len(failed)
-    moved_en = f" {n} meeting{'s' if n != 1 else ''} moved." if n else ""
-    moved_hi = f" {n} मीटिंग आगे की गईं।" if n else ""
-    en = f"Done, {address}: {booked['title']} at {tu.fmt_time(booked['start'])}.{moved_en} New schedule: {en_list}."
-    hi = f"हो गया, {address_hi}: {booked['title']} {tu.fmt_time_hi(booked['start'])} बजे।{moved_hi} नया शेड्यूल: {hi_list}।"
-    if rest:
-        if rest["failed"]:
-            names = "; ".join(f"{t} ({m.rstrip('.')})" for t, m in rest["failed"])
-            en += f" The other {rest['saved']} saved too; could not save: {names}."
-            hi += f" बाकी {rest['saved']} भी सेव हो गए; ये नहीं हो पाए: {names}।"
-        else:
-            en += f" The other {rest['saved']} saved too."
-            hi += f" बाकी {rest['saved']} भी सेव हो गए।"
+    moved_en, moved_hi = [], []
+    for m in moves:
+        if not isinstance(m, dict) or str(m.get("title") or "") in failed:
+            continue
+        d, t = _safe_date(str(m.get("due_date") or "")), _safe_time(str(m.get("due_time") or ""))
+        if not (d and t):
+            continue
+        at = tu.combine_local(date.fromisoformat(d), time.fromisoformat(t))
+        same_day = date.fromisoformat(d) == day
+        moved_en.append(f"{m['title']} moved to {tu.fmt_time(at) if same_day else _due_label(d, t)}")
+        moved_hi.append(f"{m['title']} अब {tu.fmt_time_hi(at) if same_day else _due_label_hi(d, t)}")
+    en = f"Done, {address}: {booked['title']} at {tu.fmt_time(booked['start'])}."
+    hi = f"हो गया, {address_hi}: {booked['title']} {tu.fmt_time_hi(booked['start'])}।"
+    if moved_en:
+        en += " " + "; ".join(moved_en) + "."
+        hi += " " + "; ".join(moved_hi) + "।"
     evening = [str(m.get("title") or "") for m in moves if _safe_time(str(m.get("due_time") or "")) >= "19:00"]
     if evening:
         en += f" Note: {', '.join(evening)} now runs after office hours."
@@ -837,11 +842,315 @@ def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: st
     if failed:
         en += f" I could not move {', '.join(failed)}; it was changed elsewhere."
         hi += f" {', '.join(failed)} नहीं हिल पाई, किसी और ने बदली थी।"
-    draft["action"], draft["booked"], draft["overrides"], draft["schedule"] = "answer", True, {}, None
-    draft["needs_clarification"], draft["question"] = False, ""
+    return en, hi
+
+
+def _quiet_label(it: dict) -> str:
+    """One item named in a closing line: "Meeting with Verma (Wed 25 Nov at 10 AM)"."""
+    if it.get("action") == "message":
+        names = ", ".join(str(a.get("name") or "") for a in (it.get("assignees") or []) if isinstance(a, dict))
+        return f"message to {names}" if names.strip(", ") else "a message"
+    title = str(it.get("title") or "one item")
+    label = it.get("due_label") or _due_label(_safe_date(str(it.get("due_date") or "")), _safe_time(str(it.get("due_time") or "")))
+    return f"{title} ({label})" if label else title
+
+
+def _hard_question(card: dict | None) -> bool:
+    """Is this waiting card his own meeting or call over another, with its question still open?"""
+    if not isinstance(card, dict) or card.get("needs_clarification"):
+        return False
+    sched = card.get("schedule") if isinstance(card.get("schedule"), dict) else {}
+    return bool(sched.get("hard") and sched.get("question") and card.get("action") in _BOOKABLE)
+
+
+def _finish_draft(draft: dict, en: str, hi: str, lang: str) -> dict:
+    draft["action"], draft["overrides"], draft["schedule"], draft["batch"] = "answer", {}, None, []
+    draft["needs_clarification"], draft["question"], draft["question_hi"] = False, "", ""
+    draft["queue"], draft["quiet"] = [], []
     _say(draft, en, hi)
-    lang = draft.get("reply_language") if draft.get("reply_language") in {"en", "hi"} else "en"
-    draft["speak_text"], draft["speak_lang"] = (hi, "hi") if lang == "hi" else (en, "en")
+    draft["speak_text"], draft["speak_lang"] = (hi, "hi") if lang == "hi" and hi else (en, "en")
+    draft["done_reply"] = draft["done_speak"] = ""
+    return draft
+
+
+def _after_card(user: User, draft: dict, pending: dict, address: str, en: str, hi: str, settled: bool = True) -> dict:
+    """The waiting card is settled (booked, or dropped): the rest said in the same breath, and anything that came in
+    while it waited, follows. Clean items are saved now and named in one line; the next one that lands on another
+    meeting is looked at afresh (the diary has changed) and becomes the next question, with the done line before it.
+    One question at a time, nothing read twice, nothing left out."""
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
+    quiet = [str(x) for x in (pending.get("quiet") or []) if isinstance(x, str)]
+    queue = [q for q in (pending.get("queue") or []) if isinstance(q, dict)]
+    refs = list(draft.pop("_refs", []) or [])
+    failed: list[tuple[str, str]] = []
+    if settled:
+        batch = [b for b in (pending.get("batch") or []) if isinstance(b, dict)]
+        clean = [b for b in batch if not (b.get("schedule") or {}).get("hard")]
+        queue = [b for b in batch if (b.get("schedule") or {}).get("hard")] + queue
+        if clean:
+            r = actions.run_card(user, {**clean[0], "batch": clean[1:]})
+            missed = {t for t, _m in r["failed"]}
+            quiet += [_quiet_label(b) for b in clean if (b.get("title") or "one item") not in missed]
+            failed += r["failed"]
+            refs += r["undo"]
+    while queue:
+        nxt = queue.pop(0)
+        if nxt.get("needs_clarification"):
+            trial = dict(nxt)  # its own question (a name nobody knows): asked as it stands
+        else:
+            trial = _rebuilt(nxt, {})
+            trial.update({"card_done": False, "booked": False, "undo": False, "saved_now": False})
+            if trial.get("action") in _SLOT_ACTIONS:
+                _advise_schedule(user, trial, address)
+        sched = trial.get("schedule") or {}
+        if trial.get("needs_clarification") or sched.get("question"):
+            trial["queue"], trial["quiet"], trial["batch"] = queue, quiet, []
+            trial["reply_language"], trial["saved_now"], trial["keep_card"] = lang, bool(refs), True
+            q_en = trial.get("question") if trial.get("needs_clarification") else sched.get("question") or trial.get("spoken_reply") or ""
+            q_hi = trial.get("question_hi") if trial.get("needs_clarification") else sched.get("question_hi") or ""
+            trial["spoken_reply"] = f"{en} {q_en}".strip()
+            trial["speak_text"], trial["speak_lang"] = (f"{hi} {q_hi}".strip(), "hi") if lang == "hi" and q_hi else (trial["spoken_reply"], "en")
+            if refs:
+                actions.remember_done(user, refs, pending.get("title") or "")
+            return trial
+        try:
+            r = actions.run_card(user, trial)
+        except (services.ServiceError, ObjectDoesNotExist, ValueError, KeyError) as exc:
+            failed.append((trial.get("title") or "one item", getattr(exc, "message", "it could not be saved")))
+            continue
+        if r["failed"]:
+            failed += r["failed"]
+        else:
+            quiet.append(_quiet_label(trial))
+        refs += r["undo"]
+    if quiet:
+        en += f" The other {len(quiet)} saved too: {', '.join(quiet)}."
+        hi += f" बाकी {len(quiet)} भी सेव हो गए: {', '.join(quiet)}।"
+    if failed:
+        names = "; ".join(f"{t} ({m.rstrip('.')})" for t, m in failed)
+        en += f" Could not save: {names}."
+        hi += f" ये नहीं हो पाए: {names}।"
+    if refs:
+        actions.remember_done(user, refs, pending.get("title") or "")
+    draft["booked"], draft["card_done"], draft["undo"] = bool(settled or quiet), True, bool(refs)
+    return _finish_draft(draft, en, hi, lang)
+
+
+def _book_card(user: User, draft: dict, pending: dict, card: dict, address: str, note_en: str = "", note_hi: str = "") -> dict:
+    """Book the waiting card as `card` now holds it (its time or length settled), then whatever follows it."""
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    address_hi = services.address_hi_of(user)
+    try:
+        booked = _book_now(user, card, str(card.get("transcript") or ""))
+    except (services.ServiceError, ValueError, KeyError) as exc:
+        draft["action"] = "answer"
+        _say(draft, f"Sorry {address}, I could not book that: {getattr(exc, 'message', 'it was not clear')}",
+             f"माफ़ कीजिए {address_hi}, बुक नहीं हो पाई।")
+        return draft
+    actions.remember_done(user, booked.get("refs") or [], booked["title"])
+    draft["_refs"] = list(booked.get("refs") or [])
+    d = tu.to_local(booked["start"])
+    when_en = _due_label(d.date().isoformat(), d.strftime("%H:%M"))
+    when_hi = _due_label_hi(d.date().isoformat(), d.strftime("%H:%M"))
+    en = f"Done, {address}: {booked['title']}, {when_en}, {tu.minutes_phrase(booked['minutes'])}.{note_en}"
+    hi = f"हो गया, {address_hi}: {booked['title']}, {when_hi}, {tu.minutes_phrase_hi(booked['minutes'])} की।{note_hi}"
+    return _after_card(user, draft, pending, address, en, hi)
+
+
+# How he answers a clash question, in his own words. Which one he means: the one being added ("is", "ye", "isko", its
+# name) or the one already there ("us", "wo", "purani", "doosri", its name); what to do with it: move it on, drop it,
+# keep it short, keep it where it is. A name beats a pronoun; nobody named means the new one (the one he is adding is
+# what bends, as he asked: "jo abhi add kar raha hoon, na ki jo already schedule hai").
+_THIS_ONE = re.compile(r"\b(is|isko|ise|isi|iska|ye|yeh|yah|this|this one|nayi|naya|nai|new one|the new|abhi wal[ai])\b", re.IGNORECASE)
+_OTHER_ONE = re.compile(r"\b(us|usko|use|usi|uska|wo|woh|that|that one|purani|purana|pehle wal[ai]|pehli wali|old one|the old|doosr[ai]|dusr[ai]|"
+                        r"the other|other one|baaki|baki)\b", re.IGNORECASE)
+_WHENEVER = re.compile(r"\b(kabhi bhi|kahin bhi|jab bhi|jab (?:main |mai )?free|jab time (?:ho|mile)|jab jagah|jahan jagah|jahan time|whenever|"
+                       r"any ?time|any free|free (?:time|slot)|best time|next (?:free )?slot|koi (?:aur |bhi |dusra |doosra )?(?:time|slot)|"
+                       r"dusre time|doosre time|aur time|aage (?:kabhi|kahin|jab)|later today|kal (?:ya|nahi to))\b", re.IGNORECASE)
+_MOVE_WORDS = re.compile(r"\b(aage|age|shift|move|baad|badal|badlo|later|push|reschedule|adjust|khiska|postpone|aage karo|aage kar)\b", re.IGNORECASE)
+_DROP_WORDS = re.compile(r"\b(hatao|hata do|hata|cancel|chhodo|chhod do|choddo|chodo|rehne do|mat rakho|mat karo|nahi chahiye|drop|delete|remove|skip|"
+                         r"nikaal|nikal do)\b", re.IGNORECASE)
+_SHORT_WORDS = re.compile(r"\b(chhoti|choti|chhota|chota|short|shorter|minute|minutes|min|kam kar|small|half|aadhe|aadha)\b", re.IGNORECASE)
+_KEEP_WORDS = re.compile(r"\b(yahin|wahi|wahin|same time|isi time|usi time|as it is|waise hi|hi rakho|hi rakh|keep (?:it )?(?:there|here)|"
+                         r"dono rakho|dono rakh|both|overlap|same)\b", re.IGNORECASE)
+
+
+def _title_hits(text: str, title: str) -> int:
+    words = set(re.findall(r"\w+", (text or "").lower()))
+    return sum(1 for w in _distinctive(title).split() if len(w) > 2 and w in words)
+
+
+def _same_thing(a: str, b: str) -> bool:
+    """Two titles that name the same thing ("Meeting with Khanna" / "Khanna ji ke saath meeting")."""
+    x, y = _distinctive(a), _distinctive(b)
+    return len(x) >= 3 and len(y) >= 3 and difflib.SequenceMatcher(None, x, y).ratio() >= 0.8
+
+
+def _move_to_free_slot(user: User, draft: dict, item: dict, address: str, address_hi: str) -> None:
+    """"Is meeting ko aage kabhi bhi rakh do", "jab free ho tab": the item goes to the first free time after where it
+    now stands (today if there is room, else the next working day), at once, and he hears where it went."""
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    task = _target_task(item)
+    draft["action"], draft["needs_clarification"], draft["question"] = "answer", False, ""
+    if task is None:
+        _say(draft, f"{address}, I could not find that item any more.", f"{address_hi}, वो आइटम अब मिला नहीं।")
+        return
+    prefs = services.get_prefs(user)
+    minutes = int(task.estimated_minutes or 0) or scheduling.minutes_for(task.kind, None)
+    now = tu.now_local()
+    start = task.scheduled_start or task.due_at
+    floor = max(now, start + timedelta(minutes=1)) if start else now
+    sug = scheduling.suggest(user, minutes=minutes, prefs=prefs, day=tu.to_local(floor).date(), not_before=floor, exclude_ids=[str(task.id)])
+    if not sug:
+        _say(draft, f"{address}, I found no free time for {task.title} in the coming days.", f"{address_hi}, अगले दिनों में {task.title} के लिए कोई खाली समय नहीं मिला।")
+        return
+    scope = item.get("scope") or ("private" if isinstance(task, PrivateTask) else "shared")
+    before = {"due_date": task.due_date.isoformat() if task.due_date else "", "due_time": tu.to_local(task.due_at).strftime("%H:%M") if task.due_at else ""}
+    failed = _apply_moves(user, [{"id": str(task.id), "scope": scope, "title": task.title, "due_date": sug["due_date"], "due_time": sug["due_time"]}])
+    if failed:
+        _say(draft, f"{address}, I could not move {task.title}; it was changed elsewhere.", f"{address_hi}, {task.title} नहीं हिल पाई, किसी और ने बदली थी।")
+        return
+    actions.remember_done(user, [{"type": "moved", "scope": scope, "id": str(task.id), "before": before}], task.title)
+    draft["targets"], draft["target"], draft["booked"], draft["card_done"], draft["undo"] = [item], item, True, True, True
+    when_en, when_hi = _due_label(sug["due_date"], sug["due_time"]), _due_label_hi(sug["due_date"], sug["due_time"])
+    _say(draft, f"Done, {address}: {task.title} moved to {when_en}.", f"हो गया, {address_hi}: {task.title} अब {when_hi}।")
+
+
+def _clash_subject(text: str, pending: dict, sched: dict) -> str:
+    """"new" (the one being added), "other" (the one already there) or "" when the words name neither."""
+    other = (sched.get("clashes") or [{}])[0].get("title") or ""
+    o, n = _title_hits(text, other), _title_hits(text, pending.get("title") or "")
+    if o != n:
+        return "other" if o > n else "new"
+    that, this = bool(_OTHER_ONE.search(text)), bool(_THIS_ONE.search(text))
+    if that and not this:
+        return "other"
+    if this and not that:
+        return "new"
+    return ""
+
+
+def _clash_way(text: str, cmd: dict, pending: dict, sched: dict) -> tuple[str, dict]:
+    """What he wants done about the clash: ("move" | "push" | "fit" | "new_time" | "time_other" | "drop_new" |
+    "drop_other", extra). His own words first (a name, a pronoun, a verb), then the model's reading of them, then the
+    one way proposed aloud."""
+    options = sched.get("options") if isinstance(sched.get("options"), dict) else {}
+    picked = str(cmd.get("setting_value") or "").strip().lower()
+    picked = picked if picked in {"fit", "push", "move"} else ""
+    d, t = _safe_date(str(cmd.get("due_date") or "")), _safe_time(str(cmd.get("due_time") or ""))
+    subject = _clash_subject(text, pending, sched)
+    moving = bool(_MOVE_WORDS.search(text) or _WHENEVER.search(text))
+    if d or t:
+        return ("time_other" if subject == "other" else "new_time"), {"due_date": d, "due_time": t}
+    if _DROP_WORDS.search(text) and not moving:
+        return ("drop_other" if subject == "other" else "drop_new"), {}
+    if _SHORT_WORDS.search(text) and options.get("fit") and subject != "other" and not moving:
+        return "fit", {}
+    if subject == "other" and (moving or picked == "push"):
+        return "push", {}
+    if subject == "new" and _KEEP_WORDS.search(text) and not moving:
+        return "push", {}   # "isko yahin rakho": this one stays, so the other moves on
+    if subject == "new" and (moving or picked == "move"):
+        return "move", {}
+    if picked:
+        return picked, {}
+    if cmd.get("keep_original") or (_KEEP_WORDS.search(text) and not moving):
+        return "push", {}
+    if moving:
+        return "move", {}
+    default = sched.get("default") or ("move" if sched.get("suggested") else "push" if options.get("push") else "fit" if options.get("fit") else "")
+    return default, {}
+
+
+def _settle_clash(user: User, cmd: dict, text: str, pending: dict, sched: dict, address: str, draft: dict) -> dict:
+    """His answer to "X is already there; shall I ...?" is carried out here and now: the new one is booked (where
+    proposed, where he said, or shortened), or the other one moves or goes, and whatever else waited follows. The
+    phone and the closed-app voice both get the finished line."""
+    address_hi = services.address_hi_of(user)
+    lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
+    options = sched.get("options") if isinstance(sched.get("options"), dict) else {}
+    other = (sched.get("clashes") or [{}])[0]
+    asked = int(sched.get("asked") or 0)
+
+    def again(lead_en: str = "", lead_hi: str = "") -> dict:
+        back = dict(pending)
+        q_en, q_hi = (lead_en + str(sched.get("question") or "")).strip(), (lead_hi + str(sched.get("question_hi") or "")).strip()
+        back.update({"needs_clarification": False, "spoken_reply": q_en, "overrides": {}, "keep_card": True})
+        back["speak_text"], back["speak_lang"] = (q_hi, "hi") if lang == "hi" and q_hi else (q_en, "en")
+        return back
+
+    way, extra = _clash_way(text, cmd, pending, sched)
+    title = pending.get("title") or "it"
+    if way == "drop_new":
+        return _after_card(user, draft, pending, address, f"Okay {address}, dropped {title}.", f"ठीक है {address_hi}, {title} छोड़ दिया।", settled=False)
+    if way == "fit":
+        mins = (options.get("fit") or {}).get("duration_minutes") if isinstance(options.get("fit"), dict) else None
+        if not (isinstance(mins, int) and 5 <= mins <= 1440):
+            return again("That is not possible here. ", "यहाँ ऐसा नहीं हो सकता। ")
+        return _book_card(user, draft, pending, {**pending, "duration_minutes": mins}, address)
+    if way == "push":
+        if not options.get("push"):
+            if other.get("priority") == Priority.URGENT:
+                return again(f"{other.get('title') or 'That meeting'} is urgent and stays. ", f"{other.get('title') or 'वो मीटिंग'} अर्जेंट है, वो वहीं रहेगी। ")
+            return again("That is not possible here. ", "यहाँ ऐसा नहीं हो सकता। ")
+        lines = _book_and_push(user, draft, pending, options["push"], address)
+        if lines is None:
+            return draft
+        return _after_card(user, draft, pending, address, *lines)
+    if way == "move":
+        offered = sched.get("suggested") or {}
+        d, t = _safe_date(str(offered.get("due_date") or "")), _safe_time(str(offered.get("due_time") or ""))
+        if not (d and t):
+            return again("That is not possible here. ", "यहाँ ऐसा नहीं हो सकता। ")
+        return _rebook(user, draft, pending, {"due_date": d, "due_time": t}, address, asked)
+    if way == "new_time":
+        cur_date = _safe_date(str(pending.get("due_date") or "")) or tu.today_local().isoformat()
+        new = {"due_date": extra.get("due_date") or cur_date}
+        if extra.get("due_time") or pending.get("due_time"):
+            new["due_time"] = extra.get("due_time") or pending.get("due_time")
+        return _rebook(user, draft, pending, new, address, asked)
+    if way in ("time_other", "drop_other"):
+        task = _target_task({"id": other.get("id"), "scope": other.get("scope")}) if other.get("id") else None
+        if task is None:
+            return again("I could not find that meeting. ", "वो मीटिंग मुझे मिली नहीं। ")
+        if other.get("priority") == Priority.URGENT and way == "time_other":
+            return again(f"{other.get('title')} is urgent and stays. ", f"{other.get('title')} अर्जेंट है, वो वहीं रहेगी। ")
+        if way == "drop_other":
+            done, _failed, requests = _cancel_now(user, [{"id": str(task.id), "scope": other.get("scope") or "shared", "title": other.get("title") or "",
+                                                          "version": task.version, "status": task.status}])
+            if not done:
+                return again(f"I could not cancel {other.get('title')}. ", f"{other.get('title')} कैंसल नहीं हो पाई। ")
+            return _book_card(user, draft, pending, dict(pending), address,
+                              f" {other.get('title')} is cancelled (say undo to bring it back).", f" {other.get('title')} कैंसल कर दी (वापस लाने के लिए undo बोलिए)।")
+        local = tu.to_local(task.due_at) if task.due_at else None
+        d = extra.get("due_date") or (local.date().isoformat() if local else _safe_date(str(pending.get("due_date") or "")))
+        t = extra.get("due_time") or (local.strftime("%H:%M") if local else "")
+        if not (d and t):
+            return again("At what time? ", "कितने बजे? ")
+        move = {"id": str(task.id), "scope": other.get("scope") or "shared", "version": task.version, "title": other.get("title") or task.title,
+                "due_date": d, "due_time": t}
+        lines = _book_and_push(user, draft, pending, [move], address)
+        if lines is None:
+            return draft
+        return _after_card(user, draft, pending, address, *lines)
+    return again()
+
+
+def _rebook(user: User, draft: dict, pending: dict, new: dict, address: str, asked: int) -> dict:
+    """The waiting card at a new day / time: looked at again (the diary may have changed since), then booked, or asked
+    about once more when that time is taken as well."""
+    trial = _rebuilt(pending, new)
+    _advise_schedule(user, trial, address, asked=asked + 1)
+    t_sched = trial.get("schedule") or {}
+    if t_sched.get("clashes") and t_sched.get("question") and (asked < MAX_SCHEDULE_QUESTIONS or t_sched.get("hard")):
+        lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
+        trial["reply_language"], trial["keep_card"] = lang, True
+        hi = t_sched.get("question_hi") or ""
+        trial["speak_text"], trial["speak_lang"] = (hi, "hi") if lang == "hi" and hi else (trial["spoken_reply"], "en")
+        return trial
+    trial["schedule"] = None
+    return _book_card(user, draft, pending, trial, address)
 
 
 def _prepare_message(user: User, cmd: dict, draft: dict, exact_at, address: str, address_hi: str) -> None:
@@ -1056,47 +1365,50 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             warnings.append(f"Urgent meeting then: {c['title']} ({span})")
         tail_en = f" Shall I put it at {alt_en} instead?" if sug else " Shall I save it anyway?"
         tail_hi = f" {alt_hi} रख दूँ?" if sug else " फिर भी सेव कर दूँ?"
-        # His own new meeting or call over one already there: fit it in the gap, push the others, or move this one.
+        default = ""
+        # His own new meeting or call over one already there. Every way out stays on the card (keep it short, move the
+        # other, put this one elsewhere) so any of them can be asked for in his own words; ONE is proposed aloud and a
+        # plain yes takes it. The one being added is the one that bends (the next free time); only when the new one is
+        # urgent does the other move on. Three choices read out in a row were the confusion he complained of (Nov 2026).
         if whose == "self" and not is_move and d and due_time and not c.get("routine"):
             new_start = tu.combine_local(d, time.fromisoformat(due_time))
             new_end = new_start + timedelta(minutes=review.get("minutes") or 30)
             gap = int((c["start"] - new_start).total_seconds() // 60)
-            # By priority: an urgent meeting already there is never pushed (push_plan refuses); a new URGENT one
-            # says so and offers to move the others first.
+            # By priority: an urgent meeting already there is never pushed (push_plan refuses).
             plan = scheduling.push_plan(subject, new_start, new_end, prefs, exclude)
             new_urgent = draft.get("priority") == Priority.URGENT
-            said_en, said_hi = [], []
-            if plan and new_urgent:
-                options["push"] = [{k: m[k] for k in ("id", "scope", "version", "title", "due_date", "due_time")} for m in plan]
-                more_en = f" (and {len(plan) - 1} more after it)" if len(plan) > 1 else ""
-                more_hi = f" (और उसके बाद {len(plan) - 1} और)" if len(plan) > 1 else ""
-                said_en.append(f"move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}, since this one is urgent")
-                said_hi.append(f"{plan[0]['title']} को {tu.fmt_time_hi(plan[0]['start'])} कर दूँ{more_hi}, क्योंकि ये अर्जेंट है")
             if gap >= 5:
                 options["fit"] = {"duration_minutes": gap}
-                said_en.append(f"keep this to {tu.minutes_phrase(gap)}")
-                said_hi.append(f"इसे {tu.minutes_phrase_hi(gap)} की रखूँ")
-            if plan and not new_urgent:
+            if plan:
                 options["push"] = [{k: m[k] for k in ("id", "scope", "version", "title", "due_date", "due_time")} for m in plan]
-                more_en = f" (and {len(plan) - 1} more after it)" if len(plan) > 1 else ""
-                more_hi = f" (और उसके बाद {len(plan) - 1} और)" if len(plan) > 1 else ""
-                said_en.append(f"move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}")
-                said_hi.append(f"{plan[0]['title']} को {tu.fmt_time_hi(plan[0]['start'])} कर दूँ{more_hi}")
             if sug:
                 options["move"] = {"due_date": sug["due_date"], "due_time": sug["due_time"]}
-                said_en.append(f"put this at {alt_en}")
-                said_hi.append(f"इसे {alt_hi} रख दूँ")
-            if len(said_en) >= 2:
-                if urgent_there:
-                    head_en = f"{address}, {item} {when_en}: you have an URGENT meeting then, {c['title']} at {tu.fmt_time(c['start'])}; that stays."
-                    head_hi = f"{address_hi}, {when_hi} {item}: उस समय आपकी अर्जेंट मीटिंग {c['title']} है ({tu.fmt_time_hi(c['start'])}); वो वहीं रहेगी।"
-                else:
-                    head_en = f"{address}, {item} {when_en}: you already have {c['title']} at {tu.fmt_time(c['start'])}."
-                    head_hi = f"{address_hi}, {when_hi} {item}: {tu.fmt_time_hi(c['start'])} {c['title']} पहले से है।"
-                tail_en = " Should I " + ", ".join(said_en[:-1]) + ", or " + said_en[-1] + "?"
-                tail_hi = " " + ", ".join(said_hi[:-1]) + ", या " + said_hi[-1] + "?"
+            if plan and new_urgent:
+                default = "push"
+            elif sug:
+                default = "move"
+            elif plan:
+                default = "push"
+            elif gap >= 5:
+                default = "fit"
+            if urgent_there:
+                head_en = f"{address}, {item} {when_en}: you have an URGENT meeting then, {c['title']} at {tu.fmt_time(c['start'])}; that stays."
+                head_hi = f"{address_hi}, {when_hi} {item}: उस समय आपकी अर्जेंट मीटिंग {c['title']} है ({tu.fmt_time_hi(c['start'])}); वो वहीं रहेगी।"
             else:
-                options.clear()
+                head_en = f"{address}, {item} {when_en}: you already have {c['title']} at {tu.fmt_time(c['start'])}."
+                head_hi = f"{address_hi}, {when_hi} {item}: {tu.fmt_time_hi(c['start'])} {c['title']} पहले से है।"
+            if default == "push":
+                more_en = f" (and {len(plan) - 1} more after it)" if len(plan) > 1 else ""
+                more_hi = f" (और उसके बाद {len(plan) - 1} और)" if len(plan) > 1 else ""
+                why_en, why_hi = (" This one is urgent:", " ये अर्जेंट है:") if new_urgent else ("", "")
+                tail_en = f"{why_en} shall I move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}?"
+                tail_hi = f"{why_hi} {plan[0]['title']} को {tu.fmt_time_hi(plan[0]['start'])} कर दूँ{more_hi}?"
+            elif default == "move":
+                tail_en = f" Shall I put it at {alt_en}?"
+                tail_hi = f" इसे {alt_hi} रख दूँ?"
+            elif default == "fit":
+                tail_en = f" Shall I keep it to {tu.minutes_phrase(gap)}?"
+                tail_hi = f" इसे {tu.minutes_phrase_hi(gap)} की रखूँ?"
         question_en = _insert_notes(head_en + tail_en, notes_en)
         question_hi = _insert_notes(head_hi + tail_hi, notes_hi, hindi=True)
     elif review.get("needs_slot") and sug:
@@ -1121,10 +1433,16 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         "question_hi": question_hi,
         "notes": notes_en,
         "notes_hi": notes_hi,
+        # The meeting in the way, with what is needed to move or cancel it when he says so by name ("SBI wali aage
+        # karo", "Mehta wali hata do"); the team only ever hears that the MD is busy, never with what.
         "clashes": [{"title": "" if anonymous else c["title"], "start": c["start"].isoformat(), "end": c["end"].isoformat(),
-                     "label": f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}"} for c in clashes[:3]],
+                     "label": f"{tu.fmt_time(c['start'])}–{tu.fmt_time(c['end'])}",
+                     **({} if anonymous or c.get("routine") else {"id": c.get("id", ""), "scope": c.get("scope", ""), "kind": c.get("kind", ""),
+                                                                 "priority": c.get("priority", ""), "version": c.get("version")})}
+                    for c in clashes[:3]],
         "suggested": ({"due_date": sug["due_date"], "due_time": sug["due_time"], "label": alt_en} if sug else None),
         "options": options,
+        "default": default if clashes else "",   # the one way out proposed aloud; a plain yes takes it
         # His own meeting or call over another one: never saved like this, whatever is said (he must pick a way out).
         "hard": bool(whose == "self" and kind in (Kind.MEETING, Kind.CALL) and any(not c.get("routine") for c in clashes)),
         "load": {"count": load.get("count", 0), "heavy": bool(load.get("heavy"))} if load else None,
@@ -1371,14 +1689,18 @@ def _rebuilt(pending: dict, new: dict) -> dict:
     return trial
 
 
-def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: str, draft: dict) -> dict:
+def _confirm_with_pending(user: User, cmd: dict, pending: dict | None, address: str, draft: dict, text: str = "") -> dict:
     """A yes while a card waits. A plain yes takes the slot JARVIS offered (if it offered one); a time in the reply
     replaces the card's; keep_original saves it exactly as first said. Returns the draft to send back, which is a
-    fresh question when the new time collides as well (asked at most twice)."""
+    fresh question when the new time collides as well (asked at most twice). text: his words, read for which meeting
+    he means and what to do with it when the card is a clash of his own."""
     draft["overrides"] = {}
     if not pending:
         return draft
     sched = pending.get("schedule") or {}
+    if _hard_question(pending):
+        # His own meeting or call over another: settled here, in his words (see _clash_way), and done at once.
+        return _settle_clash(user, cmd, str(text or ""), pending, sched, address, draft)
     # "Keep this one here AND move the other" is a choice (push), not "save it as it is": the choice is read first.
     picked = str(cmd.get("setting_value") or "").strip().lower()
     has_options = isinstance(sched.get("options"), dict) and bool(sched.get("options"))
@@ -1587,8 +1909,15 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         cmd["intent"] = choices["intent"]
 
     # While a draft waits, a change keeps the original sentence (it becomes the task description);
-    # a side question or a brand-new topic stands on its own.
-    if awaiting and cmd.get("intent") not in _TASK_INTENTS:
+    # a side question or a brand-new topic stands on its own. A new item said while his own clash question is open
+    # (several things in one breath: the live line brings them one by one) is its own sentence too.
+    beside = card if _hard_question(card) and cmd.get("intent") in _TASK_INTENTS | {"send_alert"} and not cmd.get("more_items") else None
+    if beside is not None and _same_thing(str(cmd.get("title") or ""), str(card.get("title") or "")):
+        # "Khanna ji ko 2:30 rakho" heard as a new meeting with Khanna while Khanna's clash question is open: it is
+        # the answer (a time for the one waiting), not a second meeting.
+        cmd = {**cmd, "intent": "confirm_pending", "keep_original": False, "setting_value": "", "more_items": []}
+        beside = None
+    if awaiting and (cmd.get("intent") not in _TASK_INTENTS or beside):
         full_text = text
     address = services.address_of(user)
     address_hi = services.address_hi_of(user)
@@ -1621,8 +1950,33 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         slim = [{k: v for k, v in sub.items() if k not in {"categories", "staff_candidates", "target_candidates", "view"}} for sub in subs]
         if slim and draft["action"] in SAVE_ACTIONS | {"choose_destination"}:
             _combine_batch(draft, slim, address, address_hi, reply_language)
+    names = [_quiet_label(it) for it in [draft] + [b for b in (draft.get("batch") or []) if isinstance(b, dict)]] if beside else []
     _auto_save(user, draft, cmd, full_text)
+    if beside is not None:
+        return _beside_waiting_card(draft, beside, names)
     return draft
+
+
+def _beside_waiting_card(draft: dict, card: dict, names: list[str]) -> dict:
+    """A new item came in while his clash question is still open (the live voice brings the things of one breath one
+    by one, and the phone keeps the card). The question is not asked twice and nothing is read out in between: a clear
+    item is saved quietly and named once the card is settled; one that itself needs a word (another clash, a name
+    nobody knows) waits its turn in line behind the card. The card goes back as it is, with nothing to say."""
+    saved = bool(draft.get("undo") or draft.get("reminder_saved") or draft.get("saved_count"))
+    out = dict(card)
+    out["quiet"], out["queue"] = list(card.get("quiet") or []), list(card.get("queue") or [])
+    if draft.get("booked") or draft.get("reminder_saved"):
+        if saved:
+            out["quiet"] += names
+            out["saved_now"] = True
+    elif draft.get("action") in SAVE_ACTIONS | {"choose_destination"}:
+        out["queue"].append({k: v for k, v in draft.items() if k not in {"categories", "staff_candidates", "target_candidates", "view"}})
+    else:
+        draft["keep_card"] = True  # something else came of it (an error, a side answer): said as it is; the card stays
+        return draft
+    out.update({"spoken_reply": "", "speak_text": "", "reply_en": "", "reply_hi": "", "done_reply": "", "done_speak": "",
+                "booked": False, "card_done": False, "needs_clarification": False, "keep_card": True, "view": None})
+    return out
 
 
 MAX_ITEMS = 12  # instructions in one go ("Sunil ko ye bolo, Mansi ko ye, aur Himanshu ko ye ...")
@@ -2251,6 +2605,10 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 if askers and len(matches) == 1 and not draft["changes"]:
                     # "Ye task Nikki ko de do" / "hand it over to Nikki": the item itself goes to them, now.
                     _hand_over(user, draft, askers[0], matches[0], address, address_hi)
+                elif len(matches) == 1 and not askers and _WHENEVER.search(full_text) \
+                        and not ({"title", "priority", "kind", "duration_minutes"} & draft["changes"].keys()):
+                    # "Is meeting ko aage kabhi bhi rakh do" / "jab free ho tab": the next free time, done at once.
+                    _move_to_free_slot(user, draft, matches[0], address, address_hi)
                 elif not draft["changes"]:
                     _ask(draft, f"{address}, what should I change about '{names}': the time, the day, the priority or the name?",
                          f"{address_hi}, '{names}' में क्या बदलूँ: समय, दिन, प्रायोरिटी या नाम?")
@@ -2349,13 +2707,20 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         draft["action"] = "confirm_pending"  # the phone saves the draft it is holding
         draft["needs_clarification"] = False
         draft["question"] = ""
-        result = _confirm_with_pending(user, cmd, card, address, draft)
+        result = _confirm_with_pending(user, cmd, card, address, draft, text=full_text)
         if result is not draft:
             return result  # the new time collides too: a fresh question, same card
+        if draft["action"] != "confirm_pending":
+            return draft   # settled on the server (a clash of his own): the finished line, and what follows it
     elif intent == "cancel_pending":
         draft["action"] = "cancel_pending"
         draft["needs_clarification"] = False
         draft["question"] = ""
+        if _hard_question(card):
+            # "Nahi" to the clash question drops the one being added; the rest said with it, and anything that came in
+            # while it waited, still goes through (the next clash, if any, is asked now).
+            title = card.get("title") or "it"
+            return _after_card(user, draft, card, address, f"Okay {address}, dropped {title}.", f"ठीक है {address_hi}, {title} छोड़ दिया।", settled=False)
         if not draft["spoken_reply"]:
             _say(draft, f"Okay {address}, cancelled. Nothing was saved.", f"ठीक है {address_hi}, कैंसल कर दिया। कुछ सेव नहीं हुआ।")
     elif intent == "snooze":
@@ -2673,7 +3038,9 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     if (wants_push and draft["action"] in _BOOKABLE and isinstance(sched_now.get("options"), dict)
             and sched_now["options"].get("push") and draft["engine"] == "ai" and not cmd.get("_sub")):
         # "4 baje Sharma ji ke saath, priority hai, baaki sab reschedule kar do": no question, it is done in one go.
-        _book_and_push(user, draft, {**draft, "transcript": full_text}, sched_now["options"]["push"], address)
+        lines = _book_and_push(user, draft, {**draft, "transcript": full_text}, sched_now["options"]["push"], address)
+        if lines is not None:
+            _after_card(user, draft, {k: v for k, v in draft.items() if k != "batch"}, address, *lines)
         sched_now = {}
     bookable = (draft["action"] in _BOOKABLE and draft["kind"] in (Kind.MEETING, Kind.CALL)
                 and draft["due_date"] and draft["due_time"] and draft["title"] and not is_reminder

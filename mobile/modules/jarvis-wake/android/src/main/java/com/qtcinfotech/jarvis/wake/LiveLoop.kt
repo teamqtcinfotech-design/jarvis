@@ -231,7 +231,10 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
                 }
                 choices = JSONObject().put("intent", intent).put("items", items)
             }
-        } else if (action == "confirm_pending" || action == "cancel_pending" || draft.optBoolean("card_done") || draft.optBoolean("booked")) {
+        } else if (action == "confirm_pending" || action == "cancel_pending" || draft.optBoolean("card_done")
+            || (draft.optBoolean("booked") && !draft.optBoolean("keep_card"))) {
+            // keep_card: something was saved while a clash question is still open (several things in one breath):
+            // the question's card stays, and the answer still goes to it.
             previous = ""
             pending = null
             awaiting = ""

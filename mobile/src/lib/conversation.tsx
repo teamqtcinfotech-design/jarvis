@@ -359,6 +359,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
   /** Show a JARVIS line, speak it, and (unless the conversation is over) listen again. */
   const reply = (show: string, speakText: string | undefined, lang: SpeakLang, keepOpen: boolean, extra: Partial<Msg> = {}) => {
+    // Nothing to say (an item saved quietly while a clash question is still open): no empty bubble, no empty speech.
+    if (!show && !speakText) return;
     push('jarvis', show, extra);
     expectingRef.current = keepOpen;
     silenceRef.current = 0;
@@ -784,7 +786,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     // The server settled an alert by this instruction ("bijli wale ka approve kar do", "dekh liya"): its banner goes.
     if (d.settled?.ref_id) acknowledgeByRef(d.settled.ref_type, d.settled.ref_id).catch(() => undefined);
     // The server already saved it (a clear meeting booked at once, or a plain reminder): the lists catch up now.
-    if (d.booked || d.reminder_saved) {
+    if (d.booked || d.reminder_saved || d.saved_now) {
       dataChanged.emit();
       // Silent replies in a meeting: the confirmation is felt, not heard (the words are on the screen).
       if (quietReplies) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);

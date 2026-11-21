@@ -99,8 +99,28 @@ _PART_OF_DAY = [
 ]
 _PART_DEFAULT_TIME = {"morning": "10:00", "afternoon": "14:00", "evening": "18:00", "night": "21:00"}
 
-_FRACTION = re.compile(r"\b(saade|sade|sawa|sava|paune|pone)\s+(\d{1,2})\b", _FLAGS)
+# "saadhe gyarah" is the usual way to say 11:30 in Roman Hinglish (Nov 2026): every spelling of the half, quarter and
+# three-quarter words, and the hour said as a word ("gyarah", "barah") before "baje" or after one of these.
+_HALF_WORDS = {"saade", "sade", "saadhe", "sadhe", "saadha", "sadha", "sarhe", "saarhe"}
+_QUARTER_WORDS = {"sawa", "sava", "savva", "sawwa"}
+_THREE_QUARTER_WORDS = {"paune", "pone", "pauney", "pauna"}
+_FRACTION_WORDS = "|".join(sorted(_HALF_WORDS | _QUARTER_WORDS | _THREE_QUARTER_WORDS, key=len, reverse=True))
+_FRACTION = re.compile(rf"\b({_FRACTION_WORDS})\s+(\d{{1,2}})\b", _FLAGS)
 _SPECIAL_FRACTION = re.compile(r"\b(dedh|dhai|dhaai)\b", _FLAGS)
+_HOUR_WORDS = {"ek": 1, "do": 2, "teen": 3, "tin": 3, "char": 4, "chaar": 4, "paanch": 5, "panch": 5, "chhe": 6, "che": 6, "cheh": 6,
+               "chhah": 6, "saat": 7, "sat": 7, "aath": 8, "ath": 8, "nau": 9, "das": 10, "dus": 10, "gyarah": 11, "gyaarah": 11,
+               "gyara": 11, "barah": 12, "baarah": 12, "bara": 12}
+_HOUR_WORD_RE = "|".join(sorted(_HOUR_WORDS, key=len, reverse=True))
+# Only an hour word that stands where an hour stands is a number ("kar do" is never "kar 2"): after a fraction word,
+# or right before "baje".
+_HOUR_AFTER_FRACTION = re.compile(rf"\b({_FRACTION_WORDS})\s+({_HOUR_WORD_RE})\b", _FLAGS)
+_HOUR_BEFORE_BAJE = re.compile(rf"\b({_HOUR_WORD_RE})\s+(baje|bje|baj)\b", _FLAGS)
+
+
+def _hours_as_digits(text: str) -> str:
+    """"saadhe gyarah baje" -> "saadhe 11 baje", "paanch baje" -> "5 baje"."""
+    text = _HOUR_AFTER_FRACTION.sub(lambda m: f"{m.group(1)} {_HOUR_WORDS[m.group(2).lower()]}", text)
+    return _HOUR_BEFORE_BAJE.sub(lambda m: f"{_HOUR_WORDS[m.group(1).lower()]} {m.group(2)}", text)
 _CLOCK = re.compile(
     r"\b(\d{1,2})\s*[:.]\s*(\d{2})(?!\s*(?:lakh|lac|crore|cr\b|k\b|rs\b|rupees|%|\d))\s*(am|pm|a\.m\.|p\.m\.)?",
     _FLAGS,
@@ -168,8 +188,8 @@ def _extract_time(text: str, part: str | None, spans: list) -> tuple[str, bool]:
     m = _FRACTION.search(text)
     if m:
         word, hour = m.group(1).lower(), int(m.group(2))
-        minute = 30 if word in {"saade", "sade"} else 15 if word in {"sawa", "sava"} else 45
-        if word in {"paune", "pone"}:
+        minute = 30 if word in _HALF_WORDS else 15 if word in _QUARTER_WORDS else 45
+        if word in _THREE_QUARTER_WORDS:
             hour -= 1
         hour = _hour_for_part(hour % 12 or 12, part) if hour else 0
         tail = _BAJE.search(text, m.end() - len(m.group(2)))
@@ -222,7 +242,7 @@ def _remove_spans(text: str, spans: list) -> str:
 
 
 def parse(text: str, staff_names: list[str] | None = None, has_pending_requests: bool = False) -> dict:
-    raw = text.strip()
+    raw = _hours_as_digits(text.strip())
     now = now_local()
     today = now.date()
     spans: list[tuple[int, int]] = []

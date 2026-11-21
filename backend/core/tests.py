@@ -1162,7 +1162,9 @@ class SchedulingTests(BaseCase):
         r = self.turn(self.md_client, "us din 4 baje Sharma ji ke saath meeting", self._meeting_cmd(day))
         self.assertEqual(r["action"], "private_task")
         self.assertIn("Call Mehta ji – GST Notice", r["show"])
-        self.assertIn("or put this at 5 PM?", r["show"])
+        # One way out is proposed (the new one moves to the next free time); the others stay on the card for his words.
+        self.assertIn("Shall I put it at 5 PM?", r["show"])
+        self.assertNotIn("keep this to", r["show"])
         self.assertEqual(r["say_lang"], "hi")
         self.assertIn("5 बजे रख दूँ?", r["say"])
         self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), 2)  # nothing saved yet
@@ -1172,16 +1174,28 @@ class SchedulingTests(BaseCase):
         self.assertEqual(tu.to_local(task.due_at).hour, 17)
         self.assertIn("5 PM", r["show"])  # the AI's "4 baje" done-line is dropped once the time moved
 
-    def test_keeping_the_original_time_is_respected(self):
+    def test_keeping_the_original_time_moves_the_other_one_on(self):
         day = _workday()
         call = services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
                                                       "due_date": day, "due_time": time(16, 0), "duration_minutes": 60})
         self.turn(self.md_client, "4 baje Sharma meeting", self._meeting_cmd(day))
-        # Two meetings at one time are never saved, even on "keep it there": JARVIS asks again and saves nothing.
+        # "Keep it at 4": two meetings are never at one time, so the one already there moves on, and he hears where to.
         r = self.turn(self.md_client, "nahi 4 hi rakho", _cmd(intent="confirm_pending", keep_original=True))
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("Call Mehta ji moved to 5 PM", r["show"])
+        new = self._new_private([call.id])
+        self.assertEqual(tu.to_local(new.due_at).hour, 16)
+        call.refresh_from_db()
+        self.assertEqual(tu.to_local(call.due_at).hour, 17)
+        # An urgent meeting already there never moves: "keep it at 4" is refused with the way out proposed again.
+        board = services.create_private_task(self.md, {"title": "Board meeting", "kind": Kind.MEETING, "priority": Priority.URGENT,
+                                                       "due_date": day, "due_time": time(11, 0), "duration_minutes": 60})
+        self.turn(self.md_client, "11 baje Verma meeting", self._meeting_cmd(day, due_time="11:00"))
+        r = self.turn(self.md_client, "nahi 11 hi rakho", _cmd(intent="confirm_pending", keep_original=True))
         self.assertNotEqual(r["action"], "saved")
-        self.assertIn("cannot be at the same time", r["show"])
-        self.assertEqual(PrivateTask.objects.filter(owner=self.md).exclude(id__in=[self.private.id, call.id]).count(), 0)
+        self.assertIn("Board meeting is urgent and stays", r["show"])
+        board.refresh_from_db()
+        self.assertEqual(tu.to_local(board.due_at).hour, 11)
 
     def test_a_new_time_that_also_clashes_is_questioned_once_more(self):
         day = _workday()
@@ -1332,27 +1346,30 @@ class SchedulingTests(BaseCase):
         self.assertIn("given to Priya", r["show"])
         self.assertTrue(SharedTask.objects.filter(title="Courier the Contract", assignee_user=self.pa).exists())
 
-    def test_app_flow_returns_the_offered_time_as_overrides(self):
+    def test_app_flow_settles_the_clash_on_the_server(self):
         day = _workday()
-        services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
-                                               "due_date": day, "due_time": time(16, 0), "duration_minutes": 60})
+        call = services.create_private_task(self.md, {"title": "Call Mehta ji", "kind": Kind.CALL, "priority": Priority.NORMAL,
+                                                      "due_date": day, "due_time": time(16, 0), "duration_minutes": 60})
         draft = self.interpret(self.md_client, "4 baje Sharma meeting", self._meeting_cmd(day))
         self.assertEqual(draft["schedule"]["suggested"]["due_time"], "17:00")
+        self.assertEqual(draft["schedule"]["default"], "move")
         self.assertTrue(draft["schedule"]["question"])
-        yes = self.interpret(self.md_client, "baad mein rakh do", _cmd(intent="confirm_pending", setting_value="move"),
-                             previous="4 baje Sharma meeting", awaiting="Personal task: Meeting with Sharma ji", pending=draft)
-        self.assertEqual(yes["action"], "confirm_pending")
-        self.assertEqual(yes["overrides"], {"due_date": day.isoformat(), "due_time": "17:00"})
-        keep = self.interpret(self.md_client, "4 hi rakho", _cmd(intent="confirm_pending", keep_original=True),
-                              previous="4 baje Sharma meeting", awaiting="Personal task: Meeting with Sharma ji", pending=draft)
-        self.assertEqual(keep["overrides"], {})
         # The model sees what JARVIS asked and the two times, so it can read the answer by meaning.
-        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")) as fake:
-            self.md_client.post("/api/v1/assistant/interpret/", {"text": "haan", "awaiting": "x", "pending": draft}, format="json")
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending", setting_value="move")) as fake:
+            r = self.md_client.post("/api/v1/assistant/interpret/", {"text": "baad mein rakh do", "awaiting": "x", "pending": draft}, format="json")
         waiting = fake.call_args.args[1]["awaiting_confirmation"]
         self.assertEqual(waiting["offered_time"]["due_time"], "17:00")
         self.assertEqual(waiting["original_time"]["due_time"], "16:00")
-        self.assertIn("or put this at", waiting["jarvis_asked"])
+        self.assertIn("Shall I put it at", waiting["jarvis_asked"])
+        # "Put it later": booked at the offered time here and now (the phone closes the card), nothing moved.
+        yes = r.json()
+        self.assertTrue(yes["booked"] and yes["card_done"], yes["spoken_reply"])
+        self.assertEqual(yes["action"], "answer")
+        new = self._new_private([call.id])
+        self.assertEqual(tu.to_local(new.due_at).strftime("%H:%M"), "17:00")
+        self.assertIn("5 PM", yes["spoken_reply"])
+        call.refresh_from_db()
+        self.assertEqual(tu.to_local(call.due_at).strftime("%H:%M"), "16:00")
 
 
 class SmartBrainTests(BaseCase):
@@ -2888,7 +2905,7 @@ class MeetingJugglingTests(BaseCase):
         return _cmd(intent="create_task", title="Priority meeting", kind="MEETING", priority="URGENT",
                     due_date=day.isoformat(), due_time=at, duration_minutes=minutes, engine="ai")
 
-    def test_three_choices_are_offered_and_nothing_is_saved(self):
+    def test_every_way_out_is_on_the_card_and_one_is_proposed(self):
         day = _workday(2)
         self._meeting("Aman review", day, time(13, 15))
         before = PrivateTask.objects.count()
@@ -2897,8 +2914,16 @@ class MeetingJugglingTests(BaseCase):
         self.assertEqual(opts["fit"], {"duration_minutes": 5})
         self.assertEqual([(m["title"], m["due_time"]) for m in opts["push"]], [("Aman review", "13:25")])
         self.assertTrue(opts["move"]["due_time"])
-        self.assertIn("keep this to 5 minutes", d["spoken_reply"])
-        self.assertIn("move Aman review to 1:25 PM", d["spoken_reply"])
+        # The new one is urgent: the proposal is to move the other on; the other ways are not read out.
+        self.assertEqual(d["schedule"]["default"], "push")
+        self.assertIn("This one is urgent: shall I move Aman review to 1:25 PM?", d["spoken_reply"])
+        self.assertNotIn("keep this to", d["spoken_reply"])
+        self.assertEqual(PrivateTask.objects.count(), before)
+        # A normal one over it: the new one bends (the next free time), said as one question.
+        d = self.interpret(self.md_client, "1:10 pe Verma meeting", _cmd(intent="create_task", title="Verma meeting", kind="MEETING",
+                                                                      due_date=day.isoformat(), due_time="13:10", duration_minutes=15, engine="ai"))
+        self.assertEqual(d["schedule"]["default"], "move")
+        self.assertIn("you already have Aman review at 1:15 PM. Shall I put it at", d["spoken_reply"])
         self.assertEqual(PrivateTask.objects.count(), before)
 
     def test_fit_keeps_it_to_the_gap(self):
@@ -2961,17 +2986,70 @@ class MeetingJugglingTests(BaseCase):
                                       id__in=[t.id for t in PrivateTask.objects.all() if t.title == "Board meeting"])
         self.assertEqual(tu.to_local(new.scheduled_end).strftime("%H:%M"), "11:30")
 
-    def test_a_bare_yes_asks_which_one_and_moves_nothing(self):
+    def test_a_bare_yes_takes_the_way_proposed(self):
         day = _workday(2)
         aman = self._meeting("Aman review", day, time(13, 15))
         before = PrivateTask.objects.count()
         self.turn(self.md_client, "1:10 pe priority meeting", self._new(day))
         r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
-        self.assertNotEqual(r["action"], "saved")
-        self.assertIn("keep this to 5 minutes", r["show"])
-        self.assertEqual(PrivateTask.objects.count(), before)
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("Aman review moved to 1:25 PM", r["show"])
+        self.assertEqual(PrivateTask.objects.count(), before + 1)
         aman.refresh_from_db()
-        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "13:15")
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "13:25")
+
+    def test_his_words_say_which_one_and_what_to_do(self):
+        day = _workday(2)
+        sbi = self._meeting("Call with SBI branch manager", day, time(10, 0), minutes=30)
+        new = lambda: _cmd(intent="create_task", title="Call with CA", kind="CALL", due_date=day.isoformat(), due_time="10:00", engine="ai")  # noqa: E731
+        # Naming the one already there with "aage": it moves on, the new one stays where said.
+        self.turn(self.md_client, "10 baje CA ke saath call", new())
+        r = self.turn(self.md_client, "SBI wali ko aage kar do", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        sbi.refresh_from_db()
+        self.assertEqual(tu.to_local(sbi.due_at).strftime("%H:%M"), "10:15")
+        ca = [t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Call with CA"][0]
+        self.assertEqual(tu.to_local(ca.due_at).strftime("%H:%M"), "10:00")
+        # Naming the new one with "aage kabhi bhi": it goes to the next free time, whatever the model made of the words.
+        verma = self._meeting("Verma review", day, time(15, 0))
+        self.turn(self.md_client, "3 baje Mehta ke saath meeting", _cmd(intent="create_task", title="Meeting with Mehta", kind="MEETING",
+                                                                       due_date=day.isoformat(), due_time="15:00", engine="ai"))
+        r = self.turn(self.md_client, "Mehta wali ko aage kabhi bhi rakh do", _cmd(intent="confirm_pending", setting_value="push"))
+        self.assertEqual(r["action"], "saved", r)
+        verma.refresh_from_db()
+        self.assertEqual(tu.to_local(verma.due_at).strftime("%H:%M"), "15:00")
+        mehta = [t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Meeting with Mehta"][0]
+        self.assertGreater(mehta.due_at, verma.due_at)
+        # Naming the one already there with "hatao": it is cancelled (undo brings it back) and the new one is booked.
+        gupta = self._meeting("Gupta call", day, time(17, 0), minutes=30)
+        self.turn(self.md_client, "5 baje Rohan se milna hai", _cmd(intent="create_task", title="Meeting with Rohan", kind="MEETING",
+                                                                   due_date=day.isoformat(), due_time="17:00", engine="ai"))
+        r = self.turn(self.md_client, "Gupta wala call hata do", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("Gupta call is cancelled", r["show"])
+        gupta.refresh_from_db()
+        self.assertEqual(gupta.status, "CANCELLED")
+        rohan = [t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Meeting with Rohan"][0]
+        self.assertEqual(tu.to_local(rohan.due_at).strftime("%H:%M"), "17:00")
+        # Naming the one already there with a time: that one goes there, the new one stays where said.
+        kapoor = self._meeting("Kapoor meeting", day, time(12, 0), minutes=30)
+        self.turn(self.md_client, "12 baje Singh se meeting", _cmd(intent="create_task", title="Meeting with Singh", kind="MEETING",
+                                                                  due_date=day.isoformat(), due_time="12:00", engine="ai"))
+        r = self.turn(self.md_client, "Kapoor wali 4 baje kar do", _cmd(intent="confirm_pending", due_time="16:00"))
+        self.assertEqual(r["action"], "saved", r)
+        kapoor.refresh_from_db()
+        self.assertEqual(tu.to_local(kapoor.due_at).strftime("%H:%M"), "16:00")
+        self.assertIn("Kapoor meeting moved to 4 PM", r["show"])
+        # "Nahi": the new one is dropped, nothing else changes.
+        self.turn(self.md_client, "12 baje Bose se meeting", _cmd(intent="create_task", title="Meeting with Bose", kind="MEETING",
+                                                                 due_date=day.isoformat(), due_time="12:00", engine="ai"))
+        r = self.turn(self.md_client, "nahi rehne do", _cmd(intent="cancel_pending"))
+        self.assertIn("dropped Meeting with Bose", r["show"])
+        self.assertFalse([t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Meeting with Bose"])
+        # Nothing waits any more: a later "haan" saves nothing.
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertNotEqual(r["action"], "saved")
+        self.assertFalse([t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Meeting with Bose"])
 
     def test_length_changes_by_voice(self):
         day = _workday(2)
@@ -3229,7 +3307,7 @@ class AlertsAndRescheduleTests(BaseCase):
                       _cmd(intent="create_task", title="Board meeting", kind="MEETING", due_date=day.isoformat(), due_time="16:00",
                            duration_minutes=30, setting_value="push", engine="ai"))
         self.assertEqual(r["action"], "saved", r)
-        self.assertIn("New schedule", r["show"])
+        self.assertIn("Aman review moved to 4:30 PM; Sharma call moved to 5 PM", r["show"])
         aman.refresh_from_db()
         sharma.refresh_from_db()
         self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "16:30")
@@ -3245,8 +3323,7 @@ class AlertsAndRescheduleTests(BaseCase):
                                                               due_date=day.isoformat(), due_time="11:00", duration_minutes=30, engine="ai"))
         r = self.turn(self.md_client, "isko yahin rakho, baaki sab reschedule kar do", _cmd(intent="confirm_pending", setting_value="push"))
         self.assertEqual(r["action"], "saved", r)
-        self.assertIn("New schedule", r["show"])
-        self.assertIn("Aman review", r["show"])
+        self.assertIn("Aman review moved to 11:30 AM", r["show"])
         aman.refresh_from_db()
         self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "11:30")
         # nothing waits any more: a second yes saves nothing

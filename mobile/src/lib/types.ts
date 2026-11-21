@@ -522,6 +522,12 @@ export interface Draft {
   reminder_saved?: boolean;
   /** The server saved what the waiting card held (and more): the card closes. */
   card_done?: boolean;
+  /** Something was saved while this card's clash question is still open: the card stays, the lists refresh. */
+  saved_now?: boolean;
+  keep_card?: boolean;
+  /** Further cards waiting their turn behind this one, and what was saved quietly meanwhile (sent back as is). */
+  queue?: Draft[];
+  quiet?: string[];
   /** Data the phone draws for this answer (timeline / chart / table). */
   view?: DataView | null;
   /** Something to do on the screen by voice: export_pdf / export_csv / share / open_item / open_settings / go_home. */

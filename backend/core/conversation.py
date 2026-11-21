@@ -233,6 +233,9 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         if draft.get("card_done"):
             state["pending"], state["choices"] = None, None  # the server settled the waiting card itself
         resp = _resp(show, speak, lang, listen=True, action="saved")
+    elif draft.get("card_done"):
+        state["pending"], state["choices"] = None, None  # the waiting card was dropped on the server ("nahi" to a clash)
+        resp = _resp(show, speak, lang, listen=True, action="cancel_pending")
     else:
         resp = _resp(show, speak, lang, listen=True, action=action)  # an answer, small talk; a waiting card stays
 
