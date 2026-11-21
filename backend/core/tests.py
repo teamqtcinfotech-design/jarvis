@@ -757,17 +757,20 @@ class SmartAssistantTests(BaseCase):
         self.assertEqual(tu.to_local(task.due_at).hour, 17)
         self.assertEqual(task.version, 2)
 
-    def test_delete_task_by_voice_always_asks_then_cancels(self):
+    def test_delete_task_by_voice_cancels_at_once_and_undo_brings_it_back(self):
+        # Deleting is done at once (21 Nov 2026: "if I say hata do, just delete, don't ask"): a cancel, never an
+        # erase, so "undo" brings it back.
         task = services.create_private_task(self.md, {"title": "Renew club membership", "kind": Kind.TASK,
                                                       "priority": Priority.LOW, "due_date": tu.today_local()})
         r = self.turn(self.md_client, "club wala task hata do", _cmd(intent="delete_task", target_refs=[str(task.id)]))
-        self.assertEqual(r["action"], "delete_task")
-        self.assertIn("delete", r["show"].lower())
-        task.refresh_from_db()
-        self.assertEqual(task.status, "OPEN")
-        self.turn(self.md_client, "haan hata do", _cmd(intent="confirm_pending"))
+        self.assertIn("Deleted Renew club membership", r["show"])
+        self.assertIn("undo", r["show"].lower())
         task.refresh_from_db()
         self.assertEqual(task.status, "CANCELLED")
+        r = self.turn(self.md_client, "undo", _cmd(intent="undo"))
+        self.assertIn("Undone", r["show"])
+        task.refresh_from_db()
+        self.assertEqual(task.status, "OPEN")
 
     def test_settings_by_voice_and_api(self):
         r = self.turn(self.md_client, "Hindi mein bolo", _cmd(intent="set_setting", setting_key="voiceAccent",

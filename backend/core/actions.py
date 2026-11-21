@@ -339,6 +339,16 @@ def _undo_one(user: User, ref: dict) -> int:
             task.save(update_fields=["status", "completed_at", "version", "updated_at"])
             return 1
         return 0
+    if kind == "cancelled":
+        # "Delete it" done at once: undo puts the item back as it was.
+        model = PrivateTask if ref.get("scope") == "private" else SharedTask
+        task = model.objects.get(id=ref["id"]) if model is SharedTask else model.objects.get(id=ref["id"], owner=user)
+        if task.status == Status.CANCELLED:
+            task.status = ref.get("before") or Status.OPEN
+            task.version += 1
+            task.save(update_fields=["status", "version", "updated_at"])
+            return 1
+        return 0
     if kind == "organise":
         from . import organise  # noqa: PLC0415 — organise imports this module
         return organise.undo(user, ref.get("inverse") or {})

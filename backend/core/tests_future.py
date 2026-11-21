@@ -109,15 +109,40 @@ class WhichOneTests(BaseCase):
         self.assertIn(f"Meeting with Aman ({services.tu.fmt_day(self.day1)} at 11 AM)", d["spoken_reply"])
         self.assertIn(f"Meeting with Aman ({services.tu.fmt_day(self.day2)} at 11 AM)", d["spoken_reply"])
         self.assertIn("Or all of them?", d["spoken_reply"])
-        # "Dono delete kar do": the model made nothing of it (no target_refs); the server takes every one offered.
+        # "Dono delete kar do": the model made nothing of it (no target_refs); the server takes every one offered and
+        # cancels them at once (no "shall I?"); "undo" brings them back.
         choices = {"intent": "delete_task", "items": [{"id": c["id"], "title": c["title"]} for c in d["target_candidates"]]}
         d = self.interpret("dono delete kar do", _cmd(intent="unknown", spoken_reply="Samajh nahi aaya."), choices=choices,
                            awaiting="JARVIS asked which one to delete")
         self.assertFalse(d.get("needs_clarification"), d["spoken_reply"])
-        self.assertEqual(d["action"], "delete_task")
+        self.assertTrue(d["booked"] and d["card_done"] and d["undo"], d)
         self.assertEqual({t["id"] for t in d["targets"]}, {str(self.first.id), str(self.second.id)})
-        self.assertIn("delete these 2", d["spoken_reply"])
+        self.assertIn("Deleted 2, Sir", d["spoken_reply"])
         self.assertIn(services.tu.fmt_day(self.day2), d["spoken_reply"])
+        self.assertEqual({t.status for t in services.private_qs(self.md).filter(id__in=[self.first.id, self.second.id])}, {"CANCELLED"})
+        d = self.interpret("undo", _cmd(intent="undo", spoken_reply="Ji."))
+        self.assertIn("Undone", d["spoken_reply"])
+        self.assertEqual({t.status for t in services.private_qs(self.md).filter(id__in=[self.first.id, self.second.id])}, {"OPEN"})
+
+    def test_delete_it_means_the_one_thing_on_the_screen(self):
+        # "December ki meetings dikhao" showed one meeting; "delete it" is that one, at once, even though the model
+        # named nothing and the same title exists on another day too.
+        screen = {"kind": "upcoming", "title": "Coming up · meetings", "items": [{"id": str(self.second.id), "title": "Meeting with Aman"}],
+                  "filters": {"kind": "upcoming", "types": ["MEETING"]}}
+        d = self.interpret("isko hata do", _cmd(intent="delete_task", title="", spoken_reply="Ji."), screen=screen)
+        self.assertTrue(d["booked"], d["spoken_reply"])
+        self.assertIn(f"Deleted Meeting with Aman ({services.tu.fmt_day(self.day2)} at 11 AM), Sir", d["spoken_reply"])
+        self.assertEqual(services.private_qs(self.md).get(id=self.second.id).status, "CANCELLED")
+        self.assertEqual(services.private_qs(self.md).get(id=self.first.id).status, "OPEN")
+        # Two on the card and nothing named: the question lists what is on the card; "dono" takes both.
+        third = services.create_private_task(self.md, {"title": "Call the bank", "kind": Kind.TASK, "due_date": self.day1})
+        screen = {"kind": "today", "title": "Today", "items": [{"id": str(self.first.id), "title": "Meeting with Aman"}, {"id": str(third.id), "title": "Call the bank"}]}
+        d = self.interpret("delete it", _cmd(intent="delete_task", title="", spoken_reply="Ji."), screen=screen)
+        self.assertTrue(d["needs_clarification"], d["spoken_reply"])
+        self.assertEqual({c["id"] for c in d["target_candidates"]}, {str(self.first.id), str(third.id)})
+        d = self.interpret("dono hata do", _cmd(intent="delete_task", title="", spoken_reply="Ji."), screen=screen)
+        self.assertTrue(d["booked"], d["spoken_reply"])
+        self.assertEqual({services.private_qs(self.md).get(id=i).status for i in (self.first.id, third.id)}, {"CANCELLED"})
 
     def test_the_same_meeting_at_the_same_moment_is_not_saved_twice(self):
         # Days later, the same words again: not a second entry, whatever the model drafted.

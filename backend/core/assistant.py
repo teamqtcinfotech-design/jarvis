@@ -15,7 +15,7 @@ from django.utils import timezone
 from . import ai_brain, datacards, hinglish_parser, recurrence, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
-from .models import CLOSED_STATUSES, Alert, Kind, Priority, PrivateTask, SharedTask, User
+from .models import CLOSED_STATUSES, Alert, Kind, Priority, PrivateTask, SharedTask, Status, User
 from .taskpanel.client import TaskPanelError, get_client as tp_client
 from .taskpanel.contracts import ALL_STAFF_WORDS, build_validate_body
 
@@ -194,6 +194,58 @@ def _chosen(cmd: dict, by_id: dict) -> list[dict]:
             seen.add(r)
             out.append(by_id[r])
     return out
+
+
+def _full_items(user: User) -> dict:
+    """Every open item this person can act on, by id (the model's context carries only the first few of each list;
+    an item pointed at on screen, or further ahead, is found here)."""
+    dash = services.dashboard(user)
+    out = {}
+    for key in ("overdue", "today", "upcoming", "anytime", "delegated", "given_tasks", "team_tasks", "pa_tasks", "mg_tasks", "md_tasks"):
+        for item in dash.get(key) or []:
+            if item.get("status") not in (Status.COMPLETED, Status.CANCELLED):
+                out.setdefault(item["id"], item)
+    return out
+
+
+def _pointed(user: User, on_screen: dict | None, full_text: str, chosen: list[dict]) -> list[dict]:
+    """What "it" / "ye" / "dono" means when a card is on screen: the items of that card. One item on the card and
+    nothing else named = that item; "dono" / "sab" = all of them; words from a title = those; else nothing."""
+    if chosen or not isinstance(on_screen, dict) or not on_screen.get("items"):
+        return chosen
+    full = _full_items(user)
+    shown = [full[i["id"]] for i in on_screen["items"] if isinstance(i, dict) and i.get("id") in full]
+    if not shown:
+        return chosen
+    if _ALL_OF_THEM.search(full_text):
+        return shown
+    by_words = _match_items(full_text, shown)
+    if by_words:
+        return by_words
+    return shown if len(shown) == 1 else []
+
+
+def _cancel_now(user: User, targets: list[dict]) -> tuple[list[dict], list[dict], int]:
+    """Cancel these at once (a cancel, never an erase: "undo" brings them back). Returns (done, failed, requests):
+    the items cancelled, the ones that could not be, and how many became a request for the MD instead."""
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    done, failed, requests, refs = [], [], 0, []
+    for t in targets:
+        try:
+            if t.get("scope") == "private":
+                services.update_private_task(user, t["id"], {"status": Status.CANCELLED}, t.get("version") or 1)
+            else:
+                _task, req = services.change_shared_task(user, t["id"], {"status": Status.CANCELLED}, t.get("version") or 1, "")
+                if req is not None:
+                    requests += 1
+                    continue
+            refs.append({"type": "cancelled", "scope": t.get("scope") or "shared", "id": t["id"], "before": t.get("status") or Status.OPEN})
+            done.append(t)
+        except (services.ServiceError, ObjectDoesNotExist, ValueError, KeyError):
+            failed.append(t)
+    if refs:
+        actions.remember_done(user, refs, done[0]["title"] if done else "")
+    return done, failed, requests
 
 
 def _named(items: list[dict], limit: int = 3) -> str:
@@ -2085,8 +2137,32 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
         by_id = {i["id"]: i for i in open_items}
         chosen = _chosen(cmd, by_id)
+        if not chosen and (cmd.get("target_refs") or cmd.get("target_ref")):
+            # Pointed at by id, but further down the list than the model's context carries: found in full.
+            chosen = _chosen(cmd, _full_items(user))
+        # "Delete it" / "ye hata do" with a card on screen: the card's items are what "it" means.
+        chosen = _pointed(user, on_screen, full_text, chosen)
         matches = chosen or _match_items(full_text, open_items)
-        if chosen or len(matches) == 1:
+        if intent == "delete_task" and (chosen or len(matches) == 1) and not draft.get("needs_clarification"):
+            # Deleting is done at once (a cancel, never an erase): "undo" brings it back. No "shall I?".
+            done, failed, requests = _cancel_now(user, matches)
+            draft["targets"], draft["target"] = done, done[0] if done else None
+            draft["action"], draft["card_done"], draft["booked"], draft["undo"] = "answer", True, bool(done), bool(done)
+            names = _named(done, 5)
+            if done and not failed and not requests:
+                _say(draft, (f"Deleted {names}, {address}. It's cancelled, not erased: say undo to bring it back." if len(done) == 1
+                             else f"Deleted {len(done)}, {address}: {names}. Say undo to bring them back."),
+                     (f"{names} हटा दिया, {address_hi}। कैंसल हुआ है, मिटा नहीं: वापस लाने के लिए बोलिए undo।" if len(done) == 1
+                      else f"{len(done)} हटा दिए, {address_hi}: {names}। वापस लाने के लिए बोलिए undo।"))
+            elif requests and not done:
+                _say(draft, f"{address}, that is {sir}'s own work: I've asked {sir} to cancel it.",
+                     f"{address_hi}, ये {sir_hi} का अपना काम है: {sir_hi} से कैंसल करने को कहा है।")
+            else:
+                left = _named(failed, 5)
+                _say(draft, (f"Deleted {names}, {address}." if done else f"{address}, ") + (f" Could not delete {left}: it has changed, try again." if failed else "")
+                     + (f" {requests} asked of {sir}." if requests else ""),
+                     (f"{names} हटा दिया, {address_hi}।" if done else f"{address_hi}, ") + (f" {left} नहीं हटा: वो बदल गया है, फिर कहिए।" if failed else ""))
+        elif chosen or len(matches) == 1:
             draft["targets"] = matches
             draft["target"] = matches[0]
             names = "; ".join(m["title"] for m in matches)
@@ -2127,14 +2203,15 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 else:
                     _say(draft, f"{address}, {describe_changes(draft['changes'])} for '{names}'?",
                          f"{address_hi}, '{names}' {describe_changes_hi(draft['changes'])}?")
-            elif len(matches) == 1:
-                # Deleting always asks first. It is a cancel, not an erase, so it can be undone from the app.
-                _say(draft, f"{address}, delete '{names}'? It will be cancelled, not erased.",
-                     f"{address_hi}, '{names}' हटा दूँ? ये कैंसल होगा, मिटेगा नहीं।")
             else:
+                # Reached only when the cancel above could not run (a rough reading): the card asks.
                 names = _named(matches, 5)
                 _say(draft, f"{address}, delete these {len(matches)}: {names}?", f"{address_hi}, ये {len(matches)} हटा दूँ: {names}?")
         else:
+            shown = _full_items(user) if isinstance(on_screen, dict) and on_screen.get("items") else {}
+            on_card = [shown[i["id"]] for i in (on_screen or {}).get("items", []) if isinstance(i, dict) and i.get("id") in shown]
+            if not matches and on_card:
+                matches = on_card  # nothing named: the choice is among what is on the screen
             draft["target_candidates"] = matches[:5]
             verb = "change" if intent == "change_task" else "delete"
             verb_hi = "बदलूँ" if intent == "change_task" else "हटाऊँ"
