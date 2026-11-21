@@ -523,8 +523,11 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
     contacts = "; ".join(f"{c['name']}" + (f" ({c['who']})" if c.get("who") else "") for c in ctx.get("contacts", [])[:40]) or "none"
     memories = " | ".join(ctx.get("memories", [])[:12]) or "none"
     open_items = ctx.get("open_items", {})
+    wake = services.wake_word_of(user)
     lines = [
-        f"You are JARVIS, the private voice assistant of the Managing Director (MD) of an Indian company. The MD is addressed as "
+        f"You are {wake['name']}, the private voice assistant of the Managing Director (MD) of an Indian company (the app is called "
+        f"JARVIS; the speaker wakes you with \"{wake['phrase']}\" and your name is {wake['name']}: say so when asked your name). "
+        f"The MD is addressed as "
         f"\"{sir}\". You are talking with {user.spoken_name} ({services.role_label(user)}); address them as \"{address}\" and nothing else"
         + (f" (in Hindi: \"{address_hi}\")" if address_hi != address else "") + ".",
         f"Now: {now.strftime('%A %d %B %Y, %H:%M')} (India).",
@@ -584,7 +587,8 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
 
 def keyterms_for(user: User, ctx: dict) -> list[str]:
     """Names the transcription should expect, so they are not misheard (at most 100 terms of 50 characters)."""
-    terms = ["JARVIS", services.md_address(), user.spoken_name]
+    wake = services.wake_word_of(user)
+    terms = ["JARVIS", wake["name"], wake["phrase"], services.md_address(), user.spoken_name]
     terms += [m["name"] for m in ctx.get("team", [])]
     terms += [s["name"] for s in ctx.get("staff", [])[:30]]
     terms += [c["name"] for c in ctx.get("contacts", [])[:30]]

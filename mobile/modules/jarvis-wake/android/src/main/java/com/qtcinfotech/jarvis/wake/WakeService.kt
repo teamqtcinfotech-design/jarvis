@@ -50,6 +50,8 @@ class WakeService : Service() {
     @Volatile private var reopenMic = false
     /** "Hey JARVIS" is on; off = the microphone opens only while JARVIS talks (barge-in), never to judge the wake word. */
     @Volatile private var wakeWordOn = false
+    /** The listener file loaded by the running microphone thread (a new wake word in Settings means a fresh one). */
+    @Volatile private var loadedModel = ""
     private var watcherThread: HandlerThread? = null
     private var watcher: ReminderWatcher? = null
     @Volatile private var loop: ConversationLoop? = null
@@ -85,6 +87,8 @@ class WakeService : Service() {
         // Never crash for that: fall back to watch-only, and the app upgrades it the next time it is opened.
         val listening = startInForeground(wantMic)
         if (listening) notifier.cancelSwitchOn()
+        val model = prefs.getString(WakeBus.KEY_WAKE_MODEL, WakeBus.DEFAULT_WAKE_MODEL) ?: WakeBus.DEFAULT_WAKE_MODEL
+        if (listening && audioThread != null && loadedModel != model) stopListening()  // another wake word: a fresh listener
         if (listening && audioThread == null) startListening()
         else if (listening) reopenMic = true          // started again from the app: take a fresh microphone
         if (!listening && audioThread != null) stopListening()
@@ -149,8 +153,13 @@ class WakeService : Service() {
 
     private fun stopListening() {
         micStopped = true
-        audioThread?.interrupt()
+        val old = audioThread
         audioThread = null
+        old?.interrupt()
+        try {
+            old?.join(1500)  // let it close the microphone before anything else opens one
+        } catch (_: InterruptedException) {
+        }
         WakeBus.listening = false
         Log.i(TAG, "microphone part off; still watching for reminders and messages")
     }
@@ -181,9 +190,12 @@ class WakeService : Service() {
         stopped = false
         micStopped = false
         reopenMic = false
+        val model = WakeBus.prefs(this).getString(WakeBus.KEY_WAKE_MODEL, WakeBus.DEFAULT_WAKE_MODEL) ?: WakeBus.DEFAULT_WAKE_MODEL
+        val phrase = WakeBus.wakePhrase(this)
+        loadedModel = model
         audioThread = Thread({
             val detector = try {
-                WakeDetector(this)
+                WakeDetector(this, model)
             } catch (e: Throwable) {
                 Log.e(TAG, "Could not load the wake-word models", e)
                 WakeBus.listening = false
@@ -245,7 +257,7 @@ class WakeService : Service() {
                 WakeBus.micHeld = false
             }
 
-            Log.i(TAG, "Listening for Hey JARVIS (models loaded)")
+            Log.i(TAG, "Listening for $phrase (models loaded: $model)")
             try {
                 wakeLock.acquire()
                 while (!stopped && !micStopped) {
@@ -456,8 +468,8 @@ class WakeService : Service() {
                         cooldownUntil = now + 2500
                         prevScore = 0f
                         streak = 0
-                        Log.i(TAG, String.format("Hey JARVIS detected (score %.3f, previous %.3f, streak %d, level %.0f, gain %.1f)",
-                            score, was, run, envelope, gain))
+                        Log.i(TAG, String.format("%s detected (score %.3f, previous %.3f, streak %d, level %.0f, gain %.1f)",
+                            phrase, score, was, run, envelope, gain))
                         WakeBus.countWake(this)
                         onWakeWord()
                     }
@@ -554,7 +566,8 @@ class WakeService : Service() {
                 val address = WakeBus.prefs(this).getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
                 val sir = WakeBus.prefs(this).getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
                 TtsEngine.speak(TtsEngine.Request("wake-" + System.nanoTime(),
-                    "जी $sir? जार्विस खोलने के लिए नोटिफ़िकेशन दबाइए।", "Ji $address? Tap the notification to open JARVIS.", "hi-IN", 0.95f))
+                    "जी $sir? ${WakeBus.assistantNameHi(this)} खोलने के लिए नोटिफ़िकेशन दबाइए।",
+                    "Ji $address? Tap the notification to open ${WakeBus.assistantName(this)}.", "hi-IN", 0.95f))
                 notifier.showWakeFallback(address)
             }
         }, 1500)

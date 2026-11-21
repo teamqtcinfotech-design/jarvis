@@ -30,6 +30,11 @@ export interface WakeConfig {
   bargeIn?: boolean;
   /** Which Grok voice JARVIS speaks with (the MD's choice; male voices). */
   voiceName?: string;
+  /** The wake word chosen (src/lib/wakeWords.ts): its listener file, the phrase, and the assistant's name with it. */
+  wakeModel?: string;
+  wakePhrase?: string;
+  assistantName?: string;
+  assistantNameHi?: string;
   speakWhenLocked: boolean;
   /** Also listen for "Hey JARVIS" (microphone). The reminder / message watcher runs either way. */
   wakeWord: boolean;

@@ -25,6 +25,7 @@ import { downloadCsv, downloadPdf, shareText } from './download';
 import { CONFIRMABLE, SERVER_SAVED, TASK_DRAFTS, describeDraft } from './drafts';
 import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
+import { WAKE_PHRASE, WAKE_WORDS, wakeWordOf } from './wakeWords';
 import { useSession } from './session';
 import { closeLine, hasCollected, type LineState, lineOpen, lineSpeaking, liveAvailable, openLine, takeCollected } from './liveVoice';
 import { enqueue, flush, queued } from './offlineQueue';
@@ -110,14 +111,13 @@ const UNDO_FOR_MS = 60_000;
 const nowMs = () => Date.now();
 // "I have a long message": the next listening keeps going across pauses until he says "bas".
 const LONG_CUE = /\b(lamba|lambi|long|bada|badi)\s+(message|msg|note|baat|instruction|instructions|list)\b|\bsunte\s+raho\b|\bsuno\s+pehle\b|\blikhte\s+jao\b|\bnote\s+karte\s+jao\b|\bmain\s+bol(ta|ti)\s+(hoon|hu|hun)\b|\bdictation\b|\blet\s+me\s+finish\b|लंबा\s+मैसेज|लंबी\s+बात|सुनते\s+रहो/i;
-const BASE_HINTS = ['JARVIS', 'Jarvis', 'Hey JARVIS'];
+const BASE_HINTS = ['JARVIS', 'Jarvis', 'Hey JARVIS', ...WAKE_WORDS.flatMap((w) => [w.phrase, w.name])];
 // Quiet rounds (each about 6 s of the recogniser hearing nothing). While JARVIS is waiting on him (a question, a
 // card, just woken): listen once more, ask "Sir?" once, listen, then rest. After a plain answer: rest after the
 // first quiet round. Resting hands the microphone back to "Hey JARVIS", which cannot listen while this does.
 const NUDGE_AFTER_ROUNDS = 2;
 const REST_AFTER_ROUNDS = 3;
-// "Hey JARVIS" as the phone's speech recogniser writes it, at the start of what was heard.
-const WAKE_PHRASE = /^\s*(?:(?:hey|hi|hello|ok|okay|he|hay|hai|a|oh|हे|हाय|हेलो)[\s,]+)?(?:jarvis|jarwis|jarvish|jervis|jarves|javis|jarbis|जार्विस|जारविस)[\s,.!?]*/i;
+// The wake phrase as the phone's speech recogniser writes it, at the start of what was heard: see src/lib/wakeWords.ts.
 // Words the room says on its own. Heard right after a wake, with nothing else, they mean the wake was false.
 const FILLER = new Set(['ok', 'okay', 'k', 'haan', 'ha', 'han', 'hmm', 'hm', 'mm', 'yes', 'no', 'nah', 'hello', 'hi', 'hey', 'achha', 'accha',
   'acha', 'theek', 'thik', 'hai', 'ji', 'kya', 'what', 'oh', 'ah', 'um', 'uh', 'yeah', 'yep', 'huh', 'so', 'ठीक', 'हाँ', 'हां', 'जी',
@@ -1529,6 +1529,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     let pushRegistered = false;
     let configured = false;
     let configuredPaName = '';
+    let configuredWake = '';
+    const wake = wakeWordOf(prefs.wakeWord);
     const ensure = () => {
       wakeStatus()
         .then(async (st) => {
@@ -1536,8 +1538,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
           const wantListening = prefs.wakeWordEnabled && st.micAllowed;
           // Always hand the background part this session's server and login once per app start: after an
           // update or a server switch it may still be holding the previous ones (and would then fetch
-          // reminders and JARVIS's voice from the wrong place). The PA's name goes along once it is known.
-          if (!configured || !st.running || st.listening !== wantListening || (paName && configuredPaName !== paName)) {
+          // reminders and JARVIS's voice from the wrong place). The PA's name goes along once it is known, and
+          // the wake word again whenever it changes (the listener is reloaded for it).
+          if (!configured || !st.running || st.listening !== wantListening || (paName && configuredPaName !== paName) || configuredWake !== wake.key) {
             const tokens = await deviceTokens();
             if (cancelled) return;
             await wakeStart({
@@ -1555,6 +1558,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               reminderSound: prefs.reminderSound,
               bargeIn: prefs.bargeIn,
               voiceName: prefs.voiceName,
+              wakeModel: wake.model,
+              wakePhrase: wake.phrase,
+              assistantName: wake.name,
               speakWhenLocked: prefs.privateAloudWhenLocked,
               wakeWord: wantListening,
               walkie: prefs.walkieEnabled,
@@ -1562,6 +1568,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
             });
             configured = true;
             configuredPaName = paName;
+            configuredWake = wake.key;
           }
           // Live push: the server learns this phone's token once per app session (Firebase rotations are
           // re-registered natively).
@@ -1582,7 +1589,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       sub.remove();
     };
     // The names, the voice and the listening language go along too, and again whenever they change.
-  }, [prefs.wakeWordEnabled, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, prefs.walkieEnabled, user, paName, hints, listenLang]);
+  }, [prefs.wakeWordEnabled, prefs.wakeWord, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, prefs.walkieEnabled, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

@@ -250,7 +250,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         putExtra("android.speech.extras.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 1200L)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // Names it should expect: JARVIS, the two of them, the staff and the contacts (so "Mansi" is not "Mercy").
-            val names = linkedSetOf("JARVIS", "Jarvis", address)
+            val names = linkedSetOf("JARVIS", "Jarvis", WakeBus.assistantName(context), address)
             prefs.getString(WakeBus.KEY_PA_NAME, null)?.takeIf { it.isNotBlank() }?.let { names.add(it) }
             prefs.getString(WakeBus.KEY_HINTS, null)?.split("\n")?.map { it.trim() }?.filter { it.isNotEmpty() }?.let { names.addAll(it) }
             putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, ArrayList(names.take(60)))
@@ -355,9 +355,12 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
         private val FILLER = setOf("ok", "okay", "k", "haan", "ha", "han", "hmm", "hm", "mm", "yes", "no", "nah", "hello", "hi", "hey",
             "achha", "accha", "acha", "theek", "thik", "hai", "ji", "kya", "what", "oh", "ah", "um", "uh", "yeah", "yep", "huh", "so",
             "ok ok", "ठीक", "हाँ", "हां", "जी", "अच्छा", "क्या", "हैं", "है", "नहीं")
-        /** "Hey JARVIS" as the phone's speech recogniser tends to write it, at the start of what was heard. */
+        /** The wake phrase as the phone's speech recogniser tends to write it, at the start of what was heard: every
+         *  word the phone can listen for (Hey JARVIS, Hey Billy, Hey Honey, OK Boss, Alfred, Computer, Hey Luna). */
         private val WAKE_PHRASE = Regex(
-            "^\\s*(?:(?:hey|hi|hello|ok|okay|he|hay|hai|a|oh|हे|हाय|हेलो)[\\s,]+)?(?:jarvis|jarwis|jarvish|jervis|jarves|javis|jarbis|जार्विस|जारविस)[\\s,.!?]*",
+            "^\\s*(?:(?:hey|hi|hello|ok|okay|he|hay|hai|a|oh|हे|हाय|हेलो|ओके)[\\s,]+)?"
+                + "(?:jarvis|jarwis|jarvish|jervis|jarves|javis|jarbis|जार्विस|जारविस|billy|billie|bili|बिली|honey|hunny|हनी|boss|बॉस"
+                + "|alfred|अल्फ्रेड|computer|कंप्यूटर|luna|लूना)[\\s,.!?]*",
             RegexOption.IGNORE_CASE,
         )
         fun available(context: Context): Boolean = SpeechRecognizer.isRecognitionAvailable(context)

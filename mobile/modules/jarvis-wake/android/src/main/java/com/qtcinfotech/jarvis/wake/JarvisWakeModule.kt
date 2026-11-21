@@ -192,6 +192,11 @@ class JarvisWakeModule : Module() {
             (config["reminderSound"] as? String)?.takeIf { it == "default" || it == "silent" }?.let { more.putString(WakeBus.KEY_REMINDER_SOUND, it) }
             (config["bargeIn"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_BARGE_IN, it) }
             (config["voiceName"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_VOICE_NAME, it) }
+            // The wake word chosen (its listener file, the phrase, the assistant's name that goes with it).
+            (config["wakeModel"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_WAKE_MODEL, it) }
+            (config["wakePhrase"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_WAKE_PHRASE, it) }
+            (config["assistantName"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_ASSISTANT_NAME, it) }
+            (config["assistantNameHi"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_ASSISTANT_NAME_HI, it) }
             (config["hints"] as? List<*>)?.let { list ->
                 more.putString(WakeBus.KEY_HINTS, list.mapNotNull { (it as? String)?.trim() }.filter { it.isNotEmpty() }.take(60).joinToString("\n"))
             }

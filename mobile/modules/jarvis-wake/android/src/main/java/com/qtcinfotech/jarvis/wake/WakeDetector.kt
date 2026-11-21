@@ -17,7 +17,7 @@ import java.nio.FloatBuffer
  *
  * Audio never leaves the phone. The models are the free ones from the openWakeWord project.
  */
-class WakeDetector(context: Context) : AutoCloseable {
+class WakeDetector(context: Context, modelFile: String = WakeBus.DEFAULT_WAKE_MODEL) : AutoCloseable {
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val opts = OrtSession.SessionOptions().apply {
         setIntraOpNumThreads(1)
@@ -25,7 +25,8 @@ class WakeDetector(context: Context) : AutoCloseable {
     }
     private val mel: OrtSession = env.createSession(context.assets.open("melspectrogram.onnx").readBytes(), opts)
     private val emb: OrtSession = env.createSession(context.assets.open("embedding_model.onnx").readBytes(), opts)
-    private val cls: OrtSession = env.createSession(context.assets.open("hey_jarvis_v0.1.onnx").readBytes(), opts)
+    // The phrase's own classifier: "hey jarvis", or the one chosen in Settings (hey_billy.onnx, ok_boss.onnx …).
+    private val cls: OrtSession = env.createSession(context.assets.open(modelFile).readBytes(), opts)
     private val melInput = mel.inputNames.first()
     private val embInput = emb.inputNames.first()
     private val clsInput = cls.inputNames.first()

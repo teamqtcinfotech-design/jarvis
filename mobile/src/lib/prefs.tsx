@@ -31,6 +31,8 @@ export interface Prefs {
   quietEndHour: number;
   /** "Hey JARVIS" listening in the background (needs the one-time setup in Settings). */
   wakeWordEnabled: boolean;
+  /** Which words wake the assistant (src/lib/wakeWords.ts), and with them its name: "Hey Billy" makes it Billy. */
+  wakeWord: string;
   /** Meeting mode: JARVIS stays silent and vibrates only. */
   meetingMode: boolean;
   /** In a meeting (meeting mode, or one in the diary): replies on the screen only, with a vibration, never spoken. */
@@ -89,6 +91,7 @@ const DEFAULTS: Prefs = {
   quietStartHour: 22,
   quietEndHour: 7,
   wakeWordEnabled: false,
+  wakeWord: 'hey_jarvis',
   meetingMode: false,
   meetingQuietReplies: true,
   officeStart: '10:00',

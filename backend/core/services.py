@@ -2731,12 +2731,15 @@ def ai_context(user: User, include_private: bool = True) -> dict:
              for s in staff_qs()[:80]]
     categories = [{"key": c.key, "name": c.name, "department": c.department}
                   for c in categories_qs()[:100]]
+    wake = wake_word_of(user)
     ctx = {
         "now_india": now.isoformat(),
         "weekday": now.strftime("%A"),
         "speaker_role": user.role,
         "speaker_name": user.spoken_name,
         "speaker_title": user.title_label,
+        # The assistant's own name for this person: it follows the wake word ("Hey Billy" = Billy); the app stays JARVIS.
+        "assistant": {"name": wake["name"], "name_hi": wake["name_hi"], "wake_phrase": wake["phrase"]},
         # Everyone else on the team with a JARVIS account: work and messages go to them by name or by job.
         "team": [{"name": u.spoken_name, "title": u.title_label, "department": u.department,
                   "gender": gender_of(u), **({"is_md": True} if u.is_md else {})}
@@ -2839,6 +2842,30 @@ def ai_context(user: User, include_private: bool = True) -> dict:
 
 
 # ------------------------------------------------------------------ settings (shared by app + background listener)
+# The wake words the phone can listen for (openWakeWord models bundled in the app), the assistant's name that goes
+# with each, and the listener file. Only one is on at a time; the app itself stays JARVIS.
+WAKE_WORDS = {
+    "hey_jarvis": {"phrase": "Hey JARVIS", "name": "JARVIS", "name_hi": "जार्विस", "model": "hey_jarvis_v0.1.onnx"},
+    "hey_billy": {"phrase": "Hey Billy", "name": "Billy", "name_hi": "बिली", "model": "hey_billy.onnx"},
+    "hey_honey": {"phrase": "Hey Honey", "name": "Honey", "name_hi": "हनी", "model": "hey_honey.onnx"},
+    "ok_boss": {"phrase": "OK Boss", "name": "Boss", "name_hi": "बॉस", "model": "ok_boss.onnx"},
+    "alfred": {"phrase": "Alfred", "name": "Alfred", "name_hi": "अल्फ्रेड", "model": "alfred.onnx"},
+    "computer": {"phrase": "Computer", "name": "Computer", "name_hi": "कंप्यूटर", "model": "computer.onnx"},
+    "hey_luna": {"phrase": "Hey Luna", "name": "Luna", "name_hi": "लूना", "model": "hey_luna.onnx"},
+}
+
+
+def wake_word_of(user: User) -> dict:
+    """This person's wake word: its key, phrase, the assistant's name (and in Devanagari) and the listener file."""
+    key = get_prefs(user).get("wakeWord") or "hey_jarvis"
+    return {"key": key, **WAKE_WORDS.get(key, WAKE_WORDS["hey_jarvis"])}
+
+
+def assistant_name(user: User) -> str:
+    """What the assistant is called for this person ("JARVIS", or "Billy" when the wake word is Hey Billy)."""
+    return wake_word_of(user)["name"]
+
+
 PREF_SCHEMA = {
     "listenLang": {"type": "enum", "values": ["auto", "hi-IN"], "default": "auto", "say": "listening language",
                    "aliases": {"auto": "auto", "english": "auto", "hinglish": "auto", "both": "auto", "mixed": "auto",
@@ -2874,6 +2901,13 @@ PREF_SCHEMA = {
     "quietStartHour": {"type": "int", "min": 0, "max": 23, "default": 22, "say": "quiet hours start"},
     "quietEndHour": {"type": "int", "min": 0, "max": 23, "default": 7, "say": "quiet hours end"},
     "wakeWordEnabled": {"type": "bool", "default": False, "say": "Hey JARVIS listening"},
+    # The words that wake the assistant on this person's phone, and with them the assistant's own name (the app stays
+    # JARVIS): "Hey Billy" makes it Billy. One at a time; the phone loads the matching listener (see WAKE_WORDS).
+    "wakeWord": {"type": "enum", "values": list(WAKE_WORDS), "default": "hey_jarvis", "say": "wake word",
+                 "aliases": {**{k: k for k in WAKE_WORDS}, **{v["phrase"].lower(): k for k, v in WAKE_WORDS.items()},
+                             **{v["name"].lower(): k for k, v in WAKE_WORDS.items()}, "ok computer": "computer", "hey alfred": "alfred",
+                             "hey computer": "computer", "boss": "ok_boss", "hey boss": "ok_boss", "jarvis": "hey_jarvis"},
+                 "labels": {k: v["phrase"] for k, v in WAKE_WORDS.items()}},
     "meetingMode": {"type": "bool", "default": False, "say": "meeting mode"},
     # In a meeting (meeting mode, or a meeting in the diary): JARVIS still saves and sends, but answers on the screen
     # only, with a vibration, instead of speaking.

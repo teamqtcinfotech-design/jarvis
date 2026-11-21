@@ -108,7 +108,7 @@ class WakeNotifier(private val context: Context) {
     fun serviceNotification(listening: Boolean = WakeBus.listening): Notification {
         return builder(CHANNEL_SERVICE)
             .setSmallIcon(icon())
-            .setContentTitle(if (listening) "JARVIS is listening for “Hey JARVIS”" else "JARVIS is on")
+            .setContentTitle(if (listening) "JARVIS is listening for “${WakeBus.wakePhrase(context)}”" else "JARVIS is on")
             .setContentText(if (listening) "Nothing is sent until you say the words. Reminders and messages reach you here too."
                             else "Reminders and messages reach you even when the app is closed.")
             .setContentIntent(openApp())

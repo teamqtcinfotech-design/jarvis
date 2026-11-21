@@ -157,6 +157,10 @@ BENCH = [
     ("md", "last month ke tasks dikhao", {"intent": "query", "view_kind": ["tasks", "done", "history"], "view_from": "{last_month_start}", "view_to": "{last_month_end}"}),
     ("md", "kis kis ne message bheja aur kitne ka reply nahi diya", {"intent": "query", "view_kind": "messages", "view_filter": ["inbox", "unreplied"]}),
     ("md", "jo messages maine abhi tak dekhe nahi", {"intent": "query", "view_kind": "messages", "view_filter": "unread"}),
+    # --- the wake word and the assistant's name (Nov 2026)
+    ("md", "ab mujhe Hey Billy bolke bulao", {"intent": "set_setting", "setting_key": "wakeWord", "setting_value": ["hey_billy", "hey billy", "Hey Billy", "billy", "Billy"]}),
+    ("md", "wake word OK Boss kar do", {"intent": "set_setting", "setting_key": "wakeWord", "setting_value": ["ok_boss", "ok boss", "OK Boss", "boss", "Boss"]}),
+    ("md", "tumhara naam kya hai", {"intent": "small_talk"}),
 ]
 
 

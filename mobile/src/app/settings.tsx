@@ -26,6 +26,7 @@ import type { ContactItem, HabitItem, MemoryItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { liveAvailable } from '@/lib/liveVoice';
 import { type WakeStatus, wakeSetListening, wakeSetVoice, wakeSettings, wakeStart, wakeStatus, wakeSupported } from '@/lib/wake';
+import { WAKE_WORDS, wakeWordOf } from '@/lib/wakeWords';
 
 /**
  * Settings: one short page (who is signed in, six sections, sign out) and each section on its own short page
@@ -593,6 +594,7 @@ function BackgroundSection() {
     };
   }, []);
   const xiaomi = /xiaomi|redmi|poco/i.test(wake?.manufacturer ?? '');
+  const wakeWord = wakeWordOf(prefs.wakeWord);
 
   const toggleWake = async (on: boolean) => {
     setNote('');
@@ -660,10 +662,19 @@ function BackgroundSection() {
         right={wake?.running ? <Tag label="On" color={colors.success} bg={colors.successSoft} /> : null}
       />
       <Row
-        title="Listen for “Hey JARVIS”"
-        detail={wake?.listening ? 'On. Say “Hey JARVIS” any time, even with the app closed.' : 'Off. Switch on to wake JARVIS by voice from anywhere.'}
+        title={`Listen for “${wakeWord.phrase}”`}
+        detail={wake?.listening ? `On. Say “${wakeWord.phrase}” any time, even with the app closed.` : `Off. Switch on to wake ${wakeWord.name} by voice from anywhere.`}
         right={<Switch value={prefs.wakeWordEnabled && !!wake?.listening} disabled={!wakeSupported || busy} onValueChange={toggleWake} trackColor={{ true: colors.gold }} />}
       />
+      <Row
+        title="Wake word"
+        detail={`Pick the words that wake it. The assistant is then called ${wakeWord.name} and answers to that name; the app stays JARVIS. By voice: “ab mujhe Hey Billy bolke bulao”.`}
+      />
+      <View style={[s.chips, { marginTop: 4 }]}>
+        {WAKE_WORDS.map((w) => (
+          <Chip key={w.key} label={w.phrase} icon={w.key === wakeWord.key ? 'checkmark-circle' : 'ellipse-outline'} onPress={() => update({ wakeWord: w.key })} />
+        ))}
+      </View>
       {note ? <Txt variant="small" style={{ color: colors.warn, marginTop: 4 }}>{note}</Txt> : null}
       {wakeSupported ? (
         <View style={[s.chips, { marginTop: 8 }]}>

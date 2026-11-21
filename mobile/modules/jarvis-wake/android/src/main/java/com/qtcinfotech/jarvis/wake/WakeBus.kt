@@ -129,6 +129,17 @@ object WakeBus {
     /** A photo or file shared into JARVIS from another app, as JSON {uri, mime, name, text} (consumed once by the app). */
     @Volatile var pendingShare: String? = null
     const val KEY_PUSH_TOKEN = "push_token"
+    /** The wake word in use: the listener file bundled in the app, the phrase as said, and the assistant's name that
+     *  goes with it ("Hey Billy" = Billy; the app itself stays JARVIS). */
+    const val KEY_WAKE_MODEL = "wake_model"
+    const val KEY_WAKE_PHRASE = "wake_phrase"
+    const val KEY_ASSISTANT_NAME = "assistant_name"
+    const val KEY_ASSISTANT_NAME_HI = "assistant_name_hi"
+    const val DEFAULT_WAKE_MODEL = "hey_jarvis_v0.1.onnx"
+
+    fun wakePhrase(context: Context): String = prefs(context).getString(KEY_WAKE_PHRASE, "Hey JARVIS") ?: "Hey JARVIS"
+    fun assistantName(context: Context): String = prefs(context).getString(KEY_ASSISTANT_NAME, "JARVIS") ?: "JARVIS"
+    fun assistantNameHi(context: Context): String = prefs(context).getString(KEY_ASSISTANT_NAME_HI, "जार्विस") ?: "जार्विस"
     /** Which Grok voice JARVIS speaks with (the MD's choice in Settings; male voices only). */
     const val KEY_VOICE_NAME = "voice_name"
     /** JARVIS speaks in the Grok voice (default); false = the phone's own voice only. */
