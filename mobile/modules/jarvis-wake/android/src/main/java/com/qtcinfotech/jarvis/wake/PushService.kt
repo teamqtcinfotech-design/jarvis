@@ -29,6 +29,15 @@ class PushService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val prefs = WakeBus.prefs(this)
         if (!prefs.getBoolean(WakeBus.KEY_ENABLED, false)) return // signed out: ignore anything still arriving
+        if (!WakeBus.running) {
+            // The phone had killed the background service (Xiaomi does, when the app is swiped away): a push is
+            // allowed to start it again, so the reminders, the ringing and "Hey JARVIS" are back from this moment.
+            try {
+                WakeService.start(this, withMicrophone = WatchdogReceiver.overlayAllowed(this))
+            } catch (e: Throwable) {
+                Log.w(TAG, "push: could not start the service: ${e.message}")
+            }
+        }
         val data = message.data
         val type = data["type"]
         if (type == "walkie") {

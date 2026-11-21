@@ -746,8 +746,16 @@ class LiveToolView(APIView):
         s = LiveToolSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         d = s.validated_data
+        awaiting = d["awaiting"]
+        if not awaiting and d.get("pending"):
+            # The phone's closed-app conversation sends the waiting card without describing it: described here.
+            from . import conversation
+            try:
+                awaiting = conversation._describe(d["pending"])
+            except Exception:  # a card shape this cannot describe: the answer still carries the card itself
+                awaiting = ""
         draft = livevoice.run_tool(request.user, d["name"], d["arguments"], previous=d["previous"], history=d["history"],
-                                   awaiting=d["awaiting"], choices=d.get("choices"), pending=d.get("pending"),
+                                   awaiting=awaiting, choices=d.get("choices"), pending=d.get("pending"),
                                    screen=d.get("screen"), include_private=d["private_ok"])
         return Response(draft)
 

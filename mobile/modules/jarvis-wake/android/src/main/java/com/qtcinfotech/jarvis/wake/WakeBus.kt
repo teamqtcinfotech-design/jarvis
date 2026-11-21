@@ -32,9 +32,11 @@ object WakeBus {
     /** The wake-word service has the microphone open right now (whoever wants to listen next waits for this to clear). */
     @Volatile var micHeld = false
 
+    /** The app's code is loaded (open, or behind another app): it runs the conversation on the live line, whether or
+     *  not its screen is showing. Otherwise the app is told when it next comes up. */
     fun onWake() {
         val l = listener
-        if (appInForeground && l != null) l() else pendingWake = true
+        if (l != null) l() else pendingWake = true
     }
 
     /** A live push arrived while the app is open: the app refreshes its alerts at once. */

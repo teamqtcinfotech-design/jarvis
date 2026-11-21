@@ -165,6 +165,16 @@ class LiveApiTests(BaseCase):
         self.assertEqual(r.status_code, 200, r.content)
         d = r.json()
         self.assertTrue(d["needs_clarification"] or d["action"] in ("private_task", "answer"), d)
+        # The phone's closed-app conversation (LiveLoop.kt) sends the waiting card back without describing it: the
+        # server describes it itself, so "haan" through the answer tool still lands on that card.
+        card = {k: v for k, v in d.items() if k not in ("categories", "staff_candidates", "target_candidates", "say", "say_lang", "tool")}
+        with mock.patch("core.ai_brain.interpret", side_effect=AssertionError("no model must be asked")), \
+                mock.patch("core.conversation._describe", wraps=__import__("core.conversation", fromlist=["_describe"])._describe) as described:
+            r = self.md_client.post("/api/v1/assistant/live/tool/", {"name": "answer", "arguments": {"said": "haan", "yes": True},
+                                                                      "pending": card, "awaiting": ""}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(described.called)
+        self.assertEqual(described.call_args.args[0].get("action"), d["action"])
         # An unknown tool is refused; a bad argument blob is not.
         r = self.md_client.post("/api/v1/assistant/live/tool/", {"name": "launch_rockets", "arguments": {}}, format="json")
         self.assertEqual(r.status_code, 422)

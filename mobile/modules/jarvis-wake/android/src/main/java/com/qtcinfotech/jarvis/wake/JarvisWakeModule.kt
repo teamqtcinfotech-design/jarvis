@@ -217,6 +217,7 @@ class JarvisWakeModule : Module() {
         // Signing out: the service stops for good (its login is gone).
         AsyncFunction("stop") {
             WakeBus.prefs(context).edit().putBoolean(WakeBus.KEY_ENABLED, false).apply()
+            WatchdogReceiver.cancel(context)
             WakeService.stop(context)
             WakeBus.running = false
             WakeBus.listening = false

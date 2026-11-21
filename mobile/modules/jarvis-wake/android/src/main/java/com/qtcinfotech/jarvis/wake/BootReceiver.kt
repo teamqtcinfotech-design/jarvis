@@ -27,6 +27,7 @@ class BootReceiver : BroadcastReceiver() {
         } catch (e: Throwable) {
             Log.w("JarvisWake", "Could not start the watcher after boot: ${e.message}")
         }
+        WatchdogReceiver.schedule(context)
         if (wakeWord && !overlay) WakeNotifier(context).showSwitchOn()
     }
 }

@@ -44,6 +44,8 @@ object LiveVoice {
     private const val DEFAULT_RATE = 24000
 
     @Volatile var listener: ((String, JSONObject) -> Unit)? = null
+    /** The closed-app conversation (LiveLoop) runs the line itself: while it is set, the app is not told. */
+    @Volatile var nativeHandler: ((String, JSONObject) -> Unit)? = null
     @Volatile var open = false
     @Volatile var speaking = false
 
@@ -79,7 +81,8 @@ object LiveVoice {
     private var heardText = ""
 
     private fun emit(event: String, data: JSONObject = JSONObject()) {
-        try { listener?.invoke(event, data) } catch (_: Throwable) {}
+        val native = nativeHandler
+        try { (native ?: listener)?.invoke(event, data) } catch (_: Throwable) {}
     }
 
     private fun send(obj: JSONObject): Boolean = try { ws?.send(obj.toString()) ?: false } catch (_: Throwable) { false }

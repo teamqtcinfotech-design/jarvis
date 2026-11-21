@@ -51,6 +51,8 @@ class WakeService : Service() {
     private var watcherThread: HandlerThread? = null
     private var watcher: ReminderWatcher? = null
     @Volatile private var loop: ConversationLoop? = null
+    /** The closed-app conversation on the live voice line (the phone's recogniser, `loop`, is the fallback). */
+    @Volatile private var liveLoop: LiveLoop? = null
     /** One beep player for the life of the service (a new one for every wake-up is never given back to Android). */
     private var beep: ToneGenerator? = null
 
@@ -65,6 +67,7 @@ class WakeService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             WakeBus.prefs(this).edit().putBoolean(WakeBus.KEY_ENABLED, false).apply()
+            WatchdogReceiver.cancel(this)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -84,6 +87,8 @@ class WakeService : Service() {
         WakeBus.running = true
         WakeBus.listening = listening
         WakeBus.micBlocked = false
+        // If the phone kills this service (Xiaomi does when the app is swiped away), the alarm brings it back.
+        WatchdogReceiver.schedule(this)
         prefetchGreetings()
         // The walkie-talkie line lives as long as this service does; with the app closed, an incoming talk shows
         // the full-screen card (the sound plays either way).
@@ -240,7 +245,7 @@ class WakeService : Service() {
                 wakeLock.acquire()
                 while (!stopped && !micStopped) {
                     // A voice conversation that is no longer running must never keep "Hey JARVIS" switched off.
-                    if (WakeBus.inConversation && loop?.active != true) WakeBus.inConversation = false
+                    if (WakeBus.inConversation && loop?.active != true && liveLoop?.active != true) WakeBus.inConversation = false
                     // While JARVIS itself is talking the microphone is kept (for barge-in) unless the app asked for
                     // silence; while JARVIS or the app is LISTENING the microphone must be let go.
                     val talking = TtsEngine.speaking && WakeBus.prefs(this).getBoolean(WakeBus.KEY_BARGE_IN, true)
@@ -503,11 +508,15 @@ class WakeService : Service() {
         } catch (_: Throwable) {
             beep = null  // the player died: make a new one next time
         }
-        if (WakeBus.appInForeground && WakeBus.listener != null) {
-            WakeBus.onWake() // the app is open: it runs the conversation on screen
+        if (WakeBus.listener != null) {
+            // The app's code is loaded (on screen, or behind another app): it runs the conversation on the live
+            // line, the same way whether or not its screen is showing.
+            WakeBus.onWake()
             return
         }
-        // App closed (or behind another app, or the phone locked): talk right here, voice only. The screen stays as it is.
+        // App closed (the phone restarted this service by itself): talk right here, voice only, on the live line;
+        // the phone's own recogniser only if the line cannot open. The screen stays as it is.
+        if (startLiveLoop()) return
         if (ConversationLoop.available(this)) {
             val l = loop ?: ConversationLoop(this, notifier).also { loop = it }
             l.start()
@@ -537,11 +546,38 @@ class WakeService : Service() {
         }, 1500)
     }
 
+    /**
+     * The closed-app conversation on the live line. Returns false when it is not possible on this phone right now;
+     * when the line fails to open a moment later, the phone's recogniser takes over (or, for a question just asked,
+     * the answer is simply waited for the old way).
+     */
+    private fun startLiveLoop(about: JSONObject? = null): Boolean {
+        if (!LiveLoop.available(this)) return false
+        val l = liveLoop ?: LiveLoop(this, notifier).also { liveLoop = it }
+        if (l.active) return true
+        l.onFailed = {
+            if (ConversationLoop.available(this)) {
+                val c = loop ?: ConversationLoop(this, notifier).also { loop = it }
+                if (about != null) c.startAbout(about) else c.start()
+            }
+        }
+        if (about != null) l.startAbout(about) else l.start()
+        return true
+    }
+
     /** A reminder or alert with a question was just spoken: open the voice-only conversation to take the answer. */
     private fun askAbout(about: JSONObject) {
-        if (WakeBus.appInForeground || !ConversationLoop.available(this)) return
+        if (WakeBus.appInForeground) return
+        if (startLiveLoop(about)) return
+        if (!ConversationLoop.available(this)) return
         val l = loop ?: ConversationLoop(this, notifier).also { loop = it }
         l.startAbout(about)
+    }
+
+    /** The app was swiped away from the recent apps: Xiaomi kills this service with it. Come back in a moment. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        WatchdogReceiver.schedule(this, 4_000L)
+        super.onTaskRemoved(rootIntent)
     }
 
     private fun startWatcher() {
@@ -576,6 +612,10 @@ class WakeService : Service() {
         if (current === this) current = null
         WakeBus.running = false
         WakeBus.listening = false
+        // Stopped by the phone (not by a sign-out): the alarm starts it again in a few minutes.
+        if (WakeBus.prefs(this).getBoolean(WakeBus.KEY_ENABLED, false)) WatchdogReceiver.schedule(this)
+        liveLoop?.destroy()
+        liveLoop = null
         loop?.destroy()
         loop = null
         WalkieEngine.serviceListener = null

@@ -179,6 +179,7 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         .put("id", item.alertId ?: "")
         .put("title", item.title)
         .put("question", item.question?.optString("en") ?: "")
+        .put("qkind", item.question?.optString("kind") ?: "")
 
     /** Tell the server these were spoken or shown, so the app (or this part later) never repeats them. */
     private fun tell(items: List<Item>) {

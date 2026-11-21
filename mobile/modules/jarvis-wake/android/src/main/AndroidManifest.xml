@@ -39,6 +39,12 @@
       android:name="com.qtcinfotech.jarvis.wake.RingReceiver"
       android:exported="false" />
 
+    <!-- Every few minutes while signed in (and seconds after the app was swiped away): start the background service
+         again if the phone killed it (Xiaomi does), so "Hey JARVIS" and the reminders come back by themselves. -->
+    <receiver
+      android:name="com.qtcinfotech.jarvis.wake.WatchdogReceiver"
+      android:exported="false" />
+
     <!-- After a reboot: restart the watcher, and post "Tap to switch JARVIS on" for the microphone part. -->
     <receiver
       android:name="com.qtcinfotech.jarvis.wake.BootReceiver"

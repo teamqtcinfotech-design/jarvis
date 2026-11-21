@@ -48,7 +48,7 @@ export default function Setup() {
     { key: 'battery', title: 'Run in the background', detail: 'So Android does not put JARVIS to sleep.', icon: 'battery-charging-outline' },
     ...(xiaomi
       ? [
-          { key: 'autostart' as StepKey, title: 'Autostart (Xiaomi)', detail: 'Lets JARVIS start again after a restart.', icon: 'power-outline' },
+          { key: 'autostart' as StepKey, title: 'Autostart (Xiaomi)', detail: 'Lets JARVIS start again after a restart. Also lock JARVIS in the recent-apps screen (pull its card down, tap the lock) so a swipe does not switch “Hey JARVIS” off.', icon: 'power-outline' },
           { key: 'popups' as StepKey, title: 'Pop-ups from background (Xiaomi)', detail: 'Switch on “Display pop-up windows while running in the background”.', icon: 'open-outline' },
         ]
       : []),
