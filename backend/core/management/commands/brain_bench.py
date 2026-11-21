@@ -150,6 +150,13 @@ BENCH = [
     ("md", "inme se urgent kitne hain", {"intent": "query", "view_kind": "alerts", "view_priority": "urgent"},
      {"kind": "alerts", "from": T, "to": T}),
     ("md", "mere aaj ke tasks aur meetings, pending aur done", {"intent": "query", "view_kind": ["today", "tasks"], "view_from": T, "view_to": T}),
+    # --- the future, however far (Nov 2026): no "next 7 days"; a named month or year is a period; the past is a tasks period
+    ("md", "show me my future meetings", {"intent": "query", "view_kind": "upcoming", "view_types": ["MEETING"], "view_from": ""}),
+    ("md", "meri kitni meetings schedule hain", {"intent": "query", "view_kind": "upcoming", "view_types": ["MEETING"], "view_from": ""}),
+    ("md", "agle mahine ki meetings dikhao", {"intent": "query", "view_kind": ["upcoming", "tasks"], "view_types": ["MEETING"], "view_from": "{next_month_start}", "view_to": "{next_month_end}"}),
+    ("md", "last month ke tasks dikhao", {"intent": "query", "view_kind": ["tasks", "done", "history"], "view_from": "{last_month_start}", "view_to": "{last_month_end}"}),
+    ("md", "kis kis ne message bheja aur kitne ka reply nahi diya", {"intent": "query", "view_kind": "messages", "view_filter": ["inbox", "unreplied"]}),
+    ("md", "jo messages maine abhi tak dekhe nahi", {"intent": "query", "view_kind": "messages", "view_filter": "unread"}),
 ]
 
 
@@ -190,10 +197,13 @@ class Command(BaseCommand):
         from datetime import timedelta
         month_start = today.replace(day=1)
         last_month_end = month_start - timedelta(days=1)
+        next_month_start = (month_start + timedelta(days=32)).replace(day=1)
+        next_month_end = (next_month_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
         dates = {"today": today.isoformat(), "tomorrow": (today + timedelta(days=1)).isoformat(),
                  "yesterday": (today - timedelta(days=1)).isoformat(), "week_end": (today + timedelta(days=6)).isoformat(),
                  "month_start": month_start.isoformat(), "last_month_start": last_month_end.replace(day=1).isoformat(),
-                 "last_month_end": last_month_end.isoformat()}
+                 "last_month_end": last_month_end.isoformat(),
+                 "next_month_start": next_month_start.isoformat(), "next_month_end": next_month_end.isoformat()}
         users = {"md": User.objects.filter(role=User.Role.MD, is_active=True).first(),
                  "pa": User.objects.filter(role=User.Role.PA, is_active=True).first()}
         dates["pa"] = users["pa"].spoken_name if users["pa"] else "PA"  # the PA's real name in the sentences

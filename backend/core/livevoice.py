@@ -156,7 +156,8 @@ TOOLS = [
                     "the database and shows a card. Never answer such questions yourself.",
      "parameters": {"type": "object", "properties": {
          "what": {"type": "string", "enum": list(datacards.VIEW_KINDS),
-                  "description": "today (today's plan), week, pending (everything open), late, upcoming, nodate, done (finished work, a report), "
+                  "description": "today (today's plan), week, pending (everything open), late, upcoming (everything AHEAD however far: 'future meetings', "
+                                 "'kitni meetings schedule hain'; a month or year named goes in from_day/to_day; the past is tasks with that period), nodate, done (finished work, a report), "
                                  "tasks (a general list), person (one person's work), people (the team), performance, busy (when the MD is busy), "
                                  "history (a task's steps), messages, cancelled, private (the speaker's personal items), official, department, "
                                  "departments, section, stats, requests, approvals, alerts (what reached the speaker: notifications of every kind, "
@@ -165,7 +166,7 @@ TOOLS = [
          "from_day": _s("YYYY-MM-DD, first day of a period asked about, else ''"), "to_day": _s("YYYY-MM-DD, last day, else ''"),
          "by": {"type": "string", "enum": ["", "due", "given", "done"]},
          "filter": {"type": "string", "enum": ["", "open", "done", "late", "personal", "official", "inbox", "sent", "on_leave",
-                                              "seen", "unseen", "approved", "declined", "waiting"]},
+                                              "seen", "unseen", "approved", "declined", "waiting", "unread", "unreplied"]},
          "types": {"type": "array", "items": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL",
                                                                           "MESSAGE", "REQUEST", "UPDATE"]}},
          "minutes": {"type": "integer", "description": "alerts / approvals: a span from now asked for ('abhi 10 minute mein', 'last 2 hours' = 120); 0 otherwise"},

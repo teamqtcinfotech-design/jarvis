@@ -26,8 +26,8 @@ _STAFF = {"staff", "team", "all staff", "the staff", "the team", "employees", "s
 _ALL = {"all", "everyone", "everybody", "sab", "sabka", "sab log", "all of us"}
 _TEAM_WORDS = re.compile(r"\b(team|department|dept|waale|wale|walon|waalon|log|ka|ke|ki)\b")
 _FILTERS = {"open", "done", "late", "on_leave", "personal", "official", "inbox", "sent",
-            # notifications and approvals (Nov 2026)
-            "seen", "unseen", "approved", "declined", "waiting"}
+            # notifications and approvals (Nov 2026); messages not seen / not replied to
+            "seen", "unseen", "approved", "declined", "waiting", "unread", "unreplied"}
 _TYPES = {"TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL", "MESSAGE", "UPDATE", "REQUEST"}
 _FROM_WHOM = {"sir", "pa", "me", "staff"}
 _PRIORITIES = {"urgent", "high", "important"}

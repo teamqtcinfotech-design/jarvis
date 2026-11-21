@@ -952,8 +952,9 @@ def _sort_key(item: dict):
 
 
 def _bucket(items: list[dict]) -> dict:
+    """Late, today, coming up (EVERY dated item after today, however far: a meeting next December is coming up,
+    not "no date yet"), and anytime (no date at all)."""
     today = tu.today_local()
-    week_end = today + timedelta(days=7)
     buckets = {"overdue": [], "today": [], "upcoming": [], "anytime": []}
     for item in items:
         if item["status"] in (Status.COMPLETED, Status.CANCELLED):
@@ -972,10 +973,8 @@ def _bucket(items: list[dict]) -> dict:
             buckets["today" if given_today else "anytime"].append(item)
         elif d == today:
             buckets["today"].append(item)
-        elif d <= week_end:
-            buckets["upcoming"].append(item)
         else:
-            buckets["anytime"].append(item)
+            buckets["upcoming"].append(item)
     for key in buckets:
         buckets[key].sort(key=_sort_key)
     return buckets

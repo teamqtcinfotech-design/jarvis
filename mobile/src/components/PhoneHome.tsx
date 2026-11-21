@@ -1,6 +1,7 @@
 /**
  * Phone: the home is a dashboard. Greeting, "next up", stat tiles, reports he can open and download, today's
- * items with progress, what is coming up this week, the latest messages, the latest updates, the latest answer.
+ * tasks and meetings, what is coming up (tasks and meetings, however far), the alerts tree, the latest messages, the
+ * latest updates, the latest answer.
  * The orb floats in the bottom-right corner and opens the talk layer.
  */
 import * as Haptics from 'expo-haptics';
@@ -95,6 +96,56 @@ function UpdateRow({ a, last, onPress }: { a: ServerAlert; last: boolean; onPres
   );
 }
 
+/** One card of items on the home screen (today's tasks, today's meetings, what is ahead), with its count and "See all". */
+function ListBlock({ label, count, items, loaded, emptyIcon, emptyText, onSeeAll, onOpen, chip }: {
+  label: string; count: number; items: TaskItem[]; loaded: boolean; emptyIcon: string; emptyText: string;
+  onSeeAll: () => void; onOpen: (t: TaskItem) => void; chip?: React.ReactNode;
+}) {
+  return (
+    <>
+      <View style={s.sectionHead}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Txt variant="label">{label}</Txt>
+          {count ? <Txt variant="caption" style={{ marginLeft: 8 }}>{count}</Txt> : null}
+          {chip}
+        </View>
+        <Pressable onPress={onSeeAll} hitSlop={8}>
+          <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
+        </Pressable>
+      </View>
+      {items.length ? (
+        <View style={s.listCard}>
+          {items.map((t, i) => (
+            <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => onOpen(t)} showStaffStatus={t.assignee?.type !== 'MD'} flat last={i === items.length - 1} />
+          ))}
+        </View>
+      ) : (
+        <View style={s.empty}>
+          <Icon name={emptyIcon} size={20} color={colors.faint} />
+          <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{loaded ? emptyText : 'Loading…'}</Txt>
+        </View>
+      )}
+    </>
+  );
+}
+
+/** One branch of the Alerts tree: what it holds and how many, a tap opens that level. */
+function TreeRow({ icon, label, detail, tone: toneKey, onPress, last }: { icon: string; label: string; detail: string; tone: string; onPress: () => void; last?: boolean }) {
+  const c = tone[toneKey] ?? tone.muted;
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [s.msgRow, { alignItems: 'center' }, !last && s.rowLine, pressed && { opacity: 0.8 }]}>
+      <View style={[s.msgIcon, { marginTop: 0, backgroundColor: c.bg }]}>
+        <Icon name={icon} size={15} color={c.fg} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Txt variant="body" style={{ fontWeight: '600' }}>{label}</Txt>
+        <Txt variant="caption" style={{ marginTop: 1, color: toneKey === 'muted' ? colors.muted : c.fg }}>{detail}</Txt>
+      </View>
+      <Icon name="chevron-forward" size={16} color={colors.faint} />
+    </Pressable>
+  );
+}
+
 function Tile({ icon, label, value, toneKey, onPress }: { icon: string; label: string; value: number | string; toneKey: string; onPress: () => void }) {
   const c = tone[toneKey] ?? tone.muted;
   return (
@@ -153,12 +204,18 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     : [];
   const pending = (data?.requests.filter((r) => r.state === 'PENDING').length ?? 0) + approvals.length;
   const next = data ? nextTimed([...data.today, ...data.overdue], now) : null;
-  // Today means today: late items from earlier days are a separate chip, not rows that crowd out the day.
-  const todayList = data ? data.today.filter((t) => t.status !== 'COMPLETED').slice(0, 6) : [];
+  // Today means today: late items from earlier days are a separate chip, not rows that crowd out the day. Tasks and
+  // meetings are two cards, today and ahead (everything dated, however far: a meeting next December is "coming up").
+  const isMeeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
+  const todayOpen = data ? data.today.filter((t) => t.status !== 'COMPLETED') : [];
+  const todayTasks = todayOpen.filter((t) => !isMeeting(t)).slice(0, 6);
+  const todayMeetings = todayOpen.filter(isMeeting).slice(0, 6);
   const lateCount = data?.overdue.length ?? 0;
-  // The rest of the week, the latest messages (received and sent) and the latest updates, each a short strip with
-  // "See all"; the full lists are one tap away.
-  const comingUp = data ? data.upcoming.filter((t) => t.status !== 'COMPLETED').slice(0, 4) : [];
+  // Ahead, the latest messages (received and sent) and the latest updates, each a short strip with "See all"; the
+  // full lists are one tap away.
+  const ahead = data ? data.upcoming.filter((t) => t.status !== 'COMPLETED') : [];
+  const comingTasks = ahead.filter((t) => !isMeeting(t)).slice(0, 4);
+  const comingMeetings = ahead.filter(isMeeting).slice(0, 4);
   const messages = (data?.messages ?? []).slice(0, 3);
   const unread = data?.messages_unseen ?? 0;
   const updates = engine.news.slice(0, 3);
@@ -310,56 +367,67 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           ))}
         </ScrollView>
 
-        {/* Today */}
-        <View style={s.sectionHead}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Txt variant="label">Today</Txt>
-            {lateCount ? (
-              <Pressable onPress={() => select('late')} hitSlop={8} style={s.lateChip} accessibilityLabel={`${lateCount} late from before`}>
-                <Icon name="alert-circle-outline" size={12} color={colors.danger} />
-                <Txt variant="caption" style={{ color: colors.danger, fontWeight: '600', marginLeft: 4 }}>{lateCount} late</Txt>
-              </Pressable>
-            ) : null}
-          </View>
-          <Pressable onPress={() => select('today')} hitSlop={8}>
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
-          </Pressable>
-        </View>
-        {todayList.length ? (
-          <View style={s.listCard}>
-            {todayList.map((t, i) => (
-              <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} showStaffStatus={t.assignee?.type !== 'MD'} flat last={i === todayList.length - 1} />
-            ))}
-          </View>
-        ) : (
-          <View style={s.empty}>
-            <Icon name="sunny-outline" size={20} color={colors.faint} />
-            <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{data ? 'Nothing planned for today. Say “kal 11 baje…” to add something.' : 'Loading…'}</Txt>
-          </View>
-        )}
+        {/* Today: tasks, then meetings */}
+        <ListBlock
+          label="Today’s tasks"
+          count={todayOpen.filter((t) => !isMeeting(t)).length}
+          items={todayTasks}
+          loaded={!!data}
+          emptyIcon="sunny-outline"
+          emptyText="No tasks today. Say “aaj 4 baje…” to add one."
+          onSeeAll={() => select('today_tasks')}
+          onOpen={setOpenTask}
+          chip={lateCount ? (
+            <Pressable onPress={() => select('late')} hitSlop={8} style={s.lateChip} accessibilityLabel={`${lateCount} late from before`}>
+              <Icon name="alert-circle-outline" size={12} color={colors.danger} />
+              <Txt variant="caption" style={{ color: colors.danger, fontWeight: '600', marginLeft: 4 }}>{lateCount} late</Txt>
+            </Pressable>
+          ) : null}
+        />
+        <ListBlock
+          label="Today’s meetings"
+          count={todayOpen.filter(isMeeting).length}
+          items={todayMeetings}
+          loaded={!!data}
+          emptyIcon="people-outline"
+          emptyText="No meetings or calls today."
+          onSeeAll={() => select('today_meetings')}
+          onOpen={setOpenTask}
+        />
 
-        {/* Coming up: the rest of the week */}
+        {/* Coming up: everything dated after today, however far; tasks, then meetings */}
+        <ListBlock
+          label="Coming up · tasks"
+          count={ahead.filter((t) => !isMeeting(t)).length}
+          items={comingTasks}
+          loaded={!!data}
+          emptyIcon="calendar-outline"
+          emptyText="No tasks ahead."
+          onSeeAll={() => select('upcoming_tasks')}
+          onOpen={setOpenTask}
+        />
+        <ListBlock
+          label="Coming up · meetings"
+          count={ahead.filter(isMeeting).length}
+          items={comingMeetings}
+          loaded={!!data}
+          emptyIcon="calendar-outline"
+          emptyText="No meetings or calls ahead. Say “12 December ko Aman ke saath meeting” to set one."
+          onSeeAll={() => select('upcoming_meetings')}
+          onOpen={setOpenTask}
+        />
+
+        {/* Alerts: everything that asks for his attention, as a tree he can open level by level */}
         <View style={s.sectionHead}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Txt variant="label">Coming up</Txt>
-            {data?.upcoming.length ? <Txt variant="caption" style={{ marginLeft: 8 }}>{data.upcoming.length} this week</Txt> : null}
-          </View>
-          <Pressable onPress={() => select('upcoming')} hitSlop={8}>
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
-          </Pressable>
+          <Txt variant="label">Alerts</Txt>
+          <Txt variant="caption">Tap one to open</Txt>
         </View>
-        {comingUp.length ? (
-          <View style={s.listCard}>
-            {comingUp.map((t, i) => (
-              <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} showStaffStatus={t.assignee?.type !== 'MD'} flat last={i === comingUp.length - 1} />
-            ))}
-          </View>
-        ) : (
-          <View style={s.empty}>
-            <Icon name="calendar-outline" size={20} color={colors.faint} />
-            <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{data ? 'Nothing more this week.' : 'Loading…'}</Txt>
-          </View>
-        )}
+        <View style={s.listCard}>
+          <TreeRow icon="chatbubbles-outline" label="Messages" detail={unread ? `${unread} unread` : 'Received and sent'} tone={unread ? 'accent' : 'muted'} onPress={() => select('messages')} />
+          <TreeRow icon="hand-left-outline" label={isMD ? 'Need your OK' : `Waiting for ${md}`} detail={pending ? `${pending} waiting` : 'Nothing waiting'} tone={pending ? 'warn' : 'muted'} onPress={() => select('requests')} />
+          <TreeRow icon="newspaper-outline" label="Updates" detail={engine.news.length ? `${engine.news.length} new` : 'Decisions, progress, nudges'} tone={engine.news.length ? 'accent' : 'muted'} onPress={() => select('updates')} />
+          <TreeRow icon="notifications-outline" label="Held alerts" detail={engine.held.length ? `${engine.held.length} kept quiet` : 'None'} tone={engine.held.length ? 'danger' : 'muted'} onPress={() => select('held')} last />
+        </View>
 
         {/* Messages: the latest received and sent, kept for good */}
         <View style={s.sectionHead}>

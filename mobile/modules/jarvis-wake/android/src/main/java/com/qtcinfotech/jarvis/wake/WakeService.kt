@@ -48,6 +48,8 @@ class WakeService : Service() {
     @Volatile private var micStopped = false
     /** Ask the listening thread to close and reopen the microphone (the app came to the front, or it was silenced). */
     @Volatile private var reopenMic = false
+    /** "Hey JARVIS" is on; off = the microphone opens only while JARVIS talks (barge-in), never to judge the wake word. */
+    @Volatile private var wakeWordOn = false
     private var watcherThread: HandlerThread? = null
     private var watcher: ReminderWatcher? = null
     @Volatile private var loop: ConversationLoop? = null
@@ -74,7 +76,10 @@ class WakeService : Service() {
         val prefs = WakeBus.prefs(this)
         val micAllowed = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val noMic = intent?.getBooleanExtra(EXTRA_NO_MIC, false) == true
-        val wantMic = prefs.getBoolean(WakeBus.KEY_WAKE_WORD, false) && micAllowed && !noMic
+        // The microphone part runs for "Hey JARVIS", and also for barge-in alone: with the wake word off, the
+        // microphone opens only while JARVIS is talking, so he can still talk over anything it says.
+        wakeWordOn = prefs.getBoolean(WakeBus.KEY_WAKE_WORD, false)
+        val wantMic = (wakeWordOn || prefs.getBoolean(WakeBus.KEY_BARGE_IN, true)) && micAllowed && !noMic
 
         // Android may refuse the microphone type when the service is (re)started from the background.
         // Never crash for that: fall back to watch-only, and the app upgrades it the next time it is opened.
@@ -85,7 +90,7 @@ class WakeService : Service() {
         if (!listening && audioThread != null) stopListening()
         if (watcherThread == null) startWatcher()
         WakeBus.running = true
-        WakeBus.listening = listening
+        WakeBus.listening = listening && wakeWordOn
         WakeBus.micBlocked = false
         // If the phone kills this service (Xiaomi does when the app is swiped away), the alarm brings it back.
         WatchdogReceiver.schedule(this)
@@ -147,7 +152,7 @@ class WakeService : Service() {
         audioThread?.interrupt()
         audioThread = null
         WakeBus.listening = false
-        Log.i(TAG, "Hey JARVIS switched off; still watching for reminders and messages")
+        Log.i(TAG, "microphone part off; still watching for reminders and messages")
     }
 
     /**
@@ -250,6 +255,7 @@ class WakeService : Service() {
                     // silence; while JARVIS or the app is LISTENING the microphone must be let go.
                     val talking = TtsEngine.speaking && WakeBus.prefs(this).getBoolean(WakeBus.KEY_BARGE_IN, true)
                     val aside = WakeBus.paused || (WakeBus.inConversation && !talking) || (WakeBus.appInForeground && WakeBus.listener == null)
+                        || (!wakeWordOn && !talking)  // barge-in only: nothing to listen for while JARVIS is quiet
                     if (aside) {
                         // Someone else needs the mic (JARVIS itself is listening or talking): let it go completely.
                         if (record != null) {
@@ -482,7 +488,8 @@ class WakeService : Service() {
     private fun bargeIn() {
         val l = loop
         when {
-            WakeBus.appInForeground && WakeBus.listener != null -> {
+            WakeBus.listener != null -> {
+                // The app's code is loaded (on screen or behind another app): it stops its own lines and listens.
                 WakeBus.onBarge()   // first, so the app drops its queued sentences before it hears "stopped"
                 TtsEngine.stop()
             }
@@ -492,9 +499,16 @@ class WakeService : Service() {
             }
             else -> {
                 TtsEngine.stop()    // a reminder's question (if any) starts the loop on it through onAsk
-                if (ConversationLoop.available(this)) {
-                    Handler(Looper.getMainLooper()).post {
-                        if (loop?.active != true) (loop ?: ConversationLoop(this, notifier).also { loop = it }).startListening()
+                Handler(Looper.getMainLooper()).post {
+                    if (loop?.active == true || liveLoop?.active == true) return@post
+                    if (LiveLoop.available(this)) {
+                        val live = liveLoop ?: LiveLoop(this, notifier).also { liveLoop = it }
+                        live.onFailed = {
+                            if (ConversationLoop.available(this)) (loop ?: ConversationLoop(this, notifier).also { loop = it }).startListening()
+                        }
+                        live.startListening()
+                    } else if (ConversationLoop.available(this)) {
+                        (loop ?: ConversationLoop(this, notifier).also { loop = it }).startListening()
                     }
                 }
             }

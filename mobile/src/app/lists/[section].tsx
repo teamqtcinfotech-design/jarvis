@@ -26,11 +26,17 @@ interface Section {
 }
 
 const all = (d: Dashboard) => [...d.overdue, ...d.today, ...d.upcoming, ...d.anytime];
+const isMeeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
 
 const SECTIONS: Record<string, Section> = {
   today: { title: 'Today', empty: 'Nothing planned for today.', items: (d) => d.today },
+  // Tasks and meetings apart, today and ahead (the home screen's four cards).
+  today_tasks: { title: 'Today’s tasks', empty: 'No tasks today.', items: (d) => d.today.filter((t) => !isMeeting(t)) },
+  today_meetings: { title: 'Today’s meetings', empty: 'No meetings or calls today.', items: (d) => d.today.filter(isMeeting) },
   late: { title: 'Late', empty: 'Nothing is late. Well done.', items: (d) => d.overdue },
-  upcoming: { title: 'Coming up', empty: 'Nothing coming up this week.', items: (d) => d.upcoming },
+  upcoming: { title: 'Coming up', empty: 'Nothing coming up.', items: (d) => d.upcoming },
+  upcoming_tasks: { title: 'Coming up · tasks', empty: 'No tasks ahead.', items: (d) => d.upcoming.filter((t) => !isMeeting(t)) },
+  upcoming_meetings: { title: 'Coming up · meetings', empty: 'No meetings or calls ahead.', items: (d) => d.upcoming.filter(isMeeting) },
   nodate: { title: 'No date yet', empty: 'No undated tasks.', items: (d) => d.anytime },
   private: { title: 'Personal', empty: 'No personal items. Only you would see them.', items: (d) => all(d).filter((t) => t.scope === 'private') },
   pa: { title: 'Given to your PA', empty: 'Say “PA ko bolo…” to give your PA a task.', staff: true, items: (d) => d.pa_tasks ?? [] },

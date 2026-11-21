@@ -1404,6 +1404,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (!talkOpen) openTalk();
     expectingRef.current = true;
     silenceRef.current = 0;
+    // The live line listens the moment it opens (no greeting: he is already talking); the usual way otherwise.
+    if (liveWanted && !lineOpen()) {
+      startLive(false).catch(() => listen());
+      return;
+    }
     listen();
   };
 

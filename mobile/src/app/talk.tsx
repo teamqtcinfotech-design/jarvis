@@ -1,6 +1,6 @@
 import { Redirect, useRouter } from 'expo-router';
-import React, { useRef, useState } from 'react';
-import { KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { DraftCard } from '@/components/DraftCard';
@@ -24,6 +24,21 @@ function TalkScreen() {
   const conv = useConversation();
   const [typed, setTyped] = useState('');
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
+  // The type box must stay above the keyboard. Some phones shrink the window for the keyboard and some only slide
+  // it (or do nothing): the box is padded up by hand only when the window did not shrink.
+  const [keyboard, setKeyboard] = useState(0);
+  const [rootH, setRootH] = useState(0);
+  const [fullH, setFullH] = useState(0);
+  if (rootH > fullH) setFullH(rootH);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setKeyboard(e.endCoordinates.height));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboard(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+  const keyboardPad = keyboard > 0 && rootH > fullH - 80 ? keyboard : 0;
 
   const send = () => {
     const t = typed.trim();
@@ -43,7 +58,7 @@ function TalkScreen() {
         <IconButton icon="trash-outline" label="Clear conversation" onPress={conv.clear} color={colors.muted} />
       </View>
 
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} onLayout={(e) => setRootH(e.nativeEvent.layout.height)}>
         <ScrollView
           ref={scrollRef}
           contentContainerStyle={{ padding: 18, paddingBottom: 24, flexGrow: 1 }}
@@ -104,7 +119,7 @@ function TalkScreen() {
           ) : null}
         </ScrollView>
 
-        <View style={[s.composer, { paddingBottom: insets.bottom + 10 }]}>
+        <View style={[s.composer, { paddingBottom: keyboardPad ? keyboardPad + 8 : insets.bottom + 10 }]}>
           <View style={s.inputWrap}>
             <TextInput
               value={typed}

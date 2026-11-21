@@ -531,7 +531,10 @@ def _messages_view(user, p: dict) -> dict:
     other person ("Mansi ne kya message bheja tha" / "maine Nikki ko kya kaha tha"), a period, and words. Only the
     messages the person was part of exist for them at all; nobody reads a message between two others."""
     from .models import Message, MessageReceipt  # noqa: PLC0415
-    box = (p.get("filter") or "").lower()            # "inbox" | "sent" | "" (both)
+    box = (p.get("filter") or "").lower()            # "inbox" | "sent" | "" (both) | "unread" | "unreplied" (received only)
+    state = box if box in ("unread", "unreplied") else ""
+    if state:
+        box = "inbox"
     who = (p.get("who") or "").strip()
     words = [w.lower() for w in (p.get("words") or "").split() if len(w) > 1]
     start, end = p.get("from"), p.get("to")
@@ -555,11 +558,23 @@ def _messages_view(user, p: dict) -> dict:
         sent, received = sent.filter(sent_at__lt=e), received.filter(message__sent_at__lt=e)
     items = []
     if box in ("", "inbox"):
+        # "Did I reply?": a message from them is answered once anything went from me to them after it.
+        last_to: dict[int, datetime] = {}
+        for sent_at, to_id in Message.objects.filter(sender=user).values_list("sent_at", "receipts__recipient_id"):
+            if to_id is not None and (to_id not in last_to or sent_at > last_to[to_id]):
+                last_to[to_id] = sent_at
         for r in received.order_by("-message__sent_at")[:300]:
             m = r.message
+            replied = m.sender_id in last_to and last_to[m.sender_id] > m.sent_at
+            if state == "unread" and r.seen_at:
+                continue
+            if state == "unreplied" and replied:
+                continue
             items.append((m.sent_at, {"id": str(m.id), "scope": "message", "box": "inbox", "title": m.text, "who": f"From {_person_name(m.sender)}",
+                                      "sender": _person_name(m.sender), "replied": replied,
                                       "day": tu.fmt_day(tu.to_local(m.sent_at).date()), "when": tu.fmt_time(m.sent_at), "kind": "MESSAGE",
-                                      "status": "Seen" if r.seen_at else "New", "seen": r.seen_at.isoformat() if r.seen_at else "",
+                                      "status": "Replied" if replied else "Seen · no reply" if r.seen_at else "New",
+                                      "seen": r.seen_at.isoformat() if r.seen_at else "",
                                       "priority": m.priority, "progress": 100 if r.seen_at else 0, "private": False, "overdue": False,
                                       "version": None, "hold_reason": ""}))
     if box in ("", "sent"):
@@ -578,6 +593,8 @@ def _messages_view(user, p: dict) -> dict:
     items.sort(key=lambda x: x[0], reverse=True)
     rows = [r for _, r in items[:200]]
     label = {"inbox": "Messages received", "sent": "Messages sent", "": "Messages"}[box]
+    if state:
+        label = "Messages not seen yet" if state == "unread" else "Messages not replied to"
     if other is not None:
         label += f" · {_person_name(other)}"
     if start or end:
@@ -585,10 +602,23 @@ def _messages_view(user, p: dict) -> dict:
         label += f" · {words_en}"
     view = _table("messages", label, rows, [("day", "Day"), ("when", "At"), ("who", "With"), ("title", "Message"), ("status", "Seen")],
                   subtitle=f"{len(rows)} message{'s' if len(rows) != 1 else ''}" if rows else "No messages")
-    unseen = sum(1 for r in rows if r["box"] == "inbox" and r["status"] == "New")
+    unseen = sum(1 for r in rows if r["box"] == "inbox" and not r["seen"])
+    unreplied = sum(1 for r in rows if r["box"] == "inbox" and not r.get("replied"))
     view["stats"] = [{"label": "Received", "value": sum(1 for r in rows if r["box"] == "inbox"), "tone": "accent", "icon": "mail-outline"},
                      {"label": "Sent", "value": sum(1 for r in rows if r["box"] == "sent"), "tone": "info", "icon": "send-outline"},
-                     {"label": "Unread", "value": unseen, "tone": "warn" if unseen else "muted", "icon": "mail-unread-outline"}]
+                     {"label": "Unread", "value": unseen, "tone": "warn" if unseen else "muted", "icon": "mail-unread-outline"},
+                     {"label": "Not replied", "value": unreplied, "tone": "warn" if unreplied else "muted", "icon": "arrow-undo-outline"}]
+    # Who wrote, how many times, and how many of theirs still wait for a word back ("kis kis ne bheja").
+    senders: dict[str, dict] = {}
+    for r in rows:
+        if r["box"] != "inbox":
+            continue
+        s = senders.setdefault(r["sender"], {"who": r["sender"], "count": 0, "unread": 0, "unreplied": 0})
+        s["count"] += 1
+        s["unread"] += 0 if r["seen"] else 1
+        s["unreplied"] += 0 if r.get("replied") else 1
+    view["senders"] = sorted(senders.values(), key=lambda s: -s["count"])
+    view["state"] = state
     view["other"] = _person_name(other) if other is not None else ""
     return view
 
@@ -611,17 +641,26 @@ def _messages_report(user, p: dict) -> dict:
         return _summ(view, address, address_hi, f"there are no messages {what}.".replace("  ", " "), f"{view['other'] + ' के साथ ' if view['other'] else ''}कोई मैसेज नहीं है।")
     n = len(rows)
     last = rows[0]
-    en = (f"{n} message{'s' if n != 1 else ''}" + (f" with {view['other']}" if view["other"] else "")
+    state = view.get("state") or ""
+    what_en = {"unread": " not seen yet", "unreplied": " without a reply from you"}.get(state, "")
+    what_hi = {"unread": " अभी देखे नहीं", "unreplied": " जिनका जवाब बाकी है"}.get(state, "")
+    # By sender when several people wrote ("kis kis ne bheja, kitne ka reply nahi diya"): the counts per person.
+    senders = view.get("senders") or []
+    by_en = by_hi = ""
+    if not view["other"] and len(senders) > 1 and (p.get("filter") or "") != "sent":
+        parts_en = [f"{s['count']} from {s['who']}" + (f" ({s['unreplied']} not replied)" if s["unreplied"] and state != "unreplied" else "") for s in senders[:5]]
+        parts_hi = [f"{s['who']} के {s['count']}" + (f" ({s['unreplied']} बिना जवाब)" if s["unreplied"] and state != "unreplied" else "") for s in senders[:5]]
+        by_en, by_hi = ": " + ", ".join(parts_en), ": " + ", ".join(parts_hi)
+    en = (f"{n} message{'s' if n != 1 else ''}{what_en}" + (f" with {view['other']}" if view["other"] else "") + by_en
           + f"; the latest, {last['day']} {last['when']}, {last['who'].lower()}: {last['title']}")
-    hi = (f"{n} मैसेज" + (f" {view['other']} के साथ" if view["other"] else "")
+    hi = (f"{n} मैसेज{what_hi}" + (f" {view['other']} के साथ" if view["other"] else "") + by_hi
           + f"; सबसे नया, {last['day']} {last['when']}: {last['title']}")
     unseen = next((s["value"] for s in view["stats"] if s["label"] == "Unread"), 0)
-    if unseen:
-        en += f". {unseen} not seen yet."
-        hi += f"। {unseen} अभी देखे नहीं।"
-    else:
-        en += "."
-        hi += "।"
+    unreplied = next((s["value"] for s in view["stats"] if s["label"] == "Not replied"), 0)
+    tail_en = [] if state else ([f"{unseen} not seen yet"] if unseen else []) + ([f"{unreplied} not replied to"] if unreplied else [])
+    tail_hi = [] if state else ([f"{unseen} अभी देखे नहीं"] if unseen else []) + ([f"{unreplied} का जवाब बाकी"] if unreplied else [])
+    en += f". {', '.join(tail_en)}." if tail_en else "."
+    hi += f"। {', '.join(tail_hi)}।" if tail_hi else "।"
     return _summ(view, address, address_hi, en, hi)
 
 
@@ -881,6 +920,72 @@ def _alerts_view(user, p: dict) -> dict:
     return _summ(view, address, address_hi, en, hi)
 
 
+_MEETING_KINDS = {"MEETING", "CALL"}
+
+
+def _upcoming_view(user, p: dict, include_private: bool, dash: dict, listviews, missing: str) -> dict:
+    """Coming up (Nov 2026): everything ahead, however far ("meri kitni meetings schedule hain", "future meetings",
+    "aage kya hai"), or the part of the future asked for ("agle mahine", "December ki meetings", "2027 mein"),
+    narrowed like any list (meetings only, urgent only, words). The past ("pichhle mahine ki meetings") is the
+    ordinary list for that period, with what got done and what slipped; nothing coming up is ever pulled from it."""
+    address, address_hi = _addr(user)
+    today = tu.today_local()
+    start, end = p.get("from"), p.get("to")
+    if start and (end or start) < today:
+        return listviews.tasks_view(user, p, include_private, missing=missing)
+    pool = (dash["today"] if start and start <= today else []) + dash["upcoming"]
+    items = [i for i in pool if listviews._keep(i, p, user)]
+    if start:
+        lo, hi = max(start, today), end or start
+        items = [i for i in items if (d := listviews._due_day(i)) is not None and lo <= d <= hi]
+    else:
+        items = [i for i in items if listviews._due_day(i) is not None and listviews._due_day(i) > today]
+    if p.get("words"):
+        items = listviews._by_words(items, p["words"])
+    items = [i for i in items if include_private or i.get("scope") != "private"]
+    rows = _rows(items, include_private)
+    types = set(p.get("types") or [])
+    only_meetings = bool(types) and types <= _MEETING_KINDS
+    only_tasks = bool(types) and not (types & _MEETING_KINDS)
+    what_en = "meetings" if only_meetings else "tasks" if only_tasks else "items"
+    what_hi = "मीटिंग" if only_meetings else "काम"
+    period_en, period_hi = _period_words(start, end or start) if start else ("", "")
+    title = "Coming up" + (f" · {'meetings' if only_meetings else 'tasks' if only_tasks else ''}".rstrip(" ·") if types else "") + (f" · {period_en}" if start else "")
+    n = len(rows)
+    meetings = sum(1 for i in items if i.get("kind") in _MEETING_KINDS)
+    week_end = today + timedelta(days=7)
+    this_week = sum(1 for i in items if (d := listviews._due_day(i)) is not None and d <= week_end)
+    subtitle = (f"{n} between {rows[0]['day']} and {rows[-1]['day']}" if n > 1 else f"1 on {rows[0]['day']}" if n else "Nothing ahead") if not start else f"{n} {period_en}"
+    view = _table("upcoming", title, rows, [("day", "Day"), ("when", "When"), ("title", "What"), ("who", "Who")], subtitle=subtitle)
+    view["stats"] = [
+        {"label": "Meetings", "value": meetings, "tone": "accent", "icon": "people-outline"},
+        {"label": "Tasks", "value": n - meetings, "tone": "info", "icon": "checkbox-outline"},
+        {"label": "This week", "value": this_week, "tone": "warn" if this_week else "muted", "icon": "calendar-outline"},
+        {"label": "Later", "value": n - this_week, "tone": "muted", "icon": "arrow-forward-circle-outline"},
+    ]
+    if not rows:
+        return _summ(view, address, address_hi,
+                     f"no {what_en} are coming up{' ' + period_en if start else ''}.",
+                     f"{period_hi + ' ' if start else 'आगे '}कोई {what_hi} नहीं {'है' if only_meetings else 'हैं'}।")
+    r = rows[0]
+    at_en = f" at {r['when']}" if r.get("when") and r["when"] != r["day"] else ""
+    # The months ahead, so "kitni meetings schedule hain" is answered by month: "2 this week, 3 in December, 1 in January".
+    by_month: dict[str, int] = {}
+    for i in items:
+        d = listviews._due_day(i)
+        if d is not None and d > week_end:
+            by_month[d.strftime("%B")] = by_month.get(d.strftime("%B"), 0) + 1
+    spread_en = ", ".join([f"{this_week} this week"] * (1 if this_week else 0) + [f"{c} in {m}" for m, c in by_month.items()])
+    spread_hi = ", ".join([f"{this_week} इस हफ़्ते"] * (1 if this_week else 0) + [f"{c} {_MONTH_HI[datetime.strptime(m, '%B').month - 1]} में" for m, c in by_month.items()])
+    kinds_en = "" if types else f" ({meetings} {'meeting' if meetings == 1 else 'meetings'}, {n - meetings} {'task' if n - meetings == 1 else 'tasks'})"
+    one = n == 1
+    en = (f"{n} {what_en[:-1] if one and what_en != 'items' else 'item' if one else what_en} coming up{' ' + period_en if start else ''}{kinds_en}; "
+          f"first {r['title']} {r['day']}{at_en}." + (f" {spread_en}." if spread_en and not start and n > 1 else ""))
+    hi = (f"{period_hi + ' ' if start else 'आगे '}{n} {what_hi} {'है' if one else 'हैं'}; सबसे पहले {r['title']} {r['day']}{at_en}।"
+          + (f" {spread_hi}।" if spread_hi and not start and n > 1 else ""))
+    return _summ(view, address, address_hi, en, hi)
+
+
 def _approvals_view(user, p: dict) -> dict:
     """Approvals (Nov 2026): what waits for a decision, and what was approved or declined in the period (the last 30
     days when none was said), with the amounts added up; "sirf jo maine approve kiye" narrows to one state. The MD
@@ -1004,7 +1109,7 @@ def _pending_view(user, dash: dict, include_private: bool, official_only: bool =
 _AS_TASKS = {
     "pa": {"who": "pa"}, "staff": {"who": "staff"}, "private": {"who": "me", "filter": "personal"},
     "official": {"who": "me", "filter": "official"}, "done": {"filter": "done"}, "late": {"filter": "late"},
-    "pending": {"filter": "open"}, "upcoming": {"filter": "open"}, "today": {}, "week": {}, "tasks": {},
+    "pending": {"filter": "open"}, "today": {}, "week": {}, "tasks": {},
 }
 
 
@@ -1208,14 +1313,7 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         return _summ(view, address, address_hi, f"{n} {'item is' if n == 1 else 'items are'} late: {first_en}" + (f" and {n - 2} more." if n > 2 else "."),
                      f"{n} काम लेट {'है' if n == 1 else 'हैं'}: {first_hi}" + (f" और {n - 2} और।" if n > 2 else "।"))
     if kind == "upcoming":
-        rows = _rows(dash["upcoming"], include_private)
-        view = _table("upcoming", "Coming up", rows, [("day", "Day"), ("when", "When"), ("title", "What")], subtitle="Next 7 days")
-        if not rows:
-            return _summ(view, address, address_hi, "nothing is coming up in the next 7 days.", "अगले 7 दिन में कुछ नहीं है।")
-        n = len(rows)
-        r = rows[0]
-        return _summ(view, address, address_hi, f"{n} coming up in the next 7 days; first {r['title']} {r['day']}" + (f" at {r['when']}." if r["when"] and r["when"] != r["day"] else "."),
-                     f"अगले 7 दिन में {n} काम हैं; सबसे पहले {r['title']} {r['day']}।")
+        return _upcoming_view(user, p, include_private, dash, listviews, missing)
     if kind == "nodate":
         rows = _rows(dash["anytime"], include_private)
         view = _table("nodate", "No date yet", rows, [("title", "What"), ("kind", "Type"), ("priority", "Priority")],

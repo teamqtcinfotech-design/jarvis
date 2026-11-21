@@ -124,6 +124,9 @@ export function AssistantStage() {
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const keyboard = useKeyboardHeight();
   const isMD = user?.role === 'MD';
+  // On Android the stage's window sits below the status bar (so that the keyboard can shrink it, see the Modal
+  // below), and already carries that inset: nothing is added on top of it.
+  const topInset = Platform.OS === 'android' ? 0 : insets.top;
 
   // Typing or talking: as it was opened (pencil = typing), unless he switched since.
   const typing = typingChoice && typingChoice.at === conv.talkOpenedAt ? typingChoice.on : conv.talkMode === 'type';
@@ -145,7 +148,7 @@ export function AssistantStage() {
 
   // Where the orb sits. It is one orb the whole time: it only moves and changes size.
   const bigTop = Math.round(height * 0.3 - BIG / 2);
-  const smallTop = insets.top + 6 - (BIG * (1 - SMALL)) / 2; // so its visible top edge is just under the status bar
+  const smallTop = topInset + 6 - (BIG * (1 - SMALL)) / 2; // so its visible top edge is just under the status bar
   const dockBottom = (rootH || height) - bottomPad - COMPOSER_H - 8; // its visible bottom edge, just above the type box
   const dockTop = dockBottom - (BIG * DOCK) / 2 - BIG / 2;
   const targetTop = docked ? dockTop : compact ? smallTop : bigTop;
@@ -207,7 +210,7 @@ export function AssistantStage() {
 
   const orbY = Animated.add(orbTop, rise.interpolate({ inputRange: [0, 1], outputRange: [60, 0] }));
   const orbScale = Animated.multiply(orbSize, rise.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }));
-  const headRoom = insets.top + 6 + BIG * SMALL + 6;      // space the small orb takes at the top
+  const headRoom = topInset + 6 + BIG * SMALL + 6;      // space the small orb takes at the top
 
   /** One line of the conversation: his words on the right, JARVIS's with a small mark on the left. */
   const renderMsg = (m: Msg) =>
@@ -243,7 +246,9 @@ export function AssistantStage() {
     );
 
   return (
-    <Modal visible transparent animationType="none" onRequestClose={conv.closeTalk} statusBarTranslucent>
+    // Not statusBarTranslucent: with it, Android neither shrinks this window for the keyboard nor tells us its
+    // height, so the type box sat under the keyboard. Without it the window shrinks and the box stays above.
+    <Modal visible transparent animationType="none" onRequestClose={conv.closeTalk}>
       <Animated.View style={[StyleSheet.absoluteFill, { opacity: fade }]} onLayout={(e) => setRootH(e.nativeEvent.layout.height)}>
         {/* frost + drifting colours over the (blurred) home; a tap on empty space leaves */}
         <View style={[StyleSheet.absoluteFill, { backgroundColor: CAN_BLUR ? 'rgba(248,248,253,0.72)' : 'rgba(248,248,253,0.93)' }]} />
@@ -252,7 +257,7 @@ export function AssistantStage() {
 
         {/* the chat way: the conversation above, the type box below, the orb docked just above it */}
         {docked ? (
-          <View style={[s.content, { paddingTop: insets.top + 58, paddingBottom: bottomPad }]} pointerEvents="box-none">
+          <View style={[s.content, { paddingTop: topInset + 58, paddingBottom: bottomPad }]} pointerEvents="box-none">
             <ScrollView
               ref={scrollRef}
               style={s.fill}
@@ -422,10 +427,10 @@ export function AssistantStage() {
         </Animated.View>
 
         {/* always in the same two corners: the whole conversation, and the way out */}
-        <Pressable onPress={() => { conv.closeTalk(); router.push('/talk'); }} hitSlop={10} accessibilityLabel="Whole conversation" style={({ pressed }) => [s.corner, { top: insets.top + 10, left: 14 }, pressed && { opacity: 0.6 }]}>
+        <Pressable onPress={() => { conv.closeTalk(); router.push('/talk'); }} hitSlop={10} accessibilityLabel="Whole conversation" style={({ pressed }) => [s.corner, { top: topInset + 10, left: 14 }, pressed && { opacity: 0.6 }]}>
           <Icon name="chatbubbles-outline" size={19} color={colors.inkSoft} />
         </Pressable>
-        <Pressable onPress={conv.closeTalk} hitSlop={10} accessibilityLabel="Close" style={({ pressed }) => [s.corner, { top: insets.top + 10, right: 14 }, pressed && { opacity: 0.6 }]}>
+        <Pressable onPress={conv.closeTalk} hitSlop={10} accessibilityLabel="Close" style={({ pressed }) => [s.corner, { top: topInset + 10, right: 14 }, pressed && { opacity: 0.6 }]}>
           <Icon name="close" size={21} color={colors.inkSoft} />
         </Pressable>
 

@@ -47,6 +47,9 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
     /** A reminder or an alert was just spoken with its question: no greeting, the next words answer it. */
     fun startAbout(about: JSONObject) = begin(greet = false, about = about)
 
+    /** He talked over something JARVIS was saying: no greeting, just listen to what he has to say. */
+    fun startListening() = begin(greet = false, about = null)
+
     private fun begin(greet: Boolean, about: JSONObject?) {
         if (active) return
         active = true
