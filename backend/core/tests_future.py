@@ -157,6 +157,71 @@ class WhichOneTests(BaseCase):
         self.assertEqual(_similar_item(self.md, "Aman ke saath meeting", self.day2, kinds=(Kind.MEETING, Kind.CALL)), "Meeting with Aman")
 
 
+class BatchClashTests(BaseCase):
+    """Several meetings in one breath: the one that lands on a meeting already there is asked about FIRST (its own
+    question: keep it short / move the other / put it elsewhere), the rest wait on the same card; an urgent meeting
+    in the way is said out loud and never pushed."""
+
+    def setUp(self):
+        super().setUp()
+        self.day = (services.tu.today_local() + timedelta(days=1))
+        self.existing = services.create_private_task(self.md, {"title": "Board review", "kind": Kind.MEETING, "due_date": self.day,
+                                                               "due_time": time(16, 0), "duration_minutes": 60})
+
+    def interpret(self, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = self.md_client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def three(self, priority="NORMAL"):
+        day = self.day.isoformat()
+        item = {"notes": "", "kind": "MEETING", "priority": priority, "due_in_minutes": 0, "duration_minutes": 0, "remind_before_minutes": 0,
+                "staff_name": "", "team_name": "", "people": [], "reminder_line": ""}
+        return _cmd(intent="create_task", title="Meeting with Aman", kind="MEETING", due_date=day, due_time="11:00", spoken_reply="Ji.",
+                    more_items=[{**item, "intent": "create_task", "title": "Meeting with Ankur", "due_date": day, "due_time": "16:00"},
+                                {**item, "intent": "create_task", "title": "Meeting with Sharma ji", "due_date": day, "due_time": "18:00"}])
+
+    def test_the_clashing_one_is_asked_about_first_and_the_rest_ride_along(self):
+        d = self.interpret("kal 11 baje Aman, 4 baje Ankur aur 6 baje Sharma ji ke saath meeting", self.three())
+        # Not "3 things, shall I save all?": the Ankur meeting (4 PM, over Board review) is the card, with its question.
+        self.assertEqual(d["title"], "Meeting with Ankur", d["spoken_reply"])
+        self.assertFalse(d.get("booked"))
+        self.assertIn("3 things; one first:", d["spoken_reply"])
+        self.assertIn("Board review", d["spoken_reply"])
+        self.assertTrue(d["schedule"]["hard"])
+        self.assertIn("push", d["schedule"]["options"])
+        self.assertEqual([b["title"] for b in d["batch"]], ["Meeting with Aman", "Meeting with Sharma ji"])
+        self.assertEqual(sum(1 for t in services.private_qs(self.md) if t.title.startswith("Meeting with")), 0)  # nothing saved yet
+        # "Move the other one": Ankur is booked at 4, Board review moves on, and the other two are saved with it.
+        d2 = self.interpret("haan, board review aage kar do", _cmd(intent="confirm_pending", setting_value="push", spoken_reply="Ji."),
+                            awaiting="JARVIS asked about the clash", pending=d)
+        self.assertTrue(d2.get("booked"), d2["spoken_reply"])
+        self.assertIn("Meeting with Ankur at 4 PM", d2["spoken_reply"])
+        by_title = {t.title: t for t in services.private_qs(self.md)}
+        self.assertTrue({"Meeting with Aman", "Meeting with Ankur", "Meeting with Sharma ji", "Board review"} <= set(by_title), set(by_title))
+        self.assertIn("The other 2 saved too", d2["spoken_reply"])
+        ankur, board = by_title["Meeting with Ankur"], by_title["Board review"]
+        self.assertEqual(services.tu.to_local(ankur.due_at).strftime("%H:%M"), "16:00")
+        # Board review now starts when Ankur's meeting ends (its usual length), not over it.
+        self.assertGreater(board.due_at, ankur.due_at)
+        self.assertEqual(board.due_at, ankur.scheduled_end or ankur.due_at + timedelta(minutes=30))
+
+    def test_an_urgent_meeting_in_the_way_is_said_and_never_pushed(self):
+        services.update_private_task(self.md, self.existing.id, {"priority": "URGENT"}, self.existing.version)
+        d = self.interpret("kal 4 baje Ankur ke saath meeting", _cmd(intent="create_task", title="Meeting with Ankur", kind="MEETING",
+                                                                    due_date=self.day.isoformat(), due_time="16:00", spoken_reply="Ji."))
+        self.assertIn("URGENT meeting then, Board review at 4 PM; that stays", d["spoken_reply"])
+        self.assertNotIn("push", d["schedule"]["options"])
+        self.assertTrue(d["schedule"]["suggested"], d["schedule"])  # the way out offered: another time, taken with a plain yes
+        self.assertIn("Shall I put it at", d["spoken_reply"])
+        # A yes with "push" cannot move it: asked again, nothing booked.
+        d2 = self.interpret("board review aage kar do", _cmd(intent="confirm_pending", setting_value="push", spoken_reply="Ji."),
+                            awaiting="JARVIS asked about the clash", pending=d)
+        self.assertFalse(d2.get("booked"))
+        self.assertIn("not possible", d2["spoken_reply"])
+
+
 class MessageRepliesTests(BaseCase):
     def setUp(self):
         super().setUp()

@@ -808,6 +808,13 @@ def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: st
              f"माफ़ कीजिए {address_hi}, बुक नहीं हो पाई।")
         return
     failed = _apply_moves(user, moves)
+    # The rest of what was said in the same breath is saved with it (each where it belongs; one that would land on
+    # yet another meeting is left out and named, see actions.run_card).
+    batch = [b for b in (card.get("batch") or []) if isinstance(b, dict)]
+    rest = None
+    if batch:
+        from . import actions  # noqa: PLC0415 — actions imports this module
+        rest = actions.run_card(user, {**batch[0], "batch": batch[1:]})
     day = tu.to_local(booked["start"]).date()
     en_list, hi_list = _day_readback(user, day, booked["start"])
     n = len(moves) - len(failed)
@@ -815,6 +822,14 @@ def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: st
     moved_hi = f" {n} मीटिंग आगे की गईं।" if n else ""
     en = f"Done, {address}: {booked['title']} at {tu.fmt_time(booked['start'])}.{moved_en} New schedule: {en_list}."
     hi = f"हो गया, {address_hi}: {booked['title']} {tu.fmt_time_hi(booked['start'])} बजे।{moved_hi} नया शेड्यूल: {hi_list}।"
+    if rest:
+        if rest["failed"]:
+            names = "; ".join(f"{t} ({m.rstrip('.')})" for t, m in rest["failed"])
+            en += f" The other {rest['saved']} saved too; could not save: {names}."
+            hi += f" बाकी {rest['saved']} भी सेव हो गए; ये नहीं हो पाए: {names}।"
+        else:
+            en += f" The other {rest['saved']} saved too."
+            hi += f" बाकी {rest['saved']} भी सेव हो गए।"
     evening = [str(m.get("title") or "") for m in moves if _safe_time(str(m.get("due_time") or "")) >= "19:00"]
     if evening:
         en += f" Note: {', '.join(evening)} now runs after office hours."
@@ -1033,6 +1048,12 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             head_en = f"{address}, {item} {when_en}: {has} {c['title']} then."
             head_hi = f"{address_hi}, {when_hi} {item}: उस समय {c['title']} पहले से है।"
             warnings.append(f"Overlaps with {c['title']} ({span})")
+        urgent_there = c.get("priority") == Priority.URGENT and not c.get("routine")
+        if urgent_there and whose == "self":
+            # An urgent meeting in the way is said out loud and never moved: the new one bends around it.
+            head_en = f"{address}, {item} {when_en}: you have an URGENT meeting then, {c['title']} at {tu.fmt_time(c['start'])}; that stays."
+            head_hi = f"{address_hi}, {when_hi} {item}: उस समय आपकी अर्जेंट मीटिंग {c['title']} है ({tu.fmt_time_hi(c['start'])}); वो वहीं रहेगी।"
+            warnings.append(f"Urgent meeting then: {c['title']} ({span})")
         tail_en = f" Shall I put it at {alt_en} instead?" if sug else " Shall I save it anyway?"
         tail_hi = f" {alt_hi} रख दूँ?" if sug else " फिर भी सेव कर दूँ?"
         # His own new meeting or call over one already there: fit it in the gap, push the others, or move this one.
@@ -1040,13 +1061,22 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             new_start = tu.combine_local(d, time.fromisoformat(due_time))
             new_end = new_start + timedelta(minutes=review.get("minutes") or 30)
             gap = int((c["start"] - new_start).total_seconds() // 60)
+            # By priority: an urgent meeting already there is never pushed (push_plan refuses); a new URGENT one
+            # says so and offers to move the others first.
             plan = scheduling.push_plan(subject, new_start, new_end, prefs, exclude)
+            new_urgent = draft.get("priority") == Priority.URGENT
             said_en, said_hi = [], []
+            if plan and new_urgent:
+                options["push"] = [{k: m[k] for k in ("id", "scope", "version", "title", "due_date", "due_time")} for m in plan]
+                more_en = f" (and {len(plan) - 1} more after it)" if len(plan) > 1 else ""
+                more_hi = f" (और उसके बाद {len(plan) - 1} और)" if len(plan) > 1 else ""
+                said_en.append(f"move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}, since this one is urgent")
+                said_hi.append(f"{plan[0]['title']} को {tu.fmt_time_hi(plan[0]['start'])} कर दूँ{more_hi}, क्योंकि ये अर्जेंट है")
             if gap >= 5:
                 options["fit"] = {"duration_minutes": gap}
                 said_en.append(f"keep this to {tu.minutes_phrase(gap)}")
                 said_hi.append(f"इसे {tu.minutes_phrase_hi(gap)} की रखूँ")
-            if plan:
+            if plan and not new_urgent:
                 options["push"] = [{k: m[k] for k in ("id", "scope", "version", "title", "due_date", "due_time")} for m in plan]
                 more_en = f" (and {len(plan) - 1} more after it)" if len(plan) > 1 else ""
                 more_hi = f" (और उसके बाद {len(plan) - 1} और)" if len(plan) > 1 else ""
@@ -1057,8 +1087,12 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
                 said_en.append(f"put this at {alt_en}")
                 said_hi.append(f"इसे {alt_hi} रख दूँ")
             if len(said_en) >= 2:
-                head_en = f"{address}, {item} {when_en}: you already have {c['title']} at {tu.fmt_time(c['start'])}."
-                head_hi = f"{address_hi}, {when_hi} {item}: {tu.fmt_time_hi(c['start'])} {c['title']} पहले से है।"
+                if urgent_there:
+                    head_en = f"{address}, {item} {when_en}: you have an URGENT meeting then, {c['title']} at {tu.fmt_time(c['start'])}; that stays."
+                    head_hi = f"{address_hi}, {when_hi} {item}: उस समय आपकी अर्जेंट मीटिंग {c['title']} है ({tu.fmt_time_hi(c['start'])}); वो वहीं रहेगी।"
+                else:
+                    head_en = f"{address}, {item} {when_en}: you already have {c['title']} at {tu.fmt_time(c['start'])}."
+                    head_hi = f"{address_hi}, {when_hi} {item}: {tu.fmt_time_hi(c['start'])} {c['title']} पहले से है।"
                 tail_en = " Should I " + ", ".join(said_en[:-1]) + ", or " + said_en[-1] + "?"
                 tail_hi = " " + ", ".join(said_hi[:-1]) + ", या " + said_hi[-1] + "?"
             else:
@@ -1545,9 +1579,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         cmd["intent"] = "unknown"  # nothing is waiting to be confirmed
     if choices and choices.get("items") and cmd.get("target_refs") and cmd.get("intent") in {"unknown", "query", "small_talk"}:
         cmd["intent"] = choices["intent"]  # the model picked items but forgot to carry the pending intent
-    if choices and choices.get("items") and not cmd.get("target_refs") and _ALL_OF_THEM.search(text) \
+    if choices and choices.get("items") and not cmd.get("target_refs") and _ALL_OF_THEM.search(text) and len(text.split()) <= 5 \
             and cmd.get("intent") in {"unknown", "query", "small_talk", "cancel_pending", "confirm_pending", choices["intent"]}:
-        # "Dono delete kar do" / "both" / "sab" to "which one?": every one offered, whatever the model made of it.
+        # "Dono delete kar do" / "both" / "sab" as the SHORT answer to "which one?": every one offered, whatever the
+        # model made of it. A longer sentence that happens to contain "sab" is its own instruction.
         cmd["target_refs"] = [i["id"] for i in choices["items"]]
         cmd["intent"] = choices["intent"]
 
@@ -1720,6 +1755,27 @@ def _combine_batch(draft: dict, subs: list[dict], address: str, address_hi: str,
             draft["speak_text"], draft["speak_lang"] = draft["question_hi"], "hi"
         else:
             draft["speak_text"], draft["speak_lang"] = draft["question"], "en"
+        return
+    # One of the further items lands on a meeting already there (or has no time yet) while the main one is clear:
+    # that one comes FIRST, as the card itself, with its own question (keep it short / move the other / put it
+    # elsewhere), and the rest ride along to be saved with it. Before, such a clash in a further item was read out
+    # as "N things, shall I save all?" and the yes saved it over the other meeting.
+    clashing = next((s for s in subs if not (draft.get("schedule") or {}).get("question") and (s.get("schedule") or {}).get("question")), None)
+    if clashing is not None:
+        main = {k: v for k, v in draft.items() if k != "batch"}
+        others = [s for s in subs if s is not clashing]
+        draft.clear()
+        draft.update(clashing)
+        draft["batch"] = [main] + others
+        draft["warnings"] = list(clashing.get("warnings") or []) + [f"{s.get('title') or 'one item'}: {w}" for s in [main] + others for w in (s.get("warnings") or [])]
+        n = 1 + len(draft["batch"])
+        q_en, q_hi = clashing.get("spoken_reply") or clashing["schedule"]["question"], clashing["schedule"].get("question_hi") or ""
+        strip = lambda q, a: q[len(a) + 2:] if q.lower().startswith(a.lower() + ", ") else q  # noqa: E731
+        en = f"{address}, {n} things; one first: {strip(q_en, address)}"
+        hi = f"{address_hi}, {n} काम; पहले एक: {strip(q_hi, address_hi)}" if q_hi else ""
+        _say(draft, en, hi)
+        draft["speak_text"], draft["speak_lang"] = (hi, "hi") if reply_language == "hi" and hi else (en, "en")
+        draft["done_reply"] = draft["done_speak"] = ""
         return
     items = [draft] + subs
     n = len(items)

@@ -212,7 +212,14 @@ def run_card(user: User, card: dict) -> dict:
     "failed": [(title, message)], "undo": [refs]}; what was saved is remembered for undo."""
     items = [card] + [b for b in (card.get("batch") or []) if isinstance(b, dict)]
     saved, failed, refs, lines = 0, [], [], []
-    for item in items:
+    for n, item in enumerate(items):
+        sched = item.get("schedule") if isinstance(item.get("schedule"), dict) else {}
+        if n > 0 and sched.get("hard") and not card.get("overrides_for_batch"):
+            # A further item over a meeting already there: never saved over it. It is left out, named, and he says
+            # it again with a time (the main item's clash is settled through the card's own question).
+            first = (sched.get("clashes") or [{}])[0]
+            failed.append((item.get("title") or "one item", f"it is at the same time as {first.get('title') or 'another meeting'}; say it again with a time"))
+            continue
         try:
             r = run_item(user, item)
         except ServiceError as err:

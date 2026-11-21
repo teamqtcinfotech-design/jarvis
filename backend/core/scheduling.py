@@ -323,6 +323,8 @@ def push_plan(user: User, start: datetime, end: datetime, prefs: dict, exclude_i
     for c in sorted(movable, key=lambda c: c["start"]):
         if c["start"] >= cursor:
             break                      # a gap: the rest of the day stays as it is
+        if c.get("priority") == "URGENT":
+            return None                # an urgent meeting is never pushed on: he decides about it himself
         length = c["end"] - c["start"]
         new_start = cursor
         for _ in range(len(fixed) + 1):  # step over lunch and the like

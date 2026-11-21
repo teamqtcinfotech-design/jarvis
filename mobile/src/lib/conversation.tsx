@@ -767,6 +767,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   const handleDraft = (d: Draft) => {
+    // A "which one?" asked earlier is over once anything else comes back: its options must not colour a later
+    // sentence (they once turned "sab aapke hisaab se kar do" into "which one to delete?").
+    if (!d.needs_clarification) choicesRef.current = null;
     // The server decided the language of this turn; every line the app says from here follows it.
     setReplyLang(d.reply_language);
     langRef.current = replyLang();
