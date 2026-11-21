@@ -9,12 +9,13 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from core.models import (
-    AiUsage, Alert, AuditLog, CommandReceipt, Contact, ConversationState, EventInbox, IntegrationCommand, Memory,
-    PrivateTask, ReminderAck, ReminderTold, SharedTask, TaskRequest, UserPrefs,
+    AiUsage, Alert, AuditLog, CommandReceipt, Contact, ConversationState, EventInbox, IntegrationCommand, Memory, Message,
+    MessageReceipt, PrivateTask, ReminderAck, ReminderTold, SharedTask, TaskRequest, UserPrefs,
 )
 
-# Children before parents, so nothing is left pointing at a deleted row.
-DATA_MODELS = (IntegrationCommand, CommandReceipt, EventInbox, TaskRequest, Alert, SharedTask, PrivateTask,
+# Children before parents, so nothing is left pointing at a deleted row. Messages (kept for good otherwise) are
+# working data too: a clean slate has none.
+DATA_MODELS = (IntegrationCommand, CommandReceipt, EventInbox, TaskRequest, Alert, MessageReceipt, Message, SharedTask, PrivateTask,
                ReminderAck, ReminderTold, Memory, Contact, ConversationState, AiUsage, AuditLog)
 
 
