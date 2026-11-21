@@ -196,6 +196,17 @@ def _chosen(cmd: dict, by_id: dict) -> list[dict]:
     return out
 
 
+def _named(items: list[dict], limit: int = 3) -> str:
+    """The items to choose from, each with its day, so twins ("Meeting with Aman" on two days) can be told apart:
+    "Meeting with Aman (Thu 12 Nov at 11 AM, late); Meeting with Aman (Sat 12 Dec at 11 AM)"."""
+    out = []
+    for m in items[:limit]:
+        label = m.get("due_label") or ""
+        late = ", late" if m.get("overdue") else ""
+        out.append(f"{m['title']} ({label}{late})" if label else m["title"])
+    return "; ".join(out)
+
+
 _PA_WORDS = {"pa", "p.a.", "p a", "meri pa", "my pa", "mera pa", "assistant", "my assistant", "personal assistant"}
 
 
@@ -217,6 +228,9 @@ _PERSONAL = re.compile(
 _TASK_WORD = re.compile(r"\b(tasks?|to-?dos?)\b|टास्क|टास्क्स", re.IGNORECASE)
 _MEETING_WORD = re.compile(r"\b(meetings?|calls?|appointments?|schedule|plan|agenda|baithak)\b|मीटिंग|मीटिंग्स|कॉल|बैठक|प्लान|शेड्यूल", re.IGNORECASE)
 _OWN_WORD = re.compile(r"\b(apna|apne|apni|khud|own|personal|niji)\b|अपना|अपने|अपनी|खुद|पर्सनल|निजी", re.IGNORECASE)
+# "Dono", "both", "sab", "all of them": the answer to "which one?" is every one offered.
+_ALL_OF_THEM = re.compile(r"\b(dono|donon|dono ko|dono hi|both|both of them|sab|sabhi|sab ko|saare|sare|all|all of them|teeno|teenon|charo|charon)\b"
+                          r"|दोनों|सब|सभी|सारे|तीनों|चारों", re.IGNORECASE)
 # "Inme se kitne…", "of these…": a question about the list just answered, not a fresh one.
 _AMONG_WORD = re.compile(r"\b(inme|inmein|in me|isme|ismein|unme|unmein|of these|of those|among (?:these|those|them)|out of (?:these|those)|from these)\b"
                          r"|इनमें|इसमें|उनमें", re.IGNORECASE)
@@ -1124,18 +1138,44 @@ def _advise_group(user: User, draft: dict, address: str, people: list, kind: str
         draft["spoken_reply"] = _insert_notes(draft["spoken_reply"], notes_en)
 
 
+_FILLER_WORDS = {"meeting", "meet", "call", "with", "ke", "saath", "sath", "ki", "ka", "ko", "se", "wali", "wala", "the", "a", "an", "of",
+                 "for", "and", "aur", "ji", "sir", "sahab", "visit", "discussion", "review", "about", "re", "on"}
+
+
+def _distinctive(title: str) -> str:
+    """The words that tell one item from another: "Meeting with Akash" -> "akash", so it is never a twin of
+    "Meeting with Aman" just because both are meetings."""
+    words = [w for w in re.findall(r"\w+", (title or "").lower()) if w not in _FILLER_WORDS]
+    return " ".join(words)
+
+
 def _similar_item(user: User, title: str, day: date, skip_ids=(), kinds=None) -> str:
     """The title of an open item on that day that looks like the same thing ("Meeting with Sharma ji" twice)."""
-    want = " ".join(re.findall(r"\w+", (title or "").lower()))
-    if len(want) < 6:
+    want = _distinctive(title)
+    if len(want) < 3:
         return ""
     for item in scheduling.commitments(user, day) + scheduling.dated_items(user, day):
         if item.get("id") in skip_ids or (kinds and item.get("kind") not in kinds):
             continue
-        have = " ".join(re.findall(r"\w+", item["title"].lower()))
-        if difflib.SequenceMatcher(None, want, have).ratio() >= 0.8:
+        have = _distinctive(item["title"])
+        if have and difflib.SequenceMatcher(None, want, have).ratio() >= 0.8:
             return item["title"]
     return ""
+
+
+def _already_there(action: str, user: User, title: str, when: datetime | None) -> bool:
+    """An open item with the same name at the same moment, whenever it was made (a personal entry and an official
+    one): the same meeting is never in a diary twice. The diary looked at is the one the item goes into: the
+    speaker's own, or the MD's for work sent to the MD; a meeting set with someone else is their own matter."""
+    owner = user if action in {"private_task", "own_task", "pa_self_task"} else services.get_md() if action == "md_request" else None
+    if owner is None or when is None or not title:
+        return False
+    user = owner
+    want = " ".join((title or "").lower().split())
+    for item in scheduling.commitments(user, tu.to_local(when).date()):
+        if " ".join((item.get("title") or "").lower().split()) == want and abs((item["start"] - when).total_seconds()) <= 120:
+            return True
+    return False
 
 
 def _person_label(name: str) -> str:
@@ -1453,6 +1493,11 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         cmd["intent"] = "unknown"  # nothing is waiting to be confirmed
     if choices and choices.get("items") and cmd.get("target_refs") and cmd.get("intent") in {"unknown", "query", "small_talk"}:
         cmd["intent"] = choices["intent"]  # the model picked items but forgot to carry the pending intent
+    if choices and choices.get("items") and not cmd.get("target_refs") and _ALL_OF_THEM.search(text) \
+            and cmd.get("intent") in {"unknown", "query", "small_talk", "cancel_pending", "confirm_pending", choices["intent"]}:
+        # "Dono delete kar do" / "both" / "sab" to "which one?": every one offered, whatever the model made of it.
+        cmd["target_refs"] = [i["id"] for i in choices["items"]]
+        cmd["intent"] = choices["intent"]
 
     # While a draft waits, a change keeps the original sentence (it becomes the task description);
     # a side question or a brand-new topic stands on its own.
@@ -1738,7 +1783,7 @@ def _act_on_item(user: User, cmd: dict, intent: str, draft: dict, ctx: dict, on_
         verb_hi = {"update_task": "अपडेट करूँ", "tick_step": "टिक करूँ", "approve_item": "तय करूँ"}[intent]
         draft["target_candidates"] = matches[:5]
         if matches:
-            names = "; ".join(m["title"] for m in matches[:3])
+            names = _named(matches)
             _ask(draft, f"{address}, which one should I {verb}: {names}?", f"{address_hi}, कौन सा {verb_hi}: {names}?")
         else:
             _ask(draft, f"{address}, which item is that about?", f"{address_hi}, ये किस काम के बारे में है?")
@@ -2031,7 +2076,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         else:
             draft["target_candidates"] = matches[:5]
             if matches:
-                names = "; ".join(m["title"] for m in matches[:3])
+                names = _named(matches)
                 _ask(draft, f"{address}, which one did you finish: {names}. Or both?", f"{address_hi}, कौन सा पूरा हुआ: {names}। या दोनों?")
             else:
                 _ask(draft, f"{address}, which task did you finish?", f"{address_hi}, कौन सा टास्क पूरा हुआ?")
@@ -2087,14 +2132,15 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 _say(draft, f"{address}, delete '{names}'? It will be cancelled, not erased.",
                      f"{address_hi}, '{names}' हटा दूँ? ये कैंसल होगा, मिटेगा नहीं।")
             else:
+                names = _named(matches, 5)
                 _say(draft, f"{address}, delete these {len(matches)}: {names}?", f"{address_hi}, ये {len(matches)} हटा दूँ: {names}?")
         else:
             draft["target_candidates"] = matches[:5]
             verb = "change" if intent == "change_task" else "delete"
             verb_hi = "बदलूँ" if intent == "change_task" else "हटाऊँ"
             if matches:
-                names = "; ".join(m["title"] for m in matches[:3])
-                _ask(draft, f"{address}, which one should I {verb}: {names}?", f"{address_hi}, कौन सा {verb_hi}: {names}?")
+                names = _named(matches)
+                _ask(draft, f"{address}, which one should I {verb}: {names}? Or all of them?", f"{address_hi}, कौन सा {verb_hi}: {names}? या सभी?")
             else:
                 _ask(draft, f"{address}, which task should I {verb}?", f"{address_hi}, कौन सा टास्क {verb_hi}?")
     elif intent == "set_setting":
@@ -2446,9 +2492,11 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     # said so, and not saved or questioned a second time.
     if (draft["action"] in _REPEATABLE and draft["kind"] in (Kind.MEETING, Kind.CALL) and draft["due_date"] and draft["due_time"]
             and draft["title"] and not draft["needs_clarification"] and not is_reminder
-            and _just_saved(user, draft["action"], draft["title"],
-                            exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"])),
-                            draft.get("assignees"))):
+            and (_just_saved(user, draft["action"], draft["title"],
+                             exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"])),
+                             draft.get("assignees"))
+                 or _already_there(draft["action"], user, draft["title"],
+                                   exact_at or tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))))):
         draft["action"], draft["booked"], draft["schedule"] = "answer", True, None
         _say(draft, f"{address}, that is already booked: {draft['title']}, {draft['due_label']}.",
              f"{address_hi}, ये पहले से बुक है: {draft['title']}।")

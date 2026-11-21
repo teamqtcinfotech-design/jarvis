@@ -1,7 +1,7 @@
 """The live voice line (core/livevoice.py): the form the voice model fills becomes the brain's own command, the
 server reads the time words itself, and the usual rules (who, clashes, privacy, cards) run unchanged."""
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest import mock
 
 from core import livevoice, services
@@ -20,6 +20,22 @@ class TimeWordsTests(BaseCase):
         self.assertEqual(livevoice.when_from_words("kal subah"), {"due_date": kal, "due_time": "10:00"})
         self.assertEqual(livevoice.when_from_words("कल शाम"), {"due_date": kal, "due_time": "18:00"})
         self.assertEqual(livevoice.when_from_words(""), {"due_date": "", "due_time": ""})
+        # A calendar date, however far: "12 December ko 11 baje" is the coming 12 December, never today.
+        today = tu.today_local()
+        dec12 = date(today.year if date(today.year, 12, 12) >= today else today.year + 1, 12, 12).isoformat()
+        for words in ("12 December ko 11 baje", "12 tarikh December ko 11 baje", "December 12 at 11", "12 Dec 11 am", "12 दिसंबर को ग्यारह बजे", "12/12 11 baje"):
+            self.assertEqual(livevoice.when_from_words(words), {"due_date": dec12, "due_time": "11:00"}, words)
+        self.assertEqual(livevoice.when_from_words("12 December 2027 ko 11 baje"), {"due_date": "2027-12-12", "due_time": "11:00"})
+        # "25 tarikh" is this month's 25th, or next month's once it has passed; "agle mahine 25 tarikh" is next month's.
+        nxt = (today.replace(day=1) + timedelta(days=32)).replace(day=25)
+        this = today.replace(day=25) if today.replace(day=25) >= today else nxt
+        self.assertEqual(livevoice.when_from_words("25 tarikh ko 4 baje")["due_date"], this.isoformat())
+        self.assertEqual(livevoice.when_from_words("agle mahine 25 tarikh")["due_date"], nxt.isoformat())
+        # A bare clock time names no day: the model's date stands (the server used to replace it with today).
+        self.assertEqual(livevoice.when_from_words("11 baje"), {"due_date": "", "due_time": "11:00"})
+        cmd = livevoice.cmd_for(self.md, "set_meeting", {"with_person": "", "people": ["Aman"], "title": "Meeting with Aman", "when_words": "11 baje",
+                                                         "due_date": dec12, "due_time": "11:00", "said": "x"})
+        self.assertEqual((cmd["due_date"], cmd["due_time"]), (dec12, "11:00"))
 
     def test_the_servers_reading_beats_the_models_guess(self):
         parso = (tu.today_local() + timedelta(days=2)).isoformat()

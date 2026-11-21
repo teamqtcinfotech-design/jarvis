@@ -37,6 +37,8 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
     private var previous = ""
     private var awaiting = ""
     private var pending: JSONObject? = null
+    /** "Which one?" was asked: the items offered and what was to be done with them, so "dono" / "pehla wala" lands. */
+    private var choices: JSONObject? = null
     private var about: JSONObject? = null
     private val history = ArrayList<JSONObject>()
     private var endAfterSpeech = false
@@ -57,6 +59,7 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
         this.about = about
         previous = ""
         pending = null
+        choices = null
         history.clear()
         endAfterSpeech = false
         awaiting = about?.let { "JARVIS asked: \"${it.optString("question")}\" about \"${it.optString("title")}\"" } ?: ""
@@ -201,15 +204,33 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
             .put("history", JSONArray(history.takeLast(12)))
             .put("private_ok", privateOk)
         pending?.let { body.put("pending", it) }
+        choices?.let { body.put("choices", it) }
         val draft = Api.post(context, "/assistant/live/tool/", body, 40000)
             ?: return JSONObject().put("error", "I couldn't reach the server.").toString()
         val action = draft.optString("action")
         // The same bookkeeping as the app: a question keeps what was said for the answer; a card that waits for a yes
         // stays pending until it is saved or dropped; anything settled clears the slate.
+        choices = null
         if (draft.optBoolean("needs_clarification") || action == "choose_destination") {
             previous = draft.optString("transcript", previous)
             pending = if (action in CONFIRMABLE || action == "choose_destination") slim(draft) else null
             awaiting = ""
+            // "Which one?": remember the options so the answer ("dono", "the franchise one") is matched against them.
+            val intent = when (action) {
+                "complete" -> "complete_task"
+                "arrange_request" -> "change_task"
+                "accept_request", "decline_request", "change_task", "delete_task" -> action
+                else -> ""
+            }
+            val candidates = draft.optJSONArray("target_candidates")
+            if (intent.isNotEmpty() && candidates != null && candidates.length() > 0) {
+                val items = JSONArray()
+                for (i in 0 until minOf(candidates.length(), 10)) {
+                    val c = candidates.optJSONObject(i) ?: continue
+                    items.put(JSONObject().put("id", c.optString("id")).put("title", c.optString("title")))
+                }
+                choices = JSONObject().put("intent", intent).put("items", items)
+            }
         } else if (action == "confirm_pending" || action == "cancel_pending" || draft.optBoolean("card_done") || draft.optBoolean("booked")) {
             previous = ""
             pending = null

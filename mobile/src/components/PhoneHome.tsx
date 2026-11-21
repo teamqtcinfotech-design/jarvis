@@ -14,11 +14,11 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
-import { greeting, relativeAgo, timeOf } from '@/lib/format';
+import { greeting, timeOf } from '@/lib/format';
 import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
-import type { MessageBrief, ServerAlert, SessionUser, TaskItem } from '@/lib/types';
+import type { SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { useWalkie } from '@/lib/walkie';
 
@@ -28,7 +28,6 @@ import { Drawer } from './Drawer';
 import { navItems } from './nav';
 import { WaitingCard } from './AlertBanner';
 import { Orb } from './Orb';
-import { TaskRow } from './TaskRow';
 import { TaskSheet } from './TaskSheet';
 import { Icon, IconButton, Txt } from './ui';
 
@@ -51,113 +50,26 @@ const inWords = (ms: number) => {
   return `in ${h} h${m % 60 ? ` ${m % 60} min` : ''}`;
 };
 
-/** One of the latest messages on the home screen: who, the words, when, and whether it was seen. */
-function MessageRow({ m, last, onPress }: { m: MessageBrief; last: boolean; onPress: () => void }) {
-  const unseen = m.box === 'inbox' && !m.seen;
-  const seenWord = m.box === 'inbox'
-    ? (m.seen ? 'Seen' : 'New')
-    : m.seen ? 'Seen' : m.seen_count ? `Seen by ${m.seen_count} of ${m.to_count}` : 'Not seen yet';
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.msgRow, !last && s.rowLine, pressed && { opacity: 0.8 }]}>
-      <View style={[s.msgIcon, { backgroundColor: unseen ? colors.accentSoft : colors.surfaceAlt }]}>
-        <Icon name={m.box === 'inbox' ? 'mail-outline' : 'send-outline'} size={15} color={unseen ? colors.accent : colors.inkSoft} />
-      </View>
-      <View style={{ flex: 1 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Txt variant="small" numberOfLines={1} style={{ flex: 1, color: colors.inkSoft, fontWeight: '600' }}>
-            {m.box === 'inbox' ? `From ${m.who}` : `To ${m.who}`}
-          </Txt>
-          <Txt variant="caption" style={{ marginLeft: 8 }}>{relativeAgo(Date.parse(m.at))}</Txt>
-        </View>
-        <Txt variant="body" numberOfLines={2} style={[{ marginTop: 1 }, unseen && { fontWeight: '600' }]}>{m.text}</Txt>
-        <Txt variant="caption" style={{ marginTop: 2, color: unseen ? colors.accent : m.seen ? colors.success : colors.warn }}>{seenWord}</Txt>
-      </View>
-    </Pressable>
-  );
-}
-
-/** One of the latest updates (news, decisions, nudges) on the home screen. */
-function UpdateRow({ a, last, onPress }: { a: ServerAlert; last: boolean; onPress: () => void }) {
-  const icon = a.kind === 'REQUEST_DECIDED' ? 'checkmark-circle-outline' : a.kind === 'STAFF_UPDATE' ? 'briefcase-outline'
-    : a.kind === 'TASK_ASSIGNED' ? 'clipboard-outline' : 'information-circle-outline';
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.msgRow, !last && s.rowLine, pressed && { opacity: 0.8 }]}>
-      <View style={[s.msgIcon, { backgroundColor: colors.surfaceAlt }]}>
-        <Icon name={icon} size={15} color={colors.inkSoft} />
-      </View>
-      <View style={{ flex: 1 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Txt variant="small" numberOfLines={1} style={{ flex: 1, color: colors.inkSoft, fontWeight: '600' }}>{a.title}</Txt>
-          <Txt variant="caption" style={{ marginLeft: 8 }}>{relativeAgo(Date.parse(a.created_at))}</Txt>
-        </View>
-        {a.body ? <Txt variant="body" numberOfLines={2} style={{ marginTop: 1 }}>{a.body}</Txt> : null}
-      </View>
-    </Pressable>
-  );
-}
-
-/** One card of items on the home screen (today's tasks, today's meetings, what is ahead), with its count and "See all". */
-function ListBlock({ label, count, items, loaded, emptyIcon, emptyText, onSeeAll, onOpen, chip }: {
-  label: string; count: number; items: TaskItem[]; loaded: boolean; emptyIcon: string; emptyText: string;
-  onSeeAll: () => void; onOpen: (t: TaskItem) => void; chip?: React.ReactNode;
+/** One card of the home grid: what it is, how many, the first few lines; a tap opens the full list. */
+function GridCard({ icon, label, count, toneKey, lines, empty, note, onPress }: {
+  icon: string; label: string; count: number; toneKey: string; lines: string[]; empty: string; note?: string; onPress: () => void;
 }) {
+  const c = tone[toneKey] ?? tone.muted;
   return (
-    <>
-      <View style={s.sectionHead}>
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Txt variant="label">{label}</Txt>
-          {count ? <Txt variant="caption" style={{ marginLeft: 8 }}>{count}</Txt> : null}
-          {chip}
+    <Pressable onPress={onPress} style={({ pressed }) => [s.card, pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] }]}>
+      <View style={s.cardTop}>
+        <View style={[s.cardIcon, { backgroundColor: c.bg }]}>
+          <Icon name={icon} size={15} color={c.fg} />
         </View>
-        <Pressable onPress={onSeeAll} hitSlop={8}>
-          <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
-        </Pressable>
+        <Txt style={[s.cardCount, count ? null : { color: colors.faint }]}>{String(count)}</Txt>
       </View>
-      {items.length ? (
-        <View style={s.listCard}>
-          {items.map((t, i) => (
-            <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => onOpen(t)} showStaffStatus={t.assignee?.type !== 'MD'} flat last={i === items.length - 1} />
-          ))}
-        </View>
-      ) : (
-        <View style={s.empty}>
-          <Icon name={emptyIcon} size={20} color={colors.faint} />
-          <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{loaded ? emptyText : 'Loading…'}</Txt>
-        </View>
+      <Txt variant="small" numberOfLines={1} style={s.cardLabel}>{label}</Txt>
+      {lines.length ? lines.slice(0, 3).map((l, i) => (
+        <Txt key={i} variant="caption" numberOfLines={1} style={s.cardLine}>{l}</Txt>
+      )) : (
+        <Txt variant="caption" numberOfLines={1} style={[s.cardLine, { color: colors.faint }]}>{empty}</Txt>
       )}
-    </>
-  );
-}
-
-/** One branch of the Alerts tree: what it holds and how many, a tap opens that level. */
-function TreeRow({ icon, label, detail, tone: toneKey, onPress, last }: { icon: string; label: string; detail: string; tone: string; onPress: () => void; last?: boolean }) {
-  const c = tone[toneKey] ?? tone.muted;
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.msgRow, { alignItems: 'center' }, !last && s.rowLine, pressed && { opacity: 0.8 }]}>
-      <View style={[s.msgIcon, { marginTop: 0, backgroundColor: c.bg }]}>
-        <Icon name={icon} size={15} color={c.fg} />
-      </View>
-      <View style={{ flex: 1 }}>
-        <Txt variant="body" style={{ fontWeight: '600' }}>{label}</Txt>
-        <Txt variant="caption" style={{ marginTop: 1, color: toneKey === 'muted' ? colors.muted : c.fg }}>{detail}</Txt>
-      </View>
-      <Icon name="chevron-forward" size={16} color={colors.faint} />
-    </Pressable>
-  );
-}
-
-function Tile({ icon, label, value, toneKey, onPress }: { icon: string; label: string; value: number | string; toneKey: string; onPress: () => void }) {
-  const c = tone[toneKey] ?? tone.muted;
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.tile, pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] }]}>
-      <View style={s.tileTop}>
-        <View style={[s.tileIcon, { backgroundColor: c.bg }]}>
-          <Icon name={icon} size={16} color={c.fg} />
-        </View>
-        <Icon name="chevron-forward" size={14} color={colors.faint} />
-      </View>
-      <Txt style={s.tileValue}>{String(value)}</Txt>
-      <Txt variant="caption" style={{ color: colors.muted }}>{label}</Txt>
+      {note ? <Txt variant="caption" numberOfLines={1} style={{ color: colors.success, marginTop: 2 }}>{note}</Txt> : null}
     </Pressable>
   );
 }
@@ -208,17 +120,21 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   // meetings are two cards, today and ahead (everything dated, however far: a meeting next December is "coming up").
   const isMeeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
   const todayOpen = data ? data.today.filter((t) => t.status !== 'COMPLETED') : [];
-  const todayTasks = todayOpen.filter((t) => !isMeeting(t)).slice(0, 6);
-  const todayMeetings = todayOpen.filter(isMeeting).slice(0, 6);
+  const todayTasks = todayOpen.filter((t) => !isMeeting(t)).slice(0, 3);
+  const todayMeetings = todayOpen.filter(isMeeting).slice(0, 3);
   const lateCount = data?.overdue.length ?? 0;
   // Ahead, the latest messages (received and sent) and the latest updates, each a short strip with "See all"; the
   // full lists are one tap away.
   const ahead = data ? data.upcoming.filter((t) => t.status !== 'COMPLETED') : [];
-  const comingTasks = ahead.filter((t) => !isMeeting(t)).slice(0, 4);
-  const comingMeetings = ahead.filter(isMeeting).slice(0, 4);
-  const messages = (data?.messages ?? []).slice(0, 3);
+  const comingTasks = ahead.filter((t) => !isMeeting(t)).slice(0, 3);
+  const comingMeetings = ahead.filter(isMeeting).slice(0, 3);
   const unread = data?.messages_unseen ?? 0;
-  const updates = engine.news.slice(0, 3);
+  // One line per item on a card: the clock time today, the day ahead.
+  const whenLine = (t: TaskItem) => {
+    const at = t.scheduled_start ?? t.due_at;
+    return at ? `${timeOf(at)} · ${t.title}` : t.title;
+  };
+  const dayLine = (t: TaskItem) => (t.due_label ? `${t.due_label} · ${t.title}` : t.title);
   // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
   const voiceItem = conv.itemToOpen && data
     ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.team_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
@@ -340,17 +256,26 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           </Pressable>
         ) : null}
 
-        {/* Stat tiles */}
-        <View style={s.tiles}>
-          <Tile icon="today-outline" label="Today" value={data?.today.length ?? '–'} toneKey="accent" onPress={() => select('today')} />
-          <Tile icon="alert-circle-outline" label="Late" value={data?.overdue.length ?? '–'} toneKey={data?.overdue.length ? 'danger' : 'muted'} onPress={() => select('late')} />
-          <Tile icon="checkmark-done-outline" label="Done today" value={data?.completed_today ?? '–'} toneKey="success" onPress={() => report('done', 'Completed')} />
-          {pending ? (
-            // A request from before work went straight onto the MD's list, still waiting: shown until it is settled.
-            <Tile icon="hand-left-outline" label={isMD ? 'Need your OK' : `Waiting for ${md}`} value={pending} toneKey="warn" onPress={() => select('requests')} />
-          ) : (
-            <Tile icon={unread ? 'mail-unread-outline' : 'chatbubbles-outline'} label={unread ? 'Unread messages' : 'Messages'} value={data ? unread : '–'} toneKey={unread ? 'accent' : 'muted'} onPress={() => select('messages')} />
-          )}
+        {/* One screen, card by card: tasks and meetings today and ahead, the alerts, the late ones. Each card shows
+            its count and the first few, and opens the full list. */}
+        <View style={s.grid}>
+          <GridCard icon="checkbox-outline" label="Today’s tasks" count={todayOpen.filter((t) => !isMeeting(t)).length} toneKey="accent"
+            lines={todayTasks.map(whenLine)} empty={data ? 'No tasks today' : 'Loading…'}
+            note={data?.completed_today ? `${data.completed_today} done` : ''} onPress={() => select('today_tasks')} />
+          <GridCard icon="people-outline" label="Today’s meetings" count={todayMeetings.length} toneKey="gold"
+            lines={todayMeetings.map(whenLine)} empty={data ? 'No meetings today' : 'Loading…'} onPress={() => select('today_meetings')} />
+          <GridCard icon="calendar-outline" label="Upcoming tasks" count={ahead.filter((t) => !isMeeting(t)).length} toneKey="info"
+            lines={comingTasks.map(dayLine)} empty={data ? 'Nothing ahead' : 'Loading…'} onPress={() => select('upcoming_tasks')} />
+          <GridCard icon="calendar-outline" label="Upcoming meetings" count={ahead.filter(isMeeting).length} toneKey="info"
+            lines={comingMeetings.map(dayLine)} empty={data ? 'No meetings ahead' : 'Loading…'} onPress={() => select('upcoming_meetings')} />
+          <GridCard icon="notifications-outline" label="Alerts" count={unread + pending + engine.news.length + engine.held.length} toneKey={unread + pending ? 'warn' : 'muted'}
+            lines={[
+              `${unread} unread message${unread === 1 ? '' : 's'}`,
+              `${pending} ${isMD ? 'need your OK' : `waiting for ${md}`}`,
+              `${engine.news.length} update${engine.news.length === 1 ? '' : 's'}${engine.held.length ? ` · ${engine.held.length} held` : ''}`,
+            ]} empty="" onPress={() => select(unread ? 'messages' : pending ? 'requests' : 'updates')} />
+          <GridCard icon="alert-circle-outline" label="Late" count={lateCount} toneKey={lateCount ? 'danger' : 'muted'}
+            lines={(data?.overdue ?? []).slice(0, 3).map(dayLine)} empty={data ? 'Nothing is late' : 'Loading…'} onPress={() => select('late')} />
         </View>
 
         {/* Reports */}
@@ -366,118 +291,6 @@ export function PhoneHome({ user }: { user: SessionUser }) {
             </Pressable>
           ))}
         </ScrollView>
-
-        {/* Today: tasks, then meetings */}
-        <ListBlock
-          label="Today’s tasks"
-          count={todayOpen.filter((t) => !isMeeting(t)).length}
-          items={todayTasks}
-          loaded={!!data}
-          emptyIcon="sunny-outline"
-          emptyText="No tasks today. Say “aaj 4 baje…” to add one."
-          onSeeAll={() => select('today_tasks')}
-          onOpen={setOpenTask}
-          chip={lateCount ? (
-            <Pressable onPress={() => select('late')} hitSlop={8} style={s.lateChip} accessibilityLabel={`${lateCount} late from before`}>
-              <Icon name="alert-circle-outline" size={12} color={colors.danger} />
-              <Txt variant="caption" style={{ color: colors.danger, fontWeight: '600', marginLeft: 4 }}>{lateCount} late</Txt>
-            </Pressable>
-          ) : null}
-        />
-        <ListBlock
-          label="Today’s meetings"
-          count={todayOpen.filter(isMeeting).length}
-          items={todayMeetings}
-          loaded={!!data}
-          emptyIcon="people-outline"
-          emptyText="No meetings or calls today."
-          onSeeAll={() => select('today_meetings')}
-          onOpen={setOpenTask}
-        />
-
-        {/* Coming up: everything dated after today, however far; tasks, then meetings */}
-        <ListBlock
-          label="Coming up · tasks"
-          count={ahead.filter((t) => !isMeeting(t)).length}
-          items={comingTasks}
-          loaded={!!data}
-          emptyIcon="calendar-outline"
-          emptyText="No tasks ahead."
-          onSeeAll={() => select('upcoming_tasks')}
-          onOpen={setOpenTask}
-        />
-        <ListBlock
-          label="Coming up · meetings"
-          count={ahead.filter(isMeeting).length}
-          items={comingMeetings}
-          loaded={!!data}
-          emptyIcon="calendar-outline"
-          emptyText="No meetings or calls ahead. Say “12 December ko Aman ke saath meeting” to set one."
-          onSeeAll={() => select('upcoming_meetings')}
-          onOpen={setOpenTask}
-        />
-
-        {/* Alerts: everything that asks for his attention, as a tree he can open level by level */}
-        <View style={s.sectionHead}>
-          <Txt variant="label">Alerts</Txt>
-          <Txt variant="caption">Tap one to open</Txt>
-        </View>
-        <View style={s.listCard}>
-          <TreeRow icon="chatbubbles-outline" label="Messages" detail={unread ? `${unread} unread` : 'Received and sent'} tone={unread ? 'accent' : 'muted'} onPress={() => select('messages')} />
-          <TreeRow icon="hand-left-outline" label={isMD ? 'Need your OK' : `Waiting for ${md}`} detail={pending ? `${pending} waiting` : 'Nothing waiting'} tone={pending ? 'warn' : 'muted'} onPress={() => select('requests')} />
-          <TreeRow icon="newspaper-outline" label="Updates" detail={engine.news.length ? `${engine.news.length} new` : 'Decisions, progress, nudges'} tone={engine.news.length ? 'accent' : 'muted'} onPress={() => select('updates')} />
-          <TreeRow icon="notifications-outline" label="Held alerts" detail={engine.held.length ? `${engine.held.length} kept quiet` : 'None'} tone={engine.held.length ? 'danger' : 'muted'} onPress={() => select('held')} last />
-        </View>
-
-        {/* Messages: the latest received and sent, kept for good */}
-        <View style={s.sectionHead}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Txt variant="label">Messages</Txt>
-            {unread ? (
-              <View style={s.countChip}>
-                <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>{unread} unread</Txt>
-              </View>
-            ) : null}
-          </View>
-          <Pressable onPress={() => select('messages')} hitSlop={8}>
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
-          </Pressable>
-        </View>
-        {messages.length ? (
-          <View style={s.listCard}>
-            {messages.map((m, i) => <MessageRow key={`${m.box}-${m.id}`} m={m} last={i === messages.length - 1} onPress={() => select('messages')} />)}
-          </View>
-        ) : (
-          <View style={s.empty}>
-            <Icon name="chatbubbles-outline" size={20} color={colors.faint} />
-            <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>{data ? 'No messages yet. Say “Mansi ko bolo…” to send one.' : 'Loading…'}</Txt>
-          </View>
-        )}
-
-        {/* Updates: small news, decisions and nudges */}
-        <View style={s.sectionHead}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Txt variant="label">Updates</Txt>
-            {engine.news.length ? (
-              <View style={s.countChip}>
-                <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>{engine.news.length} new</Txt>
-              </View>
-            ) : null}
-          </View>
-          <Pressable onPress={() => select('updates')} hitSlop={8}>
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600' }}>See all</Txt>
-          </Pressable>
-        </View>
-        {updates.length ? (
-          <View style={s.listCard}>
-            {updates.map((a, i) => <UpdateRow key={a.id} a={a} last={i === updates.length - 1} onPress={() => select('updates')} />)}
-          </View>
-        ) : (
-          <View style={s.empty}>
-            <Icon name="newspaper-outline" size={20} color={colors.faint} />
-            <Txt variant="small" style={{ textAlign: 'center', marginTop: 6 }}>Nothing new. Decisions, progress and nudges collect here.</Txt>
-          </View>
-        )}
 
         {/* Latest answer */}
         {conv.answers.length ? (
@@ -553,11 +366,13 @@ const s = StyleSheet.create({
   heroTop: { flexDirection: 'row', alignItems: 'center' },
   heroIcon: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
   heroWhen: { marginLeft: 'auto', color: colors.white, fontFamily: fonts.semibold, fontSize: 13 },
-  tiles: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 14, gap: 10 },
-  tile: { width: '48%', flexGrow: 1, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, padding: 14 },
-  tileTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  tileIcon: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-  tileValue: { fontSize: 24, fontWeight: '700', color: colors.ink, lineHeight: 30 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 14, gap: 10 },
+  card: { width: '48%', flexGrow: 1, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, padding: 12, minHeight: 118 },
+  cardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  cardIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  cardCount: { fontSize: 22, fontWeight: '700', color: colors.ink, lineHeight: 28 },
+  cardLabel: { color: colors.ink, fontWeight: '600', marginTop: 6, marginBottom: 3 },
+  cardLine: { color: colors.inkSoft, marginTop: 1 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 24, marginBottom: 10 },
   lateChip: { flexDirection: 'row', alignItems: 'center', marginLeft: 10, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: colors.dangerSoft },
   report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 16 },

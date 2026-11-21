@@ -36,6 +36,10 @@ _DEVANAGARI_WORDS = [
     ("बजे", "baje"), ("बजकर", "bajkar"), ("साढ़े", "saade"), ("साढे", "saade"), ("सवा", "sawa"), ("पौने", "paune"),
     ("डेढ़", "dedh"), ("डेढ", "dedh"), ("ढाई", "dhai"), ("मिनट", "minute"), ("घंटे", "ghante"), ("घंटा", "ghanta"),
     ("बाद", "baad"), ("तक", "tak"), ("को", "ko"), ("अगले", "agle"), ("हफ्ते", "hafte"), ("हफ़्ते", "hafte"), ("सप्ताह", "hafte"),
+    ("तारीख़", "tarikh"), ("तारीख", "tarikh"), ("महीने", "mahine"), ("महीना", "mahine"),
+    ("जनवरी", "january"), ("फ़रवरी", "february"), ("फरवरी", "february"), ("मार्च", "march"), ("अप्रैल", "april"), ("मई", "may"),
+    ("जून", "june"), ("जुलाई", "july"), ("अगस्त", "august"), ("सितंबर", "september"), ("सितम्बर", "september"),
+    ("अक्टूबर", "october"), ("अक्तूबर", "october"), ("नवंबर", "november"), ("नवम्बर", "november"), ("दिसंबर", "december"), ("दिसम्बर", "december"),
     ("सोमवार", "somvar"), ("मंगलवार", "mangalvar"), ("बुधवार", "budhvar"), ("गुरुवार", "guruvar"), ("बृहस्पतिवार", "guruvar"),
     ("शुक्रवार", "shukravar"), ("शनिवार", "shanivar"), ("रविवार", "ravivar"), ("इतवार", "itwar"),
     ("एक", "1"), ("दो", "2"), ("तीन", "3"), ("चार", "4"), ("पाँच", "5"), ("पांच", "5"), ("छह", "6"), ("छः", "6"), ("सात", "7"),
@@ -61,7 +65,9 @@ def when_from_words(words: str) -> dict:
     if not clean:
         return {"due_date": "", "due_time": ""}
     read = hinglish_parser.parse(clean)
-    return {"due_date": read.get("due_date") or "", "due_time": read.get("due_time") or ""}
+    # Only a day the words themselves name counts ("12 December", "parso"); a bare clock time names no day, so the
+    # model's own date (when it gave one) is kept rather than replaced with today.
+    return {"due_date": (read.get("due_date") or "") if read.get("day_named") else "", "due_time": read.get("due_time") or ""}
 
 
 # ------------------------------------------------------------------------------------------------------- the form

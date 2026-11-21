@@ -82,6 +82,56 @@ class FarFutureTests(BaseCase):
             self.assertIn("Paid the electricity bill", [r["title"] for r in d["view"]["rows"]])
 
 
+class WhichOneTests(BaseCase):
+    """Two items with one name: the question names their days, "dono" takes both, and the same meeting at the same
+    moment is never saved twice."""
+
+    def setUp(self):
+        super().setUp()
+        self.today = services.tu.today_local()
+        day1, day2 = self.today + timedelta(days=3), self.today + timedelta(days=24)
+        self.first = services.create_private_task(self.md, {"title": "Meeting with Aman", "kind": Kind.MEETING, "due_date": day1,
+                                                            "due_time": time(11, 0), "duration_minutes": 30})
+        self.second = services.create_private_task(self.md, {"title": "Meeting with Aman", "kind": Kind.MEETING, "due_date": day2,
+                                                             "due_time": time(11, 0), "duration_minutes": 30})
+        self.day1, self.day2 = day1, day2
+
+    def interpret(self, text, cmd, **extra):
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            r = self.md_client.post("/api/v1/assistant/interpret/", {"text": text, **extra}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_the_question_names_the_days_and_dono_deletes_both(self):
+        d = self.interpret("Meeting with Aman delete karo", _cmd(intent="delete_task", title="Meeting with Aman", spoken_reply="Ji."))
+        self.assertTrue(d["needs_clarification"], d["spoken_reply"])
+        self.assertEqual({c["id"] for c in d["target_candidates"]}, {str(self.first.id), str(self.second.id)})
+        self.assertIn(f"Meeting with Aman ({services.tu.fmt_day(self.day1)} at 11 AM)", d["spoken_reply"])
+        self.assertIn(f"Meeting with Aman ({services.tu.fmt_day(self.day2)} at 11 AM)", d["spoken_reply"])
+        self.assertIn("Or all of them?", d["spoken_reply"])
+        # "Dono delete kar do": the model made nothing of it (no target_refs); the server takes every one offered.
+        choices = {"intent": "delete_task", "items": [{"id": c["id"], "title": c["title"]} for c in d["target_candidates"]]}
+        d = self.interpret("dono delete kar do", _cmd(intent="unknown", spoken_reply="Samajh nahi aaya."), choices=choices,
+                           awaiting="JARVIS asked which one to delete")
+        self.assertFalse(d.get("needs_clarification"), d["spoken_reply"])
+        self.assertEqual(d["action"], "delete_task")
+        self.assertEqual({t["id"] for t in d["targets"]}, {str(self.first.id), str(self.second.id)})
+        self.assertIn("delete these 2", d["spoken_reply"])
+        self.assertIn(services.tu.fmt_day(self.day2), d["spoken_reply"])
+
+    def test_the_same_meeting_at_the_same_moment_is_not_saved_twice(self):
+        # Days later, the same words again: not a second entry, whatever the model drafted.
+        d = self.interpret("Aman ke saath meeting rakho", _cmd(intent="create_task", kind="MEETING", title="Meeting with Aman",
+                                                            due_date=self.day2.isoformat(), due_time="11:00", spoken_reply="Ji."))
+        self.assertTrue(d.get("booked"), d["spoken_reply"])
+        self.assertIn("already booked", d["spoken_reply"])
+        self.assertEqual(sum(1 for t in services.private_qs(self.md) if t.title == "Meeting with Aman"), 2)
+        # A different person at the same time is a clash to settle, never "already booked", and never a "twin".
+        from core.assistant import _similar_item
+        self.assertEqual(_similar_item(self.md, "Meeting with Akash", self.day2, kinds=(Kind.MEETING, Kind.CALL)), "")
+        self.assertEqual(_similar_item(self.md, "Aman ke saath meeting", self.day2, kinds=(Kind.MEETING, Kind.CALL)), "Meeting with Aman")
+
+
 class MessageRepliesTests(BaseCase):
     def setUp(self):
         super().setUp()

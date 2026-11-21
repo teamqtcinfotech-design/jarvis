@@ -124,9 +124,9 @@ export function AssistantStage() {
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const keyboard = useKeyboardHeight();
   const isMD = user?.role === 'MD';
-  // On Android the stage's window sits below the status bar (so that the keyboard can shrink it, see the Modal
-  // below), and already carries that inset: nothing is added on top of it.
-  const topInset = Platform.OS === 'android' ? 0 : insets.top;
+  // The stage's content still starts under the status bar on Android (the window is not translucent any more, see
+  // the Modal below, but the content is not inset either), so the status bar's height is kept at the top.
+  const topInset = insets.top;
 
   // Typing or talking: as it was opened (pencil = typing), unless he switched since.
   const typing = typingChoice && typingChoice.at === conv.talkOpenedAt ? typingChoice.on : conv.talkMode === 'type';

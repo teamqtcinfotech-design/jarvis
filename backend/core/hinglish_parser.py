@@ -17,6 +17,68 @@ _DAY_PATTERNS = [
     (re.compile(r"\b(today|tonight|aaj|aj)\b", _FLAGS), 0),
 ]
 _NEXT_WEEK = re.compile(r"\b(next week|agle hafte|agle week)\b", _FLAGS)
+# A calendar date (Nov 2026): "12 December", "12 tarikh December ko", "December 12", "12 Dec 2027", "12/12", "25 tarikh".
+_MONTHS = {
+    "january": 1, "jan": 1, "janvari": 1, "february": 2, "feb": 2, "farvari": 2, "march": 3, "mar": 3, "april": 4, "apr": 4, "aprail": 4,
+    "may": 5, "june": 6, "jun": 6, "joon": 6, "july": 7, "jul": 7, "julai": 7, "august": 8, "aug": 8, "agast": 8,
+    "september": 9, "sept": 9, "sep": 9, "sitambar": 9, "october": 10, "oct": 10, "aktubar": 10, "november": 11, "nov": 11, "navambar": 11,
+    "december": 12, "dec": 12, "disambar": 12,
+}
+_MONTH_RE = "|".join(sorted(_MONTHS, key=len, reverse=True))
+_DATE_DM = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s*(?:tarikh|tareekh|tarik)?\s*(?:ko\s+)?({_MONTH_RE})\b(?:\s*,?\s*(\d{{4}}))?", _FLAGS)
+# "December 12" but never "may 4 baje" / "mar 5 pm" (a month word before a clock time is not a date).
+_DATE_MD = re.compile(rf"\b({_MONTH_RE})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*(?:baje|bje|baj|am|pm|a\.m|p\.m|o'?clock|:|\.\d))(?:\s*,?\s*(\d{{4}}))?", _FLAGS)
+_DATE_NUM = re.compile(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?\b")
+_TARIKH = re.compile(r"\b(\d{1,2})\s*(?:tarikh|tareekh|tarik)\b", _FLAGS)
+_NEXT_MONTH = re.compile(r"\b(next month|agle mahine|agle month|agle maheene)\b", _FLAGS)
+
+
+def _calendar_date(raw: str, today: date, spans: list) -> date | None:
+    """The date the words name outright, or None. A day and month without a year is the coming one (this year, or
+    next year once it has passed); "25 tarikh" alone is this month's 25th, or next month's once it has passed."""
+    def make(d: int, mo: int, year: int | None) -> date | None:
+        try:
+            if year:
+                return date(year, mo, d)
+            cand = date(today.year, mo, d)
+            return cand if cand >= today else date(today.year + 1, mo, d)
+        except ValueError:
+            return None
+
+    m = _DATE_DM.search(raw)
+    if m and m.group(2).lower() in _MONTHS:
+        got = make(int(m.group(1)), _MONTHS[m.group(2).lower()], int(m.group(3)) if m.group(3) else None)
+        if got:
+            spans.append(m.span())
+            return got
+    m = _DATE_MD.search(raw)
+    if m and m.group(1).lower() in _MONTHS:
+        got = make(int(m.group(2)), _MONTHS[m.group(1).lower()], int(m.group(3)) if m.group(3) else None)
+        if got:
+            spans.append(m.span())
+            return got
+    m = _DATE_NUM.search(raw)
+    if m and 1 <= int(m.group(2)) <= 12:
+        got = make(int(m.group(1)), int(m.group(2)), int(m.group(3)) if m.group(3) else None)
+        if got:
+            spans.append(m.span())
+            return got
+    m = _TARIKH.search(raw)
+    if m:
+        day = int(m.group(1))
+        months_ahead = 1 if _NEXT_MONTH.search(raw) else 0
+        for _ in range(3):
+            mo, yr = (today.month - 1 + months_ahead) % 12 + 1, today.year + (today.month - 1 + months_ahead) // 12
+            try:
+                cand = date(yr, mo, day)
+            except ValueError:
+                months_ahead += 1
+                continue
+            if cand >= today or _NEXT_MONTH.search(raw):
+                spans.append(m.span())
+                return cand
+            months_ahead += 1
+    return None
 
 _WEEKDAYS = {
     "monday": 0, "somvar": 0, "somwar": 0,
@@ -197,14 +259,15 @@ def parse(text: str, staff_names: list[str] | None = None, has_pending_requests:
         result["intent"] = "decline_request"
         return result
 
-    # Date
-    due: date | None = None
-    for regex, offset in _DAY_PATTERNS:
-        m = regex.search(raw)
-        if m:
-            due = today + timedelta(days=offset)
-            spans.append(m.span())
-            break
+    # Date: a calendar date first ("12 December"), then the relative words, the weekday, "next week"
+    due: date | None = _calendar_date(raw, today, spans)
+    if due is None:
+        for regex, offset in _DAY_PATTERNS:
+            m = regex.search(raw)
+            if m:
+                due = today + timedelta(days=offset)
+                spans.append(m.span())
+                break
     if due is None:
         m = _WEEKDAY_RE.search(raw)
         if m:
@@ -227,6 +290,7 @@ def parse(text: str, staff_names: list[str] | None = None, has_pending_requests:
             spans.append(m.span())
             break
     hhmm, _explicit = _extract_time(raw, part, spans)
+    result["day_named"] = due is not None  # the words themselves named a day (the live line keeps the model's date otherwise)
     if hhmm and due is None:
         # A time without a day means today. If it has already passed, the server asks instead of
         # silently moving it to tomorrow (TaskPanel guide §3 step 6).
