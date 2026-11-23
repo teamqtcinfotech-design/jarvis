@@ -172,6 +172,27 @@ def reads() -> None:
     check("task.create is refused while the token is read-only", st in (403, 503) and (d or {}).get("ok") is False, err(d))
 
 
+def staff_list() -> None:
+    """The whole staff directory and the categories, as TaskPanel gives them to the MD's token."""
+    st, d, _h = call("GET", "staff")
+    if st != 200:
+        print(f"staff: HTTP {st} {err(d)}")
+        return
+    data = (d or {}).get("data") or {}
+    staff, cats = data.get("staff") or [], data.get("categories") or []
+    print(f"{len(staff)} staff\n")
+    print(f"{'user_key':<14} {'name':<30} {'dept':<16} {'level':<10} {'role':<8} {'active':<7} {'on_leave':<9} {'leave_until':<12} open")
+    for s in sorted(staff, key=lambda s: (str(s.get('dept') or ''), str(s.get('name') or ''))):
+        print(f"{str(s.get('user_key') or ''):<14} {str(s.get('name') or '')[:30]:<30} {str(s.get('dept') or '')[:16]:<16} "
+              f"{str(s.get('level_name') or s.get('level') or '')[:10]:<10} {str(s.get('role') or ''):<8} {str(s.get('active')):<7} "
+              f"{str(s.get('on_leave')):<9} {str(s.get('leave_until') or ''):<12} {s.get('open_tasks', '')}")
+    print(f"\n{len(cats)} categories\n")
+    print(f"{'key':<28} {'name':<34} {'dept':<16} {'priority':<9} assignable")
+    for c in sorted(cats, key=lambda c: (str(c.get('dept') or ''), str(c.get('key') or ''))):
+        print(f"{str(c.get('key') or ''):<28} {str(c.get('name') or '')[:34]:<34} {str(c.get('dept') or '')[:16]:<16} "
+              f"{str(c.get('default_priority') or ''):<9} {len(c.get('assignable_to') or [])}")
+
+
 def pilot(to_key: str, title: str) -> None:
     cid = "pilot-" + secrets.token_hex(6)
     body = {"command_id": cid, "cat": "other", "title": title, "to": to_key, "pri": "normal", "dueKind": "tmrw",
@@ -192,6 +213,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="only the signature test vector, no network")
     ap.add_argument("--pilot", nargs=2, metavar=("USER_KEY", "TITLE"), help="create ONE pilot task, then prove the replay")
+    ap.add_argument("--staff", action="store_true", help="print the whole staff directory and the categories, nothing else")
     args = ap.parse_args()
     if not selftest():
         return 2
@@ -201,6 +223,9 @@ def main() -> int:
         print("set TASKPANEL_API_TOKEN and TASKPANEL_API_SECRET first", file=sys.stderr)
         return 2
     print(f"\nagainst {BASE}\n")
+    if args.staff:
+        staff_list()
+        return 0
     reads()
     if args.pilot:
         print()
