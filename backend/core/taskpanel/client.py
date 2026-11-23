@@ -313,4 +313,8 @@ class MockTaskPanel:
 
 
 def get_client():
+    if settings.TASKPANEL_MODE == "gateway":
+        from .gateway import get_gateway  # noqa: PLC0415 — gateway imports this module
+
+        return get_gateway()
     return LiveTaskPanel() if settings.TASKPANEL_MODE == "live" else MockTaskPanel()

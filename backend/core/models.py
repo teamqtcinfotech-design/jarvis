@@ -261,6 +261,10 @@ class StaffMember(models.Model):
     active = models.BooleanField(default=True)
     on_leave = models.BooleanField(default=False)
     leave_until = models.DateField(null=True, blank=True)
+    # From TaskPanel's own directory (gateway mode, Nov 2026): seniority, role there, and how much open work they hold.
+    level = models.CharField(max_length=40, blank=True, default="")
+    role = models.CharField(max_length=20, blank=True, default="")
+    open_tasks = models.PositiveSmallIntegerField(default=0)
     source = models.CharField(max_length=10, default="taskpanel")
     synced_at = models.DateTimeField(auto_now=True)
 

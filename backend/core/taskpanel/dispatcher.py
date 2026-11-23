@@ -97,6 +97,9 @@ def dispatch(command_id) -> IntegrationCommand:
     cmd.attempts += 1
     cmd.save(update_fields=["attempts", "updated_at"])
     link = TaskPanelLink.objects.filter(user=cmd.actor, active=True).first()
+    if link is None:
+        from .sync import link_for  # noqa: PLC0415 — sync imports this module's neighbours
+        link = link_for(cmd.actor)  # gateway mode: the one token acts as the MD's account for everyone
     client = get_client()
     try:
         if cmd.attempts > 1:

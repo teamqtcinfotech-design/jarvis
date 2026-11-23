@@ -15,10 +15,11 @@ import { useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
 import { greeting, timeOf } from '@/lib/format';
+import { api } from '@/lib/api';
 import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
-import type { SessionUser, TaskItem } from '@/lib/types';
+import type { SessionUser, StaffOption, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { useWalkie } from '@/lib/walkie';
 
@@ -88,6 +89,13 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, []);
+  // The staff panel's people, for the Staff card: how many, who holds work, who is away (refreshed with the page).
+  const [staff, setStaff] = useState<StaffOption[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    api<{ results: StaffOption[] }>('/staff/').then((r) => live && setStaff(r.data.results)).catch(() => undefined);
+    return () => { live = false; };
+  }, [data?.server_time]);
 
   // An answer that arrives while the talk sheet is closed must not sit unseen at the bottom of the page:
   // the page moves to it.
@@ -145,6 +153,8 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     setMenu(false);
     if (key === 'settings') router.push('/settings');
     else if (key === 'briefing') router.push('/briefing');
+    else if (key === 'staff_panel') router.push('/staff');
+    else if (key === 'company_panel') router.push('/panel');
     else if (key === 'held') engine.setHeldVisible(true);
     else if (key === 'messages') report('messages', 'Messages');  // the kept record: received and sent, with Seen
     else if (key === 'private') {
@@ -276,6 +286,16 @@ export function PhoneHome({ user }: { user: SessionUser }) {
             ]} empty="" onPress={() => select(unread ? 'messages' : pending ? 'requests' : 'updates')} />
           <GridCard icon="alert-circle-outline" label="Late" count={lateCount} toneKey={lateCount ? 'danger' : 'muted'}
             lines={(data?.overdue ?? []).slice(0, 3).map(dayLine)} empty={data ? 'Nothing is late' : 'Loading…'} onPress={() => select('late')} />
+          {/* The staff panel's people and, for the MD, the company's partner and franchise records (view only). */}
+          <GridCard icon="id-card-outline" label="Staff" count={staff?.filter((p) => !p.self).length ?? 0} toneKey="success"
+            lines={(staff ?? []).filter((p) => !p.self && (p.open_tasks ?? 0) > 0).sort((a, b) => (b.open_tasks ?? 0) - (a.open_tasks ?? 0)).slice(0, 3)
+              .map((p) => `${p.name} · ${p.open_tasks} open`)}
+            empty={staff ? 'Nobody has open work' : 'Loading…'}
+            note={staff?.some((p) => p.on_leave) ? `${staff.filter((p) => p.on_leave).length} on leave` : ''} onPress={() => select('staff_panel')} />
+          {isMD ? (
+            <GridCard icon="business-outline" label="Partners & franchise" count={0} toneKey="accent"
+              lines={['Partners · Franchises', 'Requests · Payments', 'View only']} empty="" onPress={() => select('company_panel')} />
+          ) : null}
         </View>
 
         {/* Reports */}

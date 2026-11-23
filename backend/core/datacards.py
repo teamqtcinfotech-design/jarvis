@@ -15,7 +15,7 @@ from .models import Alert, Kind, PrivateTask, SharedTask, Status, TaskEvent
 
 VIEW_KINDS = ["today", "week", "pending", "official", "late", "upcoming", "nodate", "stats", "private", "pa", "staff",
               "requests", "busy", "performance", "done", "cancelled", "history", "people", "tasks", "person",
-              "department", "departments", "section", "messages", "approvals", "alerts"]
+              "department", "departments", "section", "messages", "approvals", "alerts", "panel"]
 
 _PROGRESS = {Status.OPEN: 0, Status.IN_PROGRESS: 50, Status.BLOCKED: 50, Status.COMPLETED: 100, Status.CANCELLED: 0}
 _REMOTE_PROGRESS = {"todo": 0, "working": 50, "waiting": 50, "done": 100}
@@ -1212,6 +1212,8 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
         return _done_report(user, include_private, p)  # "Mansi ne pichhle mahine kya complete kiya", however the model files it
     if kind == "messages":
         return _messages_report(user, p)
+    if kind == "panel":
+        return _panel_view(user, p)
     if kind == "approvals":
         return _approvals_view(user, p)
     if kind == "alerts":
@@ -1409,7 +1411,113 @@ def _build(user, kind: str, include_private: bool, day: date | None, p: dict, mi
     return None
 
 
+# ------------------------------------------------------------------ the company panel (partners, franchises, payments)
+# The main software's records, read through TaskPanel's api.php (core/taskpanel/gateway.py, Nov 2026): view only, for
+# the MD, masked on their side. Each report kind as it may be asked for; the first word is the kind TaskPanel knows.
+_PANEL_KINDS = [
+    ("partners", "Partners", ("partners", "partner", "partner list", "partners list", "partner ki list", "partners ki list")),
+    ("partner_directory", "Partner directory", ("partner directory", "directory")),
+    ("partner_pipeline", "Partner pipeline", ("partner pipeline", "pipeline partners")),
+    ("partner_ledger", "Partner ledger", ("partner ledger", "ledger")),
+    ("partner_activity", "Partner activity", ("partner activity",)),
+    ("franchise_requests", "Franchise requests", ("franchise requests", "franchise request", "requests", "enquiries", "enquiry", "inquiry", "inquiries")),
+    ("franchise_onboarding", "Franchise onboarding", ("onboarding",)),
+    ("franchise_payments", "Franchise payments", ("franchise payments", "franchise payment")),
+    ("franchise_payment_totals", "Franchise payment totals", ("payment totals",)),
+    ("franchise_targets", "Franchise targets", ("targets", "target")),
+    ("franchise_pipeline", "Franchise pipeline", ("franchise pipeline", "pipeline")),
+    ("franchise_commissions", "Franchise commissions", ("franchise commissions", "franchise commission")),
+    ("franchise_meetings", "Franchise meetings", ("franchise meetings",)),
+    ("franchise_ledger", "Franchise ledger", ("franchise ledger",)),
+    ("franchise_activity", "Franchise activity", ("franchise activity",)),
+    ("franchises", "Franchises", ("franchises", "franchise", "franchise list", "franchise ki list")),
+    ("withdrawal_payouts", "Withdrawals", ("withdrawals", "withdrawal", "payouts", "payout")),
+    ("payments", "Payments", ("payments", "payment")),
+    ("commissions", "Commissions", ("commissions", "commission")),
+    ("agreements", "Agreements", ("agreements", "agreement")),
+    ("tds_sheet", "TDS", ("tds",)),
+    ("itr_statistics", "ITR statistics", ("itr",)),
+    ("capital_statements", "Capital statements", ("capital",)),
+    ("working_metrics", "Working metrics", ("metrics",)),
+]
+_PANEL_LABEL = {k: label for k, label, _w in _PANEL_KINDS}
+_PANEL_EXAMPLES = "partners, franchises, franchise requests, payments, withdrawals, commissions, agreements, targets, TDS"
+
+
+def panel_kind(words: str) -> str:
+    """The report kind meant by "franchise requests", "partner ki list", "withdrawals"…; "" when none fits."""
+    low = " ".join((words or "").lower().replace("_", " ").split())
+    if not low:
+        return ""
+    for kind, _label, aliases in _PANEL_KINDS:
+        if low == kind.replace("_", " ") or low in aliases:
+            return kind
+    for kind, _label, aliases in _PANEL_KINDS:
+        if any(a in low for a in aliases if len(a) > 3):
+            return kind
+    return ""
+
+
+def _panel_view(user, p: dict) -> dict:
+    address, address_hi = _addr(user)
+    empty = _table("panel", "Company panel", [], [("title", "Name")], layout="table")
+    if not user.is_md:
+        return _summ(empty, address, address_hi, "the partner and franchise records are only for the MD.", "पार्टनर और फ़्रैंचाइज़ी के रिकॉर्ड सिर्फ़ MD के लिए हैं।")
+    from .taskpanel.client import TaskPanelError, get_client  # here, not at the top: the client reads settings
+    client = get_client()
+    if not hasattr(client, "report"):
+        return _summ(empty, address, address_hi, "the company panel is not connected on this server.", "कंपनी पैनल इस सर्वर से जुड़ा नहीं है।")
+    kind = panel_kind(p.get("group") or "") or panel_kind(p.get("who") or "") or panel_kind(p.get("words") or "")
+    if not kind:
+        return {"ask": f"{address}, which report: {_PANEL_EXAMPLES}?", "ask_hi": f"{address_hi}, कौन सी रिपोर्ट: {_PANEL_EXAMPLES}?"}
+    params: dict = {"page": 1}
+    words = p.get("words") or ""
+    if words and panel_kind(words) != kind:
+        params["query"] = words
+    elif p.get("who") and panel_kind(p["who"]) != kind and p["who"].lower() not in ("me", "sir"):
+        params["query"] = p["who"]
+    if p.get("from"):
+        params["from"] = p["from"].isoformat()
+    if p.get("to"):
+        params["to"] = p["to"].isoformat()
+    label = _PANEL_LABEL.get(kind, kind.replace("_", " ").title())
+    try:
+        data = client.report(kind, params)
+    except TaskPanelError as err:
+        view = _table("panel", label, [], [("title", "Name")])
+        return _summ(view, address, address_hi, f"I could not read {label.lower()} from the panel: {err.message}",
+                     f"{label} पैनल से नहीं पढ़ पाया: {err.message}")
+    columns = [(str(c.get("key")), str(c.get("label") or c.get("key"))) for c in (data.get("columns") or []) if isinstance(c, dict) and c.get("key")]
+    records = [r for r in (data.get("records") or []) if isinstance(r, dict)]
+    if not columns and records:
+        columns = [(k, k.replace("_", " ").title()) for k in records[0].keys()]
+    first = columns[0][0] if columns else "title"
+    rows = []
+    for i, rec in enumerate(records):
+        cells = {k: ("" if v is None else str(v)) for k, v in rec.items()}
+        rows.append({"id": f"{kind}-{i}", "scope": "", "title": cells.get(first) or cells.get("name") or f"{label} {i + 1}",
+                     "kind": label, "priority": "NORMAL", "status": "", "when": "", "day": "", "who": "", "progress": 0,
+                     "private": False, "overdue": False, "version": None, "hold_reason": "", **cells})
+    total = data.get("total") if isinstance(data.get("total"), int) else len(rows)
+    title = f"{label}" + (f" · {params['query']}" if params.get("query") else "")
+    shown = ", ".join(r["title"] for r in rows[:2])
+    view = _table("panel", title, rows, columns[:6], subtitle=f"{total} in all" + (f" · page 1 of {data.get('pages')}" if data.get("pages", 1) and data.get("pages", 1) > 1 else ""))
+    view["panel"] = {"kind": kind, "label": label, "total": total, "page": data.get("page"), "pages": data.get("pages"),
+                     "hidden_columns": data.get("hidden_columns"), "totals": data.get("totals"), "as_of": data.get("as_of"),
+                     "query": params.get("query", ""), "columns": columns}
+    if not rows:
+        return _summ(view, address, address_hi, f"nothing in {label.lower()}" + (f" for {params['query']}" if params.get("query") else "") + ".",
+                     f"{label} में कुछ नहीं मिला" + (f" ({params['query']})" if params.get("query") else "") + "।")
+    totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
+    totals_en = "; ".join(f"{k.replace('_', ' ')} {v}" for k, v in list(totals.items())[:2])
+    en = f"{total} {label.lower()}" + (f" for {params['query']}" if params.get("query") else "") + (f": {shown}" if shown else "") + (f". {totals_en}" if totals_en else "") + "."
+    hi = f"{label} में {total}" + (f" ({params['query']})" if params.get("query") else "") + (f": {shown}" if shown else "") + "।"
+    return _summ(view, address, address_hi, en, hi)
+
+
 _QUERY_HINTS = [
+    ("panel", ("partners", "partner", "franchise", "franchises", "withdrawal", "payout", "commission", "agreement", "tds", "itr",
+               "enquir", "inquir", "onboarding", "ledger")),
     ("departments", ("departments", "sab department", "sare department", "saare department", "kitne department", "all departments")),
     ("performance", ("performance", "report", "kaisa kaam", "kis ne kitna", "productivity", "kaun late", "who is late", "on time")),
     ("history", ("last time", "pichhli baar", "pichli baar", "kab mila", "last met", "last meeting with", "history", "kab diya tha", "pehle kab")),

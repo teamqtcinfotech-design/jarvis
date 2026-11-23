@@ -168,7 +168,10 @@ TOOLS = [
                                  "tasks (a general list), person (one person's work), people (the team), performance, busy (when the MD is busy), "
                                  "history (a task's steps), messages, cancelled, private (the speaker's personal items), official, department, "
                                  "departments, section, stats, requests, approvals, alerts (what reached the speaker: notifications of every kind, "
-                                 "sorted into tasks / meetings / approvals / messages / updates, for a span or a day)"},
+                                 "sorted into tasks / meetings / approvals / messages / updates, for a span or a day), panel (the company's "
+                                 "partner / franchise / payment records from the main software, view only: 'partners ki list', 'Pune franchise ka "
+                                 "status', 'franchise requests', 'is mahine ke withdrawals', 'partner STTU001205 ki detail'; group = the report kind, "
+                                 "words = a name or ID to look for)"},
          "who": _s("'me', the MD's word, a team member's name or job, a department, 'team', 'staff' or 'all'; '' when not about someone in particular"),
          "from_day": _s("YYYY-MM-DD, first day of a period asked about, else ''"), "to_day": _s("YYYY-MM-DD, last day, else ''"),
          "by": {"type": "string", "enum": ["", "due", "given", "done"]},
@@ -180,7 +183,10 @@ TOOLS = [
          "from_whom": {"type": "string", "enum": ["", "sir", "pa", "me", "staff"]},
          "priority": {"type": "string", "enum": ["", "urgent", "high", "important"]},
          "words": _s("words from the item's own title that pick it out, else ''"),
-         "group": _s("a department or section name asked about, else ''"),
+         "group": _s("a department or section name asked about; for panel, the report kind: partners, partner_directory, partner_pipeline, "
+                     "partner_ledger, franchises, franchise_requests, franchise_onboarding, franchise_payments, franchise_targets, "
+                     "franchise_pipeline, franchise_commissions, payments, withdrawal_payouts, commissions, agreements, tds_sheet, "
+                     "itr_statistics; else ''"),
          "said": _SAID}, "required": ["what", "said"]}},
     {"type": "function", "name": "change",
      "description": "Change an existing item: a new time or day, priority, length, name. Use which_id when it is one of the open items listed.",

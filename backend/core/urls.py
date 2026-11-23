@@ -53,6 +53,7 @@ urlpatterns = [
     # Staff + delegation to TaskPanel
     path("staff/", views.StaffListView.as_view()),
     path("staff/sync/", views.StaffSyncView.as_view()),
+    path("staff/<int:staff_id>/tasks/", views.StaffTasksView.as_view()),
     path("delegations/", views.DelegationListView.as_view()),
     path("delegations/team/", views.TeamDelegationView.as_view()),
     path("delegations/refresh/", views.DelegationRefreshView.as_view()),

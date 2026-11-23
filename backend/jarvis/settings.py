@@ -163,9 +163,13 @@ FIELD_ENCRYPTION_KEY = _fek
 # AI brain (Claude). Key stays on the server only.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 JARVIS_AI_ENABLED = env_bool("JARVIS_AI_ENABLED", bool(ANTHROPIC_API_KEY))
+# TaskPanel connector. "mock" = built-in contract double; "live" = the 3 Nov integration door; "gateway" = the real
+# TaskPanel's api.php (contract v1, 23 Nov 2026, core/taskpanel/gateway.py), one token acting as the MD's account.
+TASKPANEL_MODE = os.environ.get("TASKPANEL_MODE", os.environ.get("LARAVEL_MODE", "mock")).lower()
 # The TaskPanel staff directory (Ramesh, Neha …) is shown and used only when this is on. Off until the real TaskPanel
-# is connected: the directory then holds only test people, and the team is everyone with a JARVIS account.
-JARVIS_TASKPANEL_STAFF = env_bool("JARVIS_TASKPANEL_STAFF", False)
+# is connected (on by itself in gateway mode): the directory then holds only test people, and the team is everyone
+# with a JARVIS account.
+JARVIS_TASKPANEL_STAFF = env_bool("JARVIS_TASKPANEL_STAFF", TASKPANEL_MODE == "gateway")
 # The language JARVIS speaks and writes to a person it knows nothing about yet ("hi" / "en"). Anyone can change their
 # own in Settings; after that their own choice (or the language they speak) decides.
 JARVIS_DEFAULT_LANGUAGE = os.environ.get("JARVIS_DEFAULT_LANGUAGE", "hi")
@@ -224,17 +228,22 @@ JARVIS_PUSH_ENABLED = env_bool("JARVIS_PUSH_ENABLED", True)
 # Firebase, Nov 2026); set this to false once every phone runs the phone sign-in, and only the OTP remains.
 JARVIS_PASSWORD_LOGIN = env_bool("JARVIS_PASSWORD_LOGIN", True)
 
-# TaskPanel connector (public_html/taskPanel integration API, signed server-to-server).
-# "mock" = built-in contract double with the same API shape; "live" = real TaskPanel.
-TASKPANEL_MODE = os.environ.get("TASKPANEL_MODE", os.environ.get("LARAVEL_MODE", "mock")).lower()
-TASKPANEL_BASE_URL = os.environ.get("TASKPANEL_BASE_URL", "").rstrip("/")  # https://host/taskPanel/integration/v1
+# TaskPanel connector (TASKPANEL_MODE above). live: the signed integration door; gateway: api.php with a token and
+# the shared signing secret (TASKPANEL_BASE_URL = https://host/taskPanel/api.php). Writes stay off until switched on
+# here AND on the TaskPanel side. TASKPANEL_HIDE_KEYS: TaskPanel logins that are not people (test and company logins),
+# never shown and never given work. TASKPANEL_EXPECTED_ACTOR: the TaskPanel account the token acts as (the MD's).
+TASKPANEL_BASE_URL = os.environ.get("TASKPANEL_BASE_URL", "").rstrip("/")
 TASKPANEL_KEY_ID = os.environ.get("TASKPANEL_KEY_ID", "")
 TASKPANEL_SIGNING_SECRET = os.environ.get("TASKPANEL_SIGNING_SECRET", "")
+TASKPANEL_API_TOKEN = os.environ.get("TASKPANEL_API_TOKEN", "")
+TASKPANEL_API_SECRET = os.environ.get("TASKPANEL_API_SECRET", TASKPANEL_SIGNING_SECRET)
+TASKPANEL_EXPECTED_ACTOR = os.environ.get("TASKPANEL_EXPECTED_ACTOR", "")
+TASKPANEL_HIDE_KEYS = [k.strip() for k in os.environ.get("TASKPANEL_HIDE_KEYS", "").split(",") if k.strip()]
 TASKPANEL_ENV = os.environ.get("TASKPANEL_ENV", "local")
 TASKPANEL_EXPECTED_INSTANCE = os.environ.get("TASKPANEL_EXPECTED_INSTANCE", "")
 TASKPANEL_VERIFY_TLS = env_bool("TASKPANEL_VERIFY_TLS", True)
-TASKPANEL_WRITES_ENABLED = env_bool("TASKPANEL_WRITES_ENABLED", TASKPANEL_MODE != "live")
-TASKPANEL_DEFAULT_CATEGORY = os.environ.get("TASKPANEL_DEFAULT_CATEGORY", "general")
+TASKPANEL_WRITES_ENABLED = env_bool("TASKPANEL_WRITES_ENABLED", TASKPANEL_MODE not in ("live", "gateway"))
+TASKPANEL_DEFAULT_CATEGORY = os.environ.get("TASKPANEL_DEFAULT_CATEGORY", "other" if TASKPANEL_MODE == "gateway" else "general")
 TASKPANEL_CONNECT_TIMEOUT = float(os.environ.get("TASKPANEL_CONNECT_TIMEOUT", "3"))
 TASKPANEL_READ_TIMEOUT = float(os.environ.get("TASKPANEL_READ_TIMEOUT", "15"))
 TASKPANEL_POLL_ACTIVE_SECONDS = int(os.environ.get("TASKPANEL_POLL_ACTIVE_SECONDS", "5"))

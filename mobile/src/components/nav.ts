@@ -33,6 +33,9 @@ export function navItems(user: SessionUser, data: Dashboard | null, engine: Engi
           { key: 'busy', label: `When ${md} is busy`, icon: 'time-outline' },
         ]),
     { key: 'staff', label: 'Given to staff', icon: 'briefcase-outline', count: open(data?.delegated) },
+    // The company's staff panel and its partner / franchise records (TaskPanel, Nov 2026).
+    { key: 'staff_panel', label: 'Staff', icon: 'id-card-outline', detail: 'Everyone in the staff panel, their work and progress' },
+    ...(isMD ? [{ key: 'company_panel', label: 'Partners & franchise', icon: 'business-outline', detail: 'The company records, view only' }] : []),
     { key: 'messages', label: 'Messages', icon: 'chatbubbles-outline', detail: 'Received and sent, kept for good' },
     { key: 'held', label: 'Held alerts', icon: 'notifications-outline', count: engine.held.length, tone: colors.danger, detail: 'Kept quiet while you were busy' },
     { key: 'updates', label: 'Updates', icon: 'newspaper-outline', count: engine.news?.length, detail: 'Small news, decisions and nudges' },

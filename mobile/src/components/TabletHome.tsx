@@ -64,6 +64,8 @@ export function TabletHome({ user }: { user: SessionUser }) {
 
   const select = (key: string) => {
     if (key === 'settings') router.push('/settings');
+    else if (key === 'staff_panel') router.push('/staff');
+    else if (key === 'company_panel') router.push('/panel');
     else if (key === 'briefing') conv.send('Give me the briefing');
     else if (key === 'held') engine.setHeldVisible(true);
     else if (key === 'messages') setSection('messages');

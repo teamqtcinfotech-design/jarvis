@@ -467,11 +467,14 @@ class StaffListView(APIView):
         tp_sync.ensure_directory(request.user)
         staff = services.staff_qs()
         categories = services.categories_qs()
+        own = services.own_actor_keys()
         return Response({
-            "results": [{"id": s.id, "name": s.name, "department": s.department, "designation": s.designation,
+            "results": [{"id": s.id, "key": s.external_id, "name": s.name, "department": s.department, "designation": s.designation,
+                         "level": s.level, "role": s.role, "open_tasks": s.open_tasks, "self": s.external_id in own,
                          "on_leave": s.on_leave, "leave_until": s.leave_until.isoformat() if s.leave_until else None}
                         for s in staff],
             "categories": [{"key": c.key, "name": c.name, "department": c.department} for c in categories],
+            "connected": settings.TASKPANEL_MODE in ("live", "gateway"),
         })
 
 
@@ -484,6 +487,24 @@ class StaffSyncView(APIView):
         except TaskPanelError as exc:
             return error(exc.code, exc.message, 503 if exc.status in (0, 503) else exc.status)
         return Response({"synced": count})
+
+
+class StaffTasksView(APIView):
+    """One staff member's work as TaskPanel holds it right now (gateway mode: straight from TaskPanel; otherwise
+    what JARVIS gave them), with the progress counts the person's screen shows."""
+
+    permission_classes = [IsMDOrPA]
+
+    def get(self, request, staff_id):
+        from .taskpanel import staffwork
+
+        staff = services.staff_qs().filter(id=staff_id).first()
+        if staff is None:
+            return error("not_found", "No such staff member.", 404)
+        try:
+            return Response(staffwork.person_card(request.user, staff))
+        except TaskPanelError as exc:
+            return error(exc.code, exc.message, 503 if exc.status in (0, 503) else exc.status)
 
 
 class DelegationListView(APIView):

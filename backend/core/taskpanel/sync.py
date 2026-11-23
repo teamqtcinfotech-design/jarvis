@@ -27,7 +27,16 @@ def link_for(user: User | None) -> TaskPanelLink | None:
         if link:
             return link
     md = User.objects.filter(role=User.Role.MD).first()
-    return TaskPanelLink.objects.filter(user=md, active=True).first() if md else None
+    if md is None:
+        return None
+    link = TaskPanelLink.objects.filter(user=md, active=True).first()
+    if link is None and settings.TASKPANEL_MODE == "gateway":
+        # One token acting as the MD's TaskPanel account (gateway mode): the link row exists for the bookkeeping the
+        # projection and the command ledger keep per actor; there is no per-person grant to store.
+        link, _made = TaskPanelLink.objects.update_or_create(
+            user=md, defaults={"actor_key": settings.TASKPANEL_EXPECTED_ACTOR or "md", "actor_name": "MD", "grant": "gateway",
+                               "scopes": "directory.read tasks.read tasks.create", "active": True, "expires_at": None})
+    return link
 
 
 # --------------------------------------------------------------------------- directory
@@ -53,6 +62,9 @@ def sync_directory(user: User | None = None, *, force: bool = False) -> int:
                     "active": bool(row.get("active", True)),
                     "on_leave": bool(row.get("on_leave", False)),
                     "leave_until": leave_until or None,
+                    "level": str(row.get("level") or "")[:40],
+                    "role": str(row.get("role") or "")[:20],
+                    "open_tasks": max(0, int(row.get("open_tasks") or 0)),
                     "source": get_client().mode,
                 },
             )

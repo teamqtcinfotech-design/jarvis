@@ -324,6 +324,42 @@ export interface StaffOption {
   department: string;
   on_leave?: boolean;
   leave_until?: string | null;
+  /** From TaskPanel's own directory (Nov 2026): the person's key there, seniority, role, open work; self = the MD's own login. */
+  key?: string;
+  designation?: string;
+  level?: string;
+  role?: string;
+  open_tasks?: number;
+  self?: boolean;
+}
+
+/** One staff member's work as TaskPanel holds it (GET /staff/<id>/tasks/). */
+export interface StaffTask {
+  id: string;
+  title: string;
+  status: 'todo' | 'working' | 'waiting' | 'done';
+  status_label: string;
+  progress: number;
+  priority: Priority | string;
+  due_at: string | null;
+  due_label: string;
+  category: string;
+  sender: string;
+  created_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+  hold_reason: string;
+  detail: string;
+  overdue: boolean;
+  source: 'taskpanel' | 'jarvis';
+}
+
+export interface StaffCard {
+  staff: { id: number; key: string; name: string; department: string; designation: string; level: string; role: string; on_leave: boolean; leave_until: string | null };
+  tasks: StaffTask[];
+  summary: { todo: number; working: number; waiting: number; done: number; open: number; overdue: number };
+  connected: boolean;
+  live: boolean;
 }
 
 export interface CategoryOption {
