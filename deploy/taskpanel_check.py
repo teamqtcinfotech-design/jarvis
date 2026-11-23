@@ -193,6 +193,85 @@ def staff_list() -> None:
               f"{str(c.get('default_priority') or ''):<9} {len(c.get('assignable_to') or [])}")
 
 
+def _table(rows: list[dict], cols: list[str], width: int = 24, limit: int = 25) -> None:
+    cols = [str(c) for c in cols]
+    print("  ".join(c[:width].ljust(min(width, max(len(c), 6))) for c in cols))
+    for r in rows[:limit]:
+        print("  ".join(str(r.get(c, "") if r.get(c) is not None else "")[:width].ljust(min(width, max(len(c), 6))) for c in cols))
+    if len(rows) > limit:
+        print(f"... {len(rows) - limit} more on this page")
+
+
+def person_tasks(user_key: str) -> None:
+    """One person's tasks (open and done), newest first."""
+    st, d, _h = call("GET", "tasks", {"status": "all", "assignee": user_key, "page": "1", "page_size": "50"})
+    if st != 200:
+        print(f"tasks: HTTP {st} {err(d)}")
+        return
+    data = (d or {}).get("data") or {}
+    rows = data.get("tasks") or []
+    print(f"{user_key}: {data.get('total')} tasks (page {data.get('page')} of {data.get('pages')})\n")
+    for t in rows:
+        t.setdefault("due", t.get("due_at") or t.get("due_date") or "")
+        t.setdefault("category", t.get("category_key") or t.get("cat") or "")
+        t.setdefault("sender", t.get("sender_key") or t.get("sender_name") or "")
+    _table(rows, ["id", "status", "priority", "due", "category", "sender", "title"], width=30, limit=50)
+
+
+def kinds() -> None:
+    st, d, _h = call("GET", "datasets")
+    if st != 200:
+        print(f"datasets: HTTP {st} {err(d)}")
+        return
+    data = (d or {}).get("data") or {}
+    print("report kinds this token may read:\n  " + "\n  ".join(str(k) for k in data.get("kinds") or []))
+    print("\nnever served:\n  " + ", ".join(str(k) for k in data.get("never_served") or []))
+
+
+def report(kind: str, params: list[str], mode: str) -> None:
+    """One report, as the API masks it: title, totals, columns and the first page of records."""
+    extra = dict(p.split("=", 1) for p in params if "=" in p)
+    st, d, _h = call("GET", "report", {"kind": kind, "result_mode": mode, "page": extra.pop("page", "1"), **extra})
+    if st != 200:
+        print(f"report {kind}: HTTP {st} {err(d)}")
+        return
+    data = (d or {}).get("data") or {}
+    cols = [c.get("key") for c in (data.get("columns") or []) if isinstance(c, dict)]
+    print(f"{data.get('title') or kind} | total {data.get('total')} | shown {data.get('shown')} | page {data.get('page')} of {data.get('pages')} | as of {data.get('as_of')}")
+    if data.get("hidden_columns"):
+        print(f"hidden columns: {data.get('hidden_columns')}")
+    if data.get("note"):
+        print(f"note: {data.get('note')}")
+    if data.get("totals"):
+        print(f"totals: {data.get('totals')}")
+    rows = data.get("records") or []
+    if rows:
+        print()
+        _table(rows, cols or sorted({k for r in rows for k in r}), width=22, limit=25)
+
+
+def assign(to_key: str, title: str, cat: str, pri: str, due: str, detail: str) -> None:
+    """ONE task to one person, with a fresh command_id. due: eod | 1h | tmrw | 'YYYY-MM-DD HH:MM'."""
+    body = {"command_id": "jarvis-" + secrets.token_hex(6), "cat": cat, "title": title, "to": to_key}
+    if pri:
+        body["pri"] = pri
+    if detail:
+        body["detail"] = detail
+    if due in ("eod", "1h", "tmrw"):
+        body["dueKind"] = due
+    elif due:
+        parts = due.split()
+        body["dueKind"], body["dueDate"] = "custom", parts[0]
+        if len(parts) > 1:
+            body["dueTime"] = parts[1]
+    st, d, _h = call("POST", "task.create", body=body)
+    data = (d or {}).get("data") or {}
+    if st == 201:
+        print(f"created {data.get('id')} for {to_key}: {title}")
+    else:
+        print(f"not created: HTTP {st} {err(d)}")
+
+
 def pilot(to_key: str, title: str) -> None:
     cid = "pilot-" + secrets.token_hex(6)
     body = {"command_id": cid, "cat": "other", "title": title, "to": to_key, "pri": "normal", "dueKind": "tmrw",
@@ -214,6 +293,16 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true", help="only the signature test vector, no network")
     ap.add_argument("--pilot", nargs=2, metavar=("USER_KEY", "TITLE"), help="create ONE pilot task, then prove the replay")
     ap.add_argument("--staff", action="store_true", help="print the whole staff directory and the categories, nothing else")
+    ap.add_argument("--tasks", metavar="USER_KEY", help="one person's tasks")
+    ap.add_argument("--kinds", action="store_true", help="the report kinds this token may read")
+    ap.add_argument("--report", metavar="KIND", help="run one report (partners, franchises, ...) and print the first page")
+    ap.add_argument("--param", action="append", default=[], metavar="KEY=VALUE", help="report filter, repeatable (query=..., from=..., page=2)")
+    ap.add_argument("--mode", default="list", choices=["list", "count", "sum"], help="report result_mode")
+    ap.add_argument("--assign", nargs=2, metavar=("USER_KEY", "TITLE"), help="create ONE task for one person")
+    ap.add_argument("--cat", default="other", help="category key for --assign (default other)")
+    ap.add_argument("--pri", default="", choices=["", "normal", "high", "urgent"], help="priority for --assign")
+    ap.add_argument("--due", default="tmrw", help="for --assign: eod | 1h | tmrw | 'YYYY-MM-DD HH:MM'")
+    ap.add_argument("--detail", default="", help="details text for --assign")
     args = ap.parse_args()
     if not selftest():
         return 2
@@ -225,6 +314,18 @@ def main() -> int:
     print(f"\nagainst {BASE}\n")
     if args.staff:
         staff_list()
+        return 0
+    if args.tasks:
+        person_tasks(args.tasks)
+        return 0
+    if args.kinds:
+        kinds()
+        return 0
+    if args.report:
+        report(args.report, args.param, args.mode)
+        return 0
+    if args.assign:
+        assign(args.assign[0], args.assign[1], args.cat, args.pri, args.due, args.detail)
         return 0
     reads()
     if args.pilot:
