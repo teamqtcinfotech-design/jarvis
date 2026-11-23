@@ -108,7 +108,10 @@ def reads() -> None:
     data = (d or {}).get("data") or {}
     net = data.get("network") or {}
     check("health answers 200", st == 200 and (d or {}).get("ok") is True, err(d) if st != 200 else f"request_id {(d or {}).get('request_id')}")
-    check("health: token acts as the MD's account", bool(data.get("actor") or data.get("account")), str(data.get("actor") or data.get("account") or ""))
+    actor = data.get("actor") if isinstance(data.get("actor"), dict) else {"user_key": data.get("actor") or data.get("account")}
+    expected = os.environ.get("TASKPANEL_EXPECTED_ACTOR", "bijender")
+    check("health: token acts as the MD's account", (actor.get("user_key") or "") == expected,
+          f"actor.user_key {actor.get('user_key')} (expected {expected}) | role {actor.get('role')}")
     check("health: our address is allowed", net.get("ip_allowed") is True,
           f"remote_addr {net.get('remote_addr')} | cf_connecting_ip {net.get('cf_connecting_ip')} | resolved {net.get('resolved_ip')} | via_cloudflare {net.get('via_cloudflare')}")
     check("health: scopes present", bool(data.get("scopes")), f"scopes {data.get('scopes')} | writes_enabled {data.get('writes_enabled')} | server_time {data.get('server_time')}")
@@ -144,13 +147,18 @@ def reads() -> None:
     kinds = data.get("kinds") or []
     check("dataset kinds listed", st == 200 and len(kinds) > 0, err(d) if st != 200 else f"{len(kinds)} kinds; never served: {len(data.get('never_served') or [])}")
     for kind in ("franchises", "partners"):
+        # Contract v1 as confirmed: rows are data.records, columns data.columns[{key,label,number}], hidden ones counted.
         st, d, _h = call("GET", "report", {"kind": kind, "result_mode": "list", "page": "1"})
         data = (d or {}).get("data") or {}
-        rows = data.get("rows") or data.get("items") or data.get("data") or []
-        cols = sorted({k for r in rows if isinstance(r, dict) for k in r.keys()})
-        leak = [c for c in cols if any(w in c.lower() for w in ("pan", "aadhaar", "aadhar", "account", "ifsc", "bank", "phone", "mobile", "nominee"))]
-        check(f"report {kind} returned", st == 200 and isinstance(rows, list), err(d) if st != 200 else f"{len(rows)} rows on page 1; columns: {', '.join(cols)[:200]}")
-        check(f"report {kind} has no sensitive columns", not leak, ", ".join(leak))
+        rows = data.get("records") or []
+        cols = [c.get("key") for c in (data.get("columns") or []) if isinstance(c, dict)] or sorted({k for r in rows if isinstance(r, dict) for k in r.keys()})
+        leak = [c for c in cols if any(w in str(c).lower() for w in ("pan", "aadhaar", "aadhar", "account", "ifsc", "bank", "phone", "mobile", "nominee"))]
+        check(f"report {kind} returned", st == 200 and isinstance(rows, list),
+              err(d) if st != 200 else f"{len(rows)} of {data.get('total')} records on page 1; hidden columns {data.get('hidden_columns')}; columns: {', '.join(map(str, cols))[:200]}")
+        check(f"report {kind} has no sensitive columns", not leak, ", ".join(map(str, leak)))
+        st, d, _h = call("GET", "report", {"kind": kind, "result_mode": "count"})
+        data = (d or {}).get("data") or {}
+        check(f"report {kind} count", st == 200 and isinstance(data.get("total"), int), err(d) if st != 200 else f"total {data.get('total')}")
     # 6. refusals
     st, d, _h = call("GET", "staff", bad_signature=True)
     check("a wrong signature is refused", st == 401, err(d))
