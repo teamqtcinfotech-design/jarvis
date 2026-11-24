@@ -244,6 +244,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const endAfterSpeech = useRef(false); // "bas": the line closes once its goodbye is said
   const answersRef = useRef<Answer[]>([]); // what is on screen, for "is list ka PDF" and "pehla wala"
   const lastQuestion = useRef('');
+  const lastCountAt = useRef(0); // when a count was last answered with a card ("20 tasks"): "kaun se?" points at it
 
   const messagesRef = useRef<Msg[]>([]);
   const draftRef = useRef<Draft | null>(null);
@@ -443,8 +444,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (text.trim().split(/\s+/).length > 10 || NOT_BATCH.test(text)) return false;
     const groups = GROUP_TESTS.filter(([, re]) => re.test(text)).map(([g]) => g);
     const urgent = URGENT_WORDS.test(text);
-    const named = groups.length > 0 || urgent;
-    const subset = items.filter((i) => (!groups.length || groups.includes(groupOf(i))) && (!urgent || i.priority === 'URGENT' || i.priority === 'HIGH'));
+    // "Himanshu ki taraf se", "from Mansi": a sender named among those who sent something waiting.
+    const senders = Array.from(new Set(items.map((i) => (i.from || '').toLowerCase()).filter((f) => f.length >= 3)));
+    const sender = senders.find((f) => new RegExp(`\\b${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)) ?? null;
+    const named = groups.length > 0 || urgent || !!sender;
+    const subset = items.filter((i) => (!groups.length || groups.includes(groupOf(i))) && (!urgent || i.priority === 'URGENT' || i.priority === 'HIGH')
+      && (!sender || (i.from || '').toLowerCase() === sender));
     const verb = LATER_WORDS.test(text) || SEEN_WORDS.test(text) || DONE_WORDS.test(text) || REMOVE_WORDS.test(text)
       || APPROVE_WORDS.test(text) || DECLINE_WORDS.test(text) || READ_WORDS.test(text) || SHOW_WORDS.test(text);
     // "Nancy wali approve kar do", "Pune wala done": the words pick the items out of the batch (within the pile named, if any).
@@ -473,6 +478,21 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         hi: GROUP_ORDER.filter((g) => piles.get(g)).map((g) => `${piles.get(g)} ${GROUP_WORDS[g].hi}`).join(', '),
       };
     };
+    // "Himanshu ki taraf se koi message?": yes or no, the count, and "padhun?" for those alone.
+    if (sender && !verb && (UPDATE_Q.test(text) || groups.length)) {
+      const who = items.find((i) => (i.from || '').toLowerCase() === sender)?.from || sender;
+      if (!subset.length) {
+        settle(`No, nothing from ${who}${groups.length ? ` among the ${GROUP_WORDS[groups[0]].en[1]}` : ''}.`, `नहीं, ${who} की तरफ़ से कुछ नहीं।`);
+        return true;
+      }
+      const o = offerBatch(subset);
+      const g = groups.length === 1 ? GROUP_WORDS[groups[0]] : null;
+      const what = g ? (subset.length === 1 ? g.en[0] : g.en[1]) : subset.length === 1 ? 'update' : 'updates';
+      settle(`Yes, ${subset.length} ${what} from ${who}. Shall I read ${subset.length === 1 ? 'it' : 'them'}?`,
+        `जी, ${who} की तरफ़ से ${subset.length} ${g ? g.hi : 'अपडेट'}। पढ़ूँ?`, true);
+      offerRef.current = o;
+      return true;
+    }
     // "Koi update hai?": yes, with the count by kind, and "padhun?"; nothing is read unasked.
     if (UPDATE_Q.test(text) && !bulk && !THIS_WORDS.test(text) && !SEEN_WORDS.test(text) && !DONE_WORDS.test(text) && !REMOVE_WORDS.test(text) && !LATER_WORDS.test(text)) {
       const o = offerBatch();
@@ -616,6 +636,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
     push('user', text);
     lastQuestion.current = text;
+    // "Kaun se?" right after a count ("20 tasks"): the list is already on the screen; it is pointed at, not read.
+    if (WHICH_ONES.test(text) && text.split(/\s+/).length <= 3 && nowMs() - lastCountAt.current < 120_000) {
+      lastCountAt.current = 0;
+      const t = twin("They're on the screen.", 'स्क्रीन पर हैं।');
+      push('jarvis', t.fallback);
+      expectingRef.current = true;
+      silenceRef.current = 0;
+      say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: listen });
+      return;
+    }
     if (handleBatch(text)) return; // a word on the batch or the banner: done here, never a "which one?"
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
@@ -987,7 +1017,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     const lang: SpeakLang = d.speak_lang === 'hi' ? 'hi' : 'en';
     // An answer with data: the screen gets a timeline / chart / table while the short reply is spoken. The card is
     // titled by what it shows ("Waiting for Ma'am"), not by the raw words that asked for it.
-    if (d.view && d.action === 'answer') addAnswer(d.view, d.view.title || lastQuestion.current);
+    if (d.view && d.action === 'answer') {
+      addAnswer(d.view, d.view.title || lastQuestion.current);
+      lastCountAt.current = COUNT_WORDS.test(lastQuestion.current) ? nowMs() : 0; // "kaun se?" next points at this card
+    }
     // The server settled an alert by this instruction ("bijli wale ka approve kar do", "dekh liya"): its banner goes.
     if (d.settled?.ref_id) acknowledgeByRef(d.settled.ref_type, d.settled.ref_id).catch(() => undefined);
     // The server already saved it (a clear meeting booked at once, or a plain reminder): the lists catch up now.

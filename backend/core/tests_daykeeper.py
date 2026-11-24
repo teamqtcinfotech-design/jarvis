@@ -73,6 +73,19 @@ class DayKeeperTests(BaseCase):
         self.assertIsNone(PrivateTask.objects.get(id=self.c.id).scheduled_start)
         self.assertIsNone(PrivateTask.objects.get(id=self.a.id).scheduled_start)
 
+    def test_the_suggestion_comes_back_while_unanswered_and_stops_after_an_answer(self):
+        self.assertEqual(self.keeper(), 1)
+        self.assertEqual(self.keeper(), 0)  # not within the same three quarters of an hour
+        # An hour goes by (the suggestion was made an hour before the keeper's clock) and he has not answered: asked again.
+        Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").update(created_at=self.now - timedelta(hours=1))
+        with mock.patch("core.followups.REMIND_AGAIN", timedelta(minutes=45)):
+            self.assertEqual(self.keeper(), 1)
+        self.assertEqual(Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").count(), 2)
+        latest = Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").order_by("-created_at").first()
+        services.answer_place(self.md, latest, False)  # "nahi": settled, so never again for this stretch
+        Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").update(created_at=self.now - timedelta(hours=2))
+        self.assertEqual(self.keeper(), 0)
+
     def test_no_leaves_the_day_alone(self):
         self.keeper()
         alert = self.suggestion()

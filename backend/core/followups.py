@@ -35,6 +35,7 @@ ACTIVE_HOURS = range(9, 20)  # 9:00 .. 19:59 local
 DIGEST_AT = (18, 30)
 BRIEFING_WINDOW = timedelta(hours=4)  # a briefing missed (worker down) is still given within this long, then dropped
 OPEN = [Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED]
+REMIND_AGAIN = timedelta(minutes=45)  # the free-time suggestion comes back this often while it goes unanswered
 
 
 def _already(key: str) -> bool:
@@ -161,8 +162,16 @@ def free_time(now=None) -> int:
             continue
         start, end = slot
         key = f"free:{tu.to_local(now).date().isoformat()}:{tu.to_local(end):%H%M}"
-        if _already(key + f"@{user.id}"):
-            continue
+        # Once per free stretch; and again every REMIND_AGAIN while he has not answered (overdue work is what matters
+        # most to him). A yes or a no settles the stretch: nothing is asked twice after an answer.
+        asked = Alert.objects.filter(recipient=user, ref_type="followup", ref_id__startswith=f"{key}")
+        if asked.filter(acknowledged_at__isnull=False).exists():
+            continue  # answered (whichever copy): settled for this stretch
+        latest = asked.order_by("-created_at").first()
+        if latest is not None:
+            if now - latest.created_at < REMIND_AGAIN:
+                continue
+            key = f"{key}:{int((now - latest.created_at).total_seconds() // 60)}m"
         dash = services.dashboard(user)
         pool = list(dash.get("overdue") or []) + list(dash.get("today") or []) + list(dash.get("anytime") or [])
         plan = scheduling.fit_into_free_time(pool, start, end, now)

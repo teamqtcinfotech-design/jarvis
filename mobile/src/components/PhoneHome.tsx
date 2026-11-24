@@ -15,11 +15,10 @@ import { useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
 import { greeting, timeOf } from '@/lib/format';
-import { api } from '@/lib/api';
 import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
-import type { SessionUser, StaffOption, TaskItem } from '@/lib/types';
+import type { SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { useWalkie } from '@/lib/walkie';
 
@@ -89,13 +88,6 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
   }, []);
-  // The staff panel's people, for the Staff card: how many, who holds work, who is away (refreshed with the page).
-  const [staff, setStaff] = useState<StaffOption[] | null>(null);
-  useEffect(() => {
-    let live = true;
-    api<{ results: StaffOption[] }>('/staff/').then((r) => live && setStaff(r.data.results)).catch(() => undefined);
-    return () => { live = false; };
-  }, [data?.server_time]);
 
   // An answer that arrives while the talk sheet is closed must not sit unseen at the bottom of the page:
   // the page moves to it.
@@ -124,6 +116,21 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     : [];
   const pending = (data?.requests.filter((r) => r.state === 'PENDING').length ?? 0) + approvals.length;
   const next = data ? nextTimed([...data.today, ...data.overdue], now) : null;
+  // Free right now? Nothing timed is running, and the next timed item is at least half an hour away (or there is none).
+  const freeTill = (() => {
+    if (!data) return null;
+    const spans = data.today
+      .filter((t) => t.status !== 'COMPLETED' && (t.scheduled_start ?? t.due_at))
+      .map((t) => {
+        const start = Date.parse(t.scheduled_start ?? t.due_at!);
+        const end = t.scheduled_end ? Date.parse(t.scheduled_end) : start + 30 * 60_000;
+        return { start, end };
+      });
+    if (spans.some((w) => w.start <= now && now < w.end)) return null;
+    const coming = spans.filter((w) => w.start > now).sort((a, b) => a.start - b.start)[0];
+    if (coming && coming.start - now < 30 * 60_000) return null;
+    return { until: coming ? new Date(coming.start).toISOString() : null };
+  })();
   // Today means today: late items from earlier days are a separate chip, not rows that crowd out the day. Tasks and
   // meetings are two cards, today and ahead (everything dated, however far: a meeting next December is "coming up").
   const isMeeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
@@ -224,41 +231,63 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <Txt variant="display">{address}</Txt>
         <Txt variant="caption" style={{ marginTop: 2 }}>{data?.date_label ?? ''}</Txt>
 
+        {/* Four counts at a glance (his layout, 24 Nov 2026): tap one and its list comes up. */}
+        <View style={s.chips}>
+          {[
+            { key: 'tasks', label: 'Tasks', n: todayOpen.filter((t) => !isMeeting(t)).length, icon: 'checkbox-outline', tone: colors.accent, go: () => select('today_tasks') },
+            { key: 'meetings', label: 'Meetings', n: todayMeetings.length, icon: 'people-outline', tone: colors.gold, go: () => select('today_meetings') },
+            { key: 'messages', label: 'Messages', n: unread, icon: 'chatbubble-ellipses-outline', tone: colors.info, go: () => select('messages') },
+            { key: 'alerts', label: 'Alerts', n: engine.waiting.length, icon: 'notifications-outline', tone: engine.waiting.length ? colors.warn : colors.muted, go: () => engine.setAllVisible(true) },
+          ].map((c) => (
+            <Pressable key={c.key} onPress={() => { tick(); c.go(); }} style={s.chip} accessibilityLabel={`${c.label}: ${c.n}`}>
+              <View style={[s.chipRing, { borderColor: c.tone }]}>
+                <Txt style={[s.chipN, { color: c.tone }]}>{c.n}</Txt>
+              </View>
+              <Txt variant="caption" style={{ marginTop: 4 }}>{c.label}</Txt>
+            </Pressable>
+          ))}
+        </View>
+
         {/* What is waiting for him right now: in the page, hiding nothing (see AlertBanner.tsx) */}
         <WaitingCard />
 
-        {/* Next up */}
-        <Pressable onPress={() => (next ? setOpenTask(next.item) : !data && loadError ? reload(true) : talk())} style={s.heroWrap}>
-          <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
-            <View style={s.heroTop}>
-              <View style={s.heroIcon}>
-                <Icon name={next ? kindIcon[next.item.kind] ?? 'time-outline' : 'sparkles-outline'} size={16} color={colors.white} />
-              </View>
-              <Txt variant="label" style={{ color: 'rgba(255,255,255,0.85)' }}>{next ? 'Next up' : 'Right now'}</Txt>
-              {next ? <Txt variant="caption" style={s.heroWhen}>{timeOf(next.item.scheduled_start ?? next.item.due_at)}</Txt> : null}
-            </View>
-            {next ? (
-              <>
-                <Txt variant="title" numberOfLines={2} style={{ color: colors.white, marginTop: 10 }}>{next.item.title}</Txt>
-                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>
-                  {inWords(next.start - now)}{next.item.scope === 'private' ? ' · private' : ''}
-                  {next.item.priority === 'URGENT' ? ' · urgent' : ''}
-                </Txt>
-              </>
-            ) : (
-              <>
-                <Txt variant="title" style={{ color: colors.white, marginTop: 10 }}>
-                  {data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…'}
-                </Txt>
-                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>
-                  {!data && loadError
-                    ? `${loadError} Check the internet connection, then tap here to try again.`
-                    : 'Say “Hey JARVIS” and ask for the plan, or give a task.'}
-                </Txt>
-              </>
-            )}
-          </LinearGradient>
-        </Pressable>
+        {/* The information banner, by priority: a meeting about to start; overdue work in free time (the standing
+            reminder); updates waiting; the next timed item; else the day's state. The name shows here; when JARVIS
+            speaks about it, it says only what it is. */}
+        {(() => {
+          const soon = next && next.start - now <= 5 * 60_000;
+          const hero = soon && next
+            ? { icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Starting now', when: timeOf(next.item.scheduled_start ?? next.item.due_at), title: next.item.title,
+                sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}`, go: () => setOpenTask(next.item) }
+            : lateCount && freeTill
+              ? { icon: 'alert-circle-outline', label: 'Free time', when: freeTill.until ? `till ${timeOf(freeTill.until)}` : 'rest of the day',
+                  title: `${lateCount} overdue ${lateCount === 1 ? 'item' : 'items'} could be done now`, sub: 'Tap for the list, or say “rakh do”', go: () => select('late') }
+              : engine.waiting.length
+                ? { icon: 'notifications-outline', label: 'Waiting for you', when: '', title: `${engine.waiting.length} update${engine.waiting.length === 1 ? '' : 's'}`,
+                    sub: 'Tap to go through them, or say “padho”', go: () => engine.setAllVisible(true) }
+                : next
+                  ? { icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Next up', when: timeOf(next.item.scheduled_start ?? next.item.due_at), title: next.item.title,
+                      sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}${next.item.priority === 'URGENT' ? ' · urgent' : ''}`, go: () => setOpenTask(next.item) }
+                  : { icon: 'sparkles-outline', label: 'Right now', when: '',
+                      title: data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…',
+                      sub: !data && loadError ? `${loadError} Check the internet connection, then tap here to try again.` : 'Say “Hey JARVIS” and ask for the plan, or give a task.',
+                      go: () => (!data && loadError ? reload(true) : talk()) };
+          return (
+            <Pressable onPress={hero.go} style={s.heroWrap}>
+              <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
+                <View style={s.heroTop}>
+                  <View style={s.heroIcon}>
+                    <Icon name={hero.icon} size={16} color={colors.white} />
+                  </View>
+                  <Txt variant="label" style={{ color: 'rgba(255,255,255,0.85)' }}>{hero.label}</Txt>
+                  {hero.when ? <Txt variant="caption" style={s.heroWhen}>{hero.when}</Txt> : null}
+                </View>
+                <Txt variant="title" numberOfLines={2} style={{ color: colors.white, marginTop: 10 }}>{hero.title}</Txt>
+                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{hero.sub}</Txt>
+              </LinearGradient>
+            </Pressable>
+          );
+        })()}
 
         {data && loadError ? (
           <Pressable onPress={() => reload(true)} style={s.offline}>
@@ -286,16 +315,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
             ]} empty="" onPress={() => select(unread ? 'messages' : pending ? 'requests' : 'updates')} />
           <GridCard icon="alert-circle-outline" label="Late" count={lateCount} toneKey={lateCount ? 'danger' : 'muted'}
             lines={(data?.overdue ?? []).slice(0, 3).map(dayLine)} empty={data ? 'Nothing is late' : 'Loading…'} onPress={() => select('late')} />
-          {/* The staff panel's people and, for the MD, the company's partner and franchise records (view only). */}
-          <GridCard icon="id-card-outline" label="Staff" count={staff?.filter((p) => !p.self).length ?? 0} toneKey="success"
-            lines={(staff ?? []).filter((p) => !p.self && (p.open_tasks ?? 0) > 0).sort((a, b) => (b.open_tasks ?? 0) - (a.open_tasks ?? 0)).slice(0, 3)
-              .map((p) => `${p.name} · ${p.open_tasks} open`)}
-            empty={staff ? 'Nobody has open work' : 'Loading…'}
-            note={staff?.some((p) => p.on_leave) ? `${staff.filter((p) => p.on_leave).length} on leave` : ''} onPress={() => select('staff_panel')} />
-          {isMD ? (
-            <GridCard icon="business-outline" label="Partners & franchise" count={0} toneKey="accent"
-              lines={['Partners · Franchises', 'Requests · Payments', 'View only']} empty="" onPress={() => select('company_panel')} />
-          ) : null}
+          {/* Staff and the company panel live in the side menu (his choice, 24 Nov 2026): the home page is the day. */}
         </View>
 
         {/* Reports */}
@@ -381,6 +401,10 @@ const s = StyleSheet.create({
   cornerWalkie: { position: 'absolute', left: 16 },
   walkieBtn: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.accentDeep, alignItems: 'center', justifyContent: 'center', ...shadow, shadowOpacity: 0.25, elevation: 8 },
   walkieDot: { position: 'absolute', top: 3, right: 3, width: 11, height: 11, borderRadius: 6, borderWidth: 2, borderColor: colors.bg },
+  chips: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14, paddingHorizontal: 6 },
+  chip: { alignItems: 'center', width: 72 },
+  chipRing: { width: 56, height: 56, borderRadius: 28, borderWidth: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
+  chipN: { fontSize: 20, fontFamily: fonts.semibold, lineHeight: 24 },
   heroWrap: { marginTop: 18, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },

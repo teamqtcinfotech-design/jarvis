@@ -186,7 +186,7 @@ interface EngineValue {
   /** Everything waiting for him right now (banner, stack, held), the latest first: what his bulk words act on. */
   batchItems: () => EngineItem[];
   /** "Koi update hai?": the batch counted and offered to read ("padhun?"), nothing said here; null when nothing waits. */
-  offerBatch: () => HeldOffer | null;
+  offerBatch: (items?: EngineItem[]) => HeldOffer | null;
   /** His words on the whole batch, or a filtered part of it, done at once and in silence: all seen, all done, all
    *  off the screen (they stay on the lists), read these ones one at a time. Each resolves to how many it touched. */
   seenAll: (items: EngineItem[]) => Promise<number>;
@@ -1215,8 +1215,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     newsRef.current = [];
     toPresent.current = [];
   }, []);
-  const offerBatch = useCallback((): HeldOffer | null => {
-    const items = batchItems();
+  const offerBatch = useCallback((only?: EngineItem[]): HeldOffer | null => {
+    const items = only ?? batchItems();
     if (!items.length) return null;
     newsRef.current = items;
     offerKind.current = 'news';
