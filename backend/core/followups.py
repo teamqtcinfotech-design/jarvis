@@ -172,16 +172,16 @@ def free_time(now=None) -> int:
         n = len(names)
         late = sum(1 for p in plan["placed"] if p["overdue"])
         what, what_hi = ("late", "लेट") if late == n else ("pending", "बाकी")
-        listed = ", ".join(names[:3]) + (f" and {n - 3} more" if n > 3 else "")
-        listed_hi = ", ".join(names[:3]) + (f" और {n - 3} और" if n > 3 else "")
+        listed = ", ".join(names[:3]) + (f" and {n - 3} more" if n > 3 else "")  # the banner's body, never spoken
         till, till_hi = tu.fmt_time(end), tu.fmt_time_hi(end)
         address, address_hi = services.address_of(user), services.address_hi_of(user)
+        # Spoken without a single title (his rule: never read names out unasked; "dikhao" shows them, the banner lists them).
         if n == 1:
-            spoken = f"{address}, you're free till {till}. One {what} item could be done now: {listed}. Shall I put it in?"
-            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। एक {what_hi} काम अभी हो सकता है: {listed_hi}। रख दूँ?"
+            spoken = f"{address}, you're free till {till}. One {what} item could be done now. Shall I put it in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। एक {what_hi} काम अभी हो सकता है। रख दूँ?"
         else:
-            spoken = f"{address}, you're free till {till}. {n} {what} items could be done now: {listed}. Shall I put them in?"
-            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {n} {what_hi} काम अभी हो सकते हैं: {listed_hi}। रख दूँ?"
+            spoken = f"{address}, you're free till {till}. {n} {what} items could be done now. Shall I put them in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {n} {what_hi} काम अभी हो सकते हैं। रख दूँ?"
         question = {"kind": "place", "en": "Shall I put it in?" if n == 1 else "Shall I put them in?", "hi": "रख दूँ?",
                     "plan": plan["placed"], "until": end.isoformat()}
         raised += _raise(user, key, f"Free till {till}: {n} {what} item{'s' if n > 1 else ''} could be done", listed, spoken,

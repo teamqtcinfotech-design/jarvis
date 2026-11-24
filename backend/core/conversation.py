@@ -7,6 +7,7 @@ itself when the user confirms — through the same service functions and permiss
 """
 import json
 import logging
+import re
 from datetime import date, datetime, time, timedelta
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
@@ -137,6 +138,17 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     state["history"].append({"role": "user", "text": text})
     pending, choices, offer, asked = state.get("pending"), state.get("choices"), state.get("offer"), state.get("asked")
 
+    # "Kaun se?" / "dikhao" to "you're free till 1; shall I put them in?": the items are named now (the only way to show
+    # them by voice alone), and the question stays open.
+    if asked and asked.get("kind") == "alert" and asked.get("id") and _WHICH_ONES.search(text):
+        titles = _place_titles(user, asked["id"])
+        if titles:
+            line = ", ".join(titles) + "."
+            resp = _resp(line, line, "hi" if lang_mod.DEVANAGARI.search(line) else "en", listen=True, action="asking")
+            state["history"].append({"role": "jarvis", "text": line})
+            state["history"] = state["history"][-MAX_HISTORY:]
+            _save(user, state)
+            return resp
     # The answer to "Shall I tell Sir when you'll do it?", "Ring again, or give it to someone else?" or "Shall I give
     # it to someone else?": free words ("kal shaam tak", "Sunil ko de do"), read on their own (core/promises.py).
     if asked and asked.get("kind") == "alert" and asked.get("id"):
@@ -316,6 +328,19 @@ def _free_answer(user: User, asked: dict, text: str) -> dict | None:
     if not q or q.get("kind") not in promises.FREE_KINDS:
         return None
     return promises.answer(user, alert, text)
+
+
+_WHICH_ONES = re.compile(r"\b(kaun|kaunse|kaun se|konse|kon se|which|which ones?|dikhao|dikha do|show|batao|bata do)\b|कौन|दिखाओ|बताओ",
+                         re.IGNORECASE)
+
+
+def _place_titles(user: User, alert_id: str) -> list[str]:
+    """The items a free-time suggestion would place (its plan), when that alert is his and still open."""
+    alert = Alert.objects.filter(id=alert_id, recipient=user).first()
+    q = alert.question if alert is not None and isinstance(alert.question, dict) else {}
+    if q.get("kind") != "place":
+        return []
+    return [str(p.get("title") or "") for p in (q.get("plan") or []) if isinstance(p, dict) and p.get("title")]
 
 
 def _task_ref_from_key(key: str) -> dict | None:

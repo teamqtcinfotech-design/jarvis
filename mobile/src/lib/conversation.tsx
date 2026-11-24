@@ -135,6 +135,10 @@ const CONTINUE_WORDS = /(continue|carry on|go on|go ahead|keep going|resume|aage
 
 /** Questions answered in free words, read by the server ("kal shaam tak", "Sunil ko de do"), not by yes / no. */
 const FREE_ANSWER_KINDS = new Set<AlertQuestion['kind']>(['promise', 'unseen', 'reassign']);
+/** "Kaun se?" / "dikhao" to a suggestion spoken without names: the items are named now, the question stays open. */
+const WHICH_ONES = /\b(kaun|kaunse|konse|which|dikhao|dikha|show|batao|bata)\b|कौन|दिखाओ|बताओ/i;
+/** "Baaki baad mein" / "others in 20 minutes": the whole batch waits, not just the one on the banner. */
+const THE_OTHERS = /\b(baaki|baki|others?|the rest|rest|sab|sabhi|all|sare|saare)\b|बाकी|सब|सारे/i;
 // Going through the alerts by voice: skip to the next one; lay them all out.
 const NEXT_WORDS = /^(?:ok(?:ay)?[,.]?\s*)?(?:next|agla|agli|aage|skip|chhodo|rehne do|next (?:one|wala|notification|alert)|agla (?:wala|notification|alert)|अगला|आगे|स्किप)[.!]?$/i;
 const SHOW_ALL_WORDS = /\b(?:show (?:me )?(?:all|the) (?:incoming |new |pending )?(?:notification|notifications|alerts?|banners?)|show (?:me )?all|sab(?:hi)? (?:notification|notifications|alerts?|banners?)|(?:notification|notifications|alerts?|banners?)(?: dikhao| dikha do| dikhaao| batao|\?)|saare (?:notification|notifications|alerts?)|kya (?:aaya|aya) hai|what(?:'s| is| has) (?:waiting|new|come|pending for me)|सब (?:नोटिफ़िकेशन|नोटिफिकेशन|अलर्ट)|क्या आया है)/i;
@@ -147,7 +151,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { user } = useSession();
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
-    setHeldVisible, held, setPresenter, answerQuestion, snooze, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
+    setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
     allVisible, waiting } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
@@ -801,23 +805,34 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (pendingOffer) {
       offerRef.current = null;
       if (d.action === 'confirm_pending') {
-        // Read aloud by the engine; shown here as text so he can see what was read.
-        const lines = held.map((h) => `• ${h.isPrivate && h.concealed ? 'A private reminder' : h.title}`);
-        push('jarvis', `While you were away:\n${lines.join('\n')}`);
+        // "Yes": the engine reads ONE, with its question, and brings the next once he has answered (his rule: one at
+        // a time, never the whole batch in one breath).
         expectingRef.current = true;
         silenceRef.current = 0;
         acceptOffer();
-        say('', { onDone: listen }); // queued after the read-out, then JARVIS listens again
+        return;
+      }
+      if (d.action === 'snooze') {
+        // "Baad mein" / "20 minute baad" to the offer: the whole batch comes back then, counted again.
+        questionRef.current = null;
+        expectingRef.current = false;
+        snoozeAll(undefined, d.snooze_until || undefined)
+          .then((back) => {
+            const hi = hiLine(back ? `I'll bring them back ${back.label}.` : d.spoken_reply, back ? `${back.labelHi || back.label} फिर बताऊँगा।` : speakText);
+            if (hi) reply(hi.show, hi.speak, 'hi', false);
+            else reply(back ? `I'll bring them back ${back.label}.` : d.spoken_reply, undefined, 'en', false);
+          })
+          .catch(() => sayOwn(`Sorry ${address}, I couldn't set that.`, `माफ़ कीजिए ${addressHi}, वो सेट नहीं हो पाया।`, { interrupt: true }));
         return;
       }
       if (d.action === 'cancel_pending') {
         declineOffer();
-        const hi = hiLine(`Okay ${address}, they're in your list.`, `ठीक है${isMD ? ` ${addressHi}` : ''}, वो आपकी लिस्ट में हैं।`);
+        const hi = hiLine("Okay, they're on your list.", 'ठीक है, वो आपकी लिस्ट में हैं।');
         if (hi) reply(hi.show, hi.speak, 'hi', false);
-        else reply(`Okay ${address}, they're in your list.`, undefined, 'en', false);
+        else reply("Okay, they're on your list.", undefined, 'en', false);
         return;
       }
-      declineOffer(); // he asked for something else: leave them in the list and carry on
+      declineOffer(); // he asked for something else: leave them on the list and carry on
     }
 
     const pq = questionRef.current;
@@ -826,6 +841,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       // else whatever JARVIS said last (the server knows). The reply already names the exact time.
       questionRef.current = null;
       expectingRef.current = false;
+      if (THE_OTHERS.test(d.transcript || '') && (pq || currentAlert)) {
+        // "Baaki 20 minute baad": everything still waiting comes back then, not just the one on the banner.
+        snoozeAll(undefined, d.snooze_until || undefined)
+          .then((back) => {
+            const hi = hiLine(back ? `I'll bring them back ${back.label}.` : d.spoken_reply, back ? `${back.labelHi || back.label} फिर बताऊँगा।` : speakText);
+            if (hi) reply(hi.show, hi.speak, 'hi', false);
+            else reply(back ? `I'll bring them back ${back.label}.` : d.spoken_reply, undefined, 'en', false);
+          })
+          .catch(() => sayOwn(`Sorry ${address}, I couldn't set that.`, `माफ़ कीजिए ${addressHi}, वो सेट नहीं हो पाया।`, { interrupt: true }));
+        return;
+      }
       const target = pq?.item ?? currentAlert;
       push('jarvis', d.spoken_reply);
       const done: Promise<{ note: string; noteHi: string } | null> = target
@@ -849,6 +875,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       questionRef.current = null;
       expectingRef.current = false;
       dismiss(pq.item);
+    } else if (pq && pq.q.kind === 'place' && pq.q.plan?.length && WHICH_ONES.test(d.transcript || '')
+      && (d.intent === 'query' || d.intent === 'unknown' || d.intent === 'small_talk' || d.action === 'answer')) {
+      // "Kaun se?" to "you're free till 1; shall I put them in?" (said without names): name them now, keep asking.
+      const line = `${pq.q.plan.map((p) => p.title).join(', ')}.`;
+      questionRef.current = pq;
+      expectingRef.current = true;
+      silenceRef.current = 0;
+      push('jarvis', line);
+      say(line, { interrupt: true, lang: langOfText(line), fallback: line, onDone: listen });
+      return;
     } else if (pq) {
       // His answer to the alert's question. A yes or no in any words is carried out here; a real instruction
       // instead is handled as itself below, and the alert stays on its banner.

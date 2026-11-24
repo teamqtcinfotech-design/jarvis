@@ -48,6 +48,11 @@ class DayKeeperTests(BaseCase):
         self.assertTrue(alert.spoken_text.endswith("Shall I put them in?"), alert.spoken_text)
         self.assertEqual(alert.spoken_text.count("Sir"), 1)
         self.assertIn("रख दूँ?", alert.spoken_text_hi)
+        # Never a title in the spoken line; the banner's body carries them.
+        for title in ("Send the bank statement", "Renew the trade licence"):
+            self.assertNotIn(title, alert.spoken_text)
+            self.assertNotIn(title, alert.spoken_text_hi)
+            self.assertIn(title, alert.body)
         # The same stretch is not asked about again.
         self.assertEqual(self.keeper(), 0)
 
@@ -111,6 +116,22 @@ class DayKeeperTests(BaseCase):
         with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")):
             r = self.md_client.post("/api/v1/assistant/turn/", {"text": "haan rakh do"}, format="json")
         self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(r.json()["show"].startswith("Done:"), r.json())
+        self.assertIsNotNone(PrivateTask.objects.get(id=self.c.id).scheduled_start)
+
+    def test_kaun_se_by_voice_names_them_and_keeps_the_question_open(self):
+        self.keeper()
+        alert = self.suggestion()
+        r = self.md_client.post("/api/v1/assistant/turn/", {"text": "", "event": "ask",
+                                                            "about": {"kind": "alert", "id": str(alert.id), "title": alert.title, "question": alert.question["en"]}},
+                                format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        r = self.md_client.post("/api/v1/assistant/turn/", {"text": "kaun se?"}, format="json")  # no model call needed
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()["show"], "Send the bank statement, Renew the trade licence.")
+        self.assertIsNone(PrivateTask.objects.get(id=self.c.id).scheduled_start)  # nothing placed by asking
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")):
+            r = self.md_client.post("/api/v1/assistant/turn/", {"text": "haan"}, format="json")
         self.assertTrue(r.json()["show"].startswith("Done:"), r.json())
         self.assertIsNotNone(PrivateTask.objects.get(id=self.c.id).scheduled_start)
 

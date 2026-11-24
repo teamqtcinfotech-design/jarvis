@@ -95,6 +95,16 @@ export interface HeldOffer {
   count: number;
   text: string; // English, Roman letters (shown and spoken with the Indian voice)
   textHi: string; // Devanagari, for the Hindi voice
+  /** held: kept back while he was away / in a meeting; news: just arrived while he is here (counted, never read unasked). */
+  kind: 'held' | 'news';
+}
+
+/** "3 updates have come. Shall I read them?" — the count only, never a title (his rule); the banner lists them. */
+function countOffer(n: number, address: string, addressHi: string, when: { en: string; hi: string } | null): { text: string; textHi: string } {
+  const lead = when ? `${address}, ${when.en}: ` : `${address}, `;
+  const leadHi = when ? `${addressHi}, ${when.hi}: ` : `${addressHi}, `;
+  if (n === 1) return { text: `${lead}one update has come. Shall I read it?`, textHi: `${leadHi}एक अपडेट आया है। पढ़ूँ?` };
+  return { text: `${lead}${n} updates have come. Shall I read them?`, textHi: `${leadHi}${n} अपडेट आए हैं। पढ़ूँ?` };
 }
 
 export type { AlertQuestion } from './types';
@@ -159,6 +169,8 @@ interface EngineValue {
   acknowledgeAllHeld: () => Promise<void>;
   /** "Later": in `minutes`, at `until` (ISO), or the person's usual snooze. Resolves to when it comes back. */
   snooze: (item: EngineItem, minutes?: number, until?: string) => Promise<{ until: string; label: string; labelHi: string; note: string; noteHi: string } | null>;
+  /** Everything waiting comes back later ("baaki 20 minute baad"); resolves to when, as the server says it. */
+  snoozeAll: (minutes?: number, until?: string) => Promise<{ label: string; labelHi: string } | null>;
   complete: (item: EngineItem) => Promise<void>;
   decideRequest: (item: EngineItem, accept: boolean) => Promise<void>;
   reveal: () => void;
@@ -311,34 +323,7 @@ function buzzSilently(urgent: boolean) {
   }
 }
 
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-
-/** "Sir, your meeting starts in 15 minutes." -> "your meeting starts in 15 minutes." (the address is said once). */
-function withoutAddress(text: string, addresses: string[]): string {
-  const t = text.trim();
-  const low = t.toLowerCase();
-  for (const address of addresses) {
-    const a = address.toLowerCase();
-    if (a && (low.startsWith(`${a}, `) || low.startsWith(`${a} `))) return t.slice(address.length + 1).trim();
-  }
-  return t;
-}
-
-/**
- * Several things due at once are said as one sentence, not a burst of separate announcements. The lines come
- * from the server in the reader's language; the wrapper follows them.
- */
-function combined(lines: string[], address: string, addressHi: string): string {
-  if (lines.length === 1) return lines[0];
-  const hindi = lines.some((l) => langOfText(l) === 'hi');
-  const parts = lines.map((l) => {
-    const s = withoutAddress(l, [address, addressHi]);
-    return /[.!?।]$/.test(s) ? s : `${s}${hindi ? '।' : '.'}`;
-  });
-  return hindi ? `${addressHi}, ${lines.length} बातें। ${parts.join(' ')}` : `${address}, ${lines.length} things. ${parts.join(' ')}`;
-}
-
-/** Speak a line that is already written (a server line, or one sentence made of several): the voice follows its script. */
+/** Speak a line that is already written (a server line): the voice follows its script. */
 const speakLine = (text: string, opts: { interrupt?: boolean } = {}) => say(text, { ...opts, lang: langOfText(text) });
 
 /** Speak one app-built line in the language JARVIS is using with this person (see lang.ts). */
@@ -346,50 +331,6 @@ const sayTwin = (en: string, hi: string, opts: { interrupt?: boolean } = {}) => 
   const t = twin(en, hi);
   say(t.text, { ...opts, lang: t.lang, fallback: t.fallback });
 };
-
-/** "2 private reminders and 1 request from your PA" in English and Hindi. */
-function describeHeld(items: EngineItem[], isMD: boolean, md: { en: string; hi: string }): { en: string; hi: string } {
-  const n = (f: (i: EngineItem) => boolean) => items.filter(f).length;
-  const privateRem = n((i) => i.source === 'reminder' && i.isPrivate);
-  const otherRem = n((i) => i.source === 'reminder' && !i.isPrivate);
-  const requests = n((i) => i.alertKind === 'NEW_REQUEST');
-  const assigned = n((i) => i.alertKind === 'TASK_ASSIGNED');
-  const decided = n((i) => i.alertKind === 'REQUEST_DECIDED');
-  const staff = n((i) => i.alertKind === 'STAFF_UPDATE');
-  const other = items.length - privateRem - otherRem - requests - assigned - decided - staff;
-  const en: string[] = [];
-  const hi: string[] = [];
-  if (privateRem) {
-    en.push(plural(privateRem, 'private reminder'));
-    hi.push(`${privateRem} प्राइवेट रिमाइंडर`);
-  }
-  if (otherRem) {
-    en.push(plural(otherRem, 'reminder'));
-    hi.push(`${otherRem} रिमाइंडर`);
-  }
-  if (requests) {
-    en.push(`${plural(requests, 'request')} from ${isMD ? 'your PA' : md.en}`);
-    hi.push(`${isMD ? 'आपकी PA' : md.hi} की ${requests} रिक्वेस्ट`);
-  }
-  if (assigned) {
-    en.push(`${plural(assigned, 'task')} from ${md.en}`);
-    hi.push(`${md.hi} के ${assigned} टास्क`);
-  }
-  if (decided) {
-    en.push(`${plural(decided, 'answer')} from ${md.en}`);
-    hi.push(`${md.hi} के ${decided} जवाब`);
-  }
-  if (staff) {
-    en.push(plural(staff, 'staff update'));
-    hi.push(`स्टाफ़ के ${staff} अपडेट`);
-  }
-  if (other > 0) {
-    en.push(plural(other, 'update'));
-    hi.push(`${other} अपडेट`);
-  }
-  const join = (parts: string[], and: string) => (parts.length > 1 ? `${parts.slice(0, -1).join(', ')} ${and} ${parts[parts.length - 1]}` : parts[0] ?? '');
-  return { en: join(en, 'and'), hi: join(hi, 'और') };
-}
 
 /** Where an alert points: the request or task it is about. */
 function refOf(item: EngineItem): { type: string; id: string } | null {
@@ -502,7 +443,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [setCurrent, setQueued],
   );
   const waiting = useMemo(() => {
-    const rest = [...queueItems].sort((a, b) => RANK[a.priority] - RANK[b.priority] || a.fireAt - b.fireAt);
+    const rest = [...queueItems].sort((a, b) => b.fireAt - a.fireAt); // the latest first, always (his rule)
     return current ? [current, ...rest.filter((q) => q.key !== current.key)] : rest;
   }, [current, queueItems]);
 
@@ -552,7 +493,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         // The same alert can reach here twice when many arrive at once (a poll and a push): one row, the newest.
         queueRef.current = queueRef.current.filter((q) => q.key !== shown.key);
         queueRef.current.push(shown);
-        queueRef.current.sort((a, b) => RANK[a.priority] - RANK[b.priority]);
+        queueRef.current.sort((a, b) => b.fireAt - a.fireAt); // the latest first
         setQueued(queueRef.current.length);
       }
       if (item.priority === 'URGENT' && item.followups < FOLLOWUP_MINUTES.length) {
@@ -617,7 +558,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const deliverTogether = useCallback(
     (items: EngineItem[]) => {
       if (items.length === 1) return deliver(items[0], 'loud');
-      const order = [...items].sort((a, b) => RANK[a.priority] - RANK[b.priority] || b.fireAt - a.fireAt);
+      const order = [...items].sort((a, b) => b.fireAt - a.fireAt); // the latest first
       deliver(order[0], 'loud');
       order.slice(1).forEach((item) => {
         show(item, 'silent');
@@ -689,26 +630,48 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     holdRef.current = hold;
   }, [hold]);
 
-  // He is back (picked the phone up, opened the app) and alerts were held: offer to read them.
+  // He is back (picked the phone up, opened the app) and alerts were held: offer to read them, by count only.
   // The engine only builds the offer; the conversation asks it aloud and listens for the answer.
+  const offerKind = useRef<'held' | 'news'>('held');
   const offerHeldIfBack = useCallback(() => {
     if (presenceRef.current !== 'present') return;
     const items = heldRef.current;
     if (items.length <= announcedHeld.current) return;
     announcedHeld.current = items.length;
-    const what = describeHeld(items, isMD, md);
-    const when = heldPhrase(items);
-    const them = items.length === 1 ? 'it' : 'them';
+    const words = countOffer(items.length, address, addressHi, heldPhrase(items));
     offerSeq.current += 1;
-    setOffer({
-      id: offerSeq.current,
-      count: items.length,
-      text: `${address}, ${when.en}: ${what.en}. Shall I read ${them}?`,
-      textHi: `${addressHi}, ${when.hi}: ${what.hi}। पढ़ कर सुनाऊँ?`,
-    });
+    offerKind.current = 'held';
+    setOffer({ id: offerSeq.current, count: items.length, kind: 'held', ...words });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- md is a fresh object each render; its two words are what matter
-  }, [address, addressHi, isMD, md.en, md.hi]);
+  }, [address, addressHi]);
+
+  // News that arrives while he is here (work given, messages, staff updates, nudges, suggestions) is never read out
+  // unasked: it goes on the banner's stack, and after a moment JARVIS says only how many came and asks whether to
+  // read them. Yes reads them one at a time (deliverTogether), each with its question; no leaves them on the list.
+  const newsRef = useRef<EngineItem[]>([]);
+  const newsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const offerNews = useCallback(
+    (items: EngineItem[]) => {
+      for (const item of items) {
+        show(item, 'silent');
+        if (!newsRef.current.some((n) => n.key === item.key)) newsRef.current.push(item);
+      }
+      tell(items);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+      if (newsTimer.current) clearTimeout(newsTimer.current);
+      newsTimer.current = setTimeout(() => {
+        newsTimer.current = null;
+        // Only what is still waiting on screen (he may have dealt with one meanwhile).
+        const fresh = newsRef.current.filter((n) => currentRef.current?.key === n.key || queueRef.current.some((q) => q.key === n.key));
+        newsRef.current = fresh;
+        if (!fresh.length) return;
+        offerSeq.current += 1;
+        offerKind.current = 'news';
+        setOffer({ id: offerSeq.current, count: fresh.length, kind: 'news', ...countOffer(fresh.length, address, addressHi, null) });
+      }, 1500);
+    },
+    [show, tell, address, addressHi],
+  );
 
   const setVoiceProbe = useCallback((probe: (() => Promise<boolean>) | null) => {
     voiceProbe.current = probe;
@@ -748,7 +711,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
    * everything due at this moment as one sentence), or handles it itself (silent banner, or held for later).
    */
   const route = useCallback(
-    (item: EngineItem, state: PresenceState, now: number): 'loud' | null => {
+    (item: EngineItem, state: PresenceState, now: number): 'loud' | 'offer' | null => {
       handled.current.add(item.key);
       const missed = item.source === 'reminder' && item.followups === 0 && now - item.fireAt > STALE_MS;
       if (missed) {
@@ -767,7 +730,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
           afterTalk.current.push(item);
           return null;
         }
-        return 'loud';
+        // A reminder at its moment is said as it is; news is counted first and read only when he says so.
+        return item.source === 'server' ? 'offer' : 'loud';
       }
       // A message or a task from one of the three: never kept back. Phone left on the desk: still said and shown;
       // in a meeting, quiet hours or face down: shown and buzzed, flashing until he taps it.
@@ -857,13 +821,17 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     }
     due.sort((a, b) => RANK[a.priority] - RANK[b.priority] || a.fireAt - b.fireAt);
     const loud: EngineItem[] = [];
+    const news: EngineItem[] = [];
     for (const item of due) {
       if (currentRef.current?.key === item.key) setCurrent(null);
-      if (route(item, presenceRef.current, now) === 'loud') loud.push(item);
+      const way = route(item, presenceRef.current, now);
+      if (way === 'loud') loud.push(item);
+      else if (way === 'offer') news.push(item);
     }
     if (loud.length) speakNow(loud);
+    if (news.length) offerNews(news);
     offerHeldIfBack();
-  }, [route, speakNow, offerHeldIfBack, setCurrent, show]);
+  }, [route, speakNow, offerNews, offerHeldIfBack, setCurrent, show]);
 
   /**
    * "Shall I tell Sir when you'll do it?" for work already seen (Seen tapped on the banner, or on a locked phone's
@@ -1110,18 +1078,27 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     setHeldVisible(false);
   }, [acknowledge]);
 
-  // Offered once, then counted as seen: read aloud or not, they stay in his lists and are never offered again.
+  // "Yes, read them": one at a time, the latest first, each with its question; the next comes once he has answered
+  // (presentNext). Held ones move onto the banner's stack for this.
   const acceptOffer = useCallback(() => {
     setOffer(null);
-    const items = [...heldRef.current];
-    if (items.length) speakLine(combined(items.map(spokenFor), address, addressHi)); // one sentence, the address once
-    acknowledgeAllHeld().catch(() => undefined);
-  }, [spokenFor, acknowledgeAllHeld, address, addressHi]);
+    const items = offerKind.current === 'news' ? newsRef.current : [...heldRef.current];
+    newsRef.current = [];
+    if (offerKind.current === 'held') {
+      setHeld([]);
+      announcedHeld.current = 0;
+    }
+    const alive = items.filter((i) => offerKind.current === 'held' || currentRef.current?.key === i.key || queueRef.current.some((q) => q.key === i.key));
+    if (alive.length) deliverTogether(alive);
+  }, [deliverTogether, setHeld]);
 
+  // "No": nothing is read; they stay on the list (the latest first) until he opens them, and are not offered again
+  // until something new comes.
   const declineOffer = useCallback(() => {
     setOffer(null);
-    acknowledgeAllHeld().catch(() => undefined);
-  }, [acknowledgeAllHeld]);
+    newsRef.current = [];
+  }, []);
+
 
   const acknowledgeByRef = useCallback(
     async (refType: 'request' | 'shared_task', refId: string) => {
@@ -1166,6 +1143,29 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       }
     },
     [advance, setHeld, setQueued],
+  );
+
+  /** "Baaki baad mein" / "20 minute baad": everything waiting (on the banner, on the stack, held) comes back then as
+   *  fresh news, counted again. Resolves to the time it comes back, as the server says it, or null when offline. */
+  const snoozeAll = useCallback(
+    async (minutes?: number, until?: string): Promise<{ label: string; labelHi: string } | null> => {
+      setOffer(null);
+      newsRef.current = [];
+      toPresent.current = [];
+      const seen = new Set<string>();
+      const items = [currentRef.current, ...queueRef.current, ...heldRef.current].filter((i): i is EngineItem => {
+        if (!i || seen.has(i.key)) return false;
+        seen.add(i.key);
+        return true;
+      });
+      let back: { label: string; labelHi: string } | null = null;
+      for (const item of items) {
+        const r = await snooze(item, minutes, until);
+        if (r) back = { label: r.label, labelHi: r.labelHi };
+      }
+      return back;
+    },
+    [snooze],
   );
 
   const complete = useCallback(
@@ -1377,6 +1377,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     acknowledge,
     acknowledgeAllHeld,
     snooze,
+    snoozeAll,
     complete,
     decideRequest,
     reveal,
