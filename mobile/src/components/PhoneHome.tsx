@@ -8,16 +8,18 @@
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PanResponder, Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { type AlertGroup, chipOf, type EngineItem, pileOf, useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
 import { greeting, relativeAgo, timeOf } from '@/lib/format';
-import { addressOf, mdWord } from '@/lib/names';
+import { twin } from '@/lib/lang';
+import { addressHiOf, addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
+import { say } from '@/lib/speech';
 import { colors, fonts, gradients, kindIcon, radius, shadow } from '@/lib/theme';
 import type { Kind, Priority, SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
@@ -50,9 +52,19 @@ const inWords = (ms: number) => {
   const h = Math.floor(m / 60);
   return `in ${h} h${m % 60 ? ` ${m % 60} min` : ''}`;
 };
+const inWordsHi = (ms: number) => {
+  const m = Math.round(ms / 60_000);
+  if (m <= 0) return 'अभी';
+  if (m < 60) return `${m} मिनट में`;
+  const h = Math.floor(m / 60);
+  return `${h} घंटे${m % 60 ? ` ${m % 60} मिनट` : ''} में`;
+};
+const nowMs = () => Date.now();
+const SWIPE_PAUSE = 30_000; // after he swipes the turning banner it holds still this long
 
-/** One information banner (his home screen, 24 Nov 2026): what it is, when, one or two lines, one tap. */
-type Banner = { key: string; icon: string; label: string; when: string; lines: string[]; sub: string; go: () => void };
+/** One information banner (his home screen, 24 Nov 2026): what it is, when, one or two lines; a tap opens it, the
+ *  speaker icon makes JARVIS say it. The text is information only, never "say this" or "tap that". */
+type Banner = { key: string; icon: string; label: string; when: string; lines: string[]; sub: string; go: () => void; speak: () => void; swipe?: boolean };
 /** Work that can be fitted into free time (never a meeting or a call) and its usual minutes when none is estimated. */
 const USUAL: Partial<Record<Kind, number>> = { TASK: 30, PAYMENT: 10, FOLLOW_UP: 15 };
 const RANK: Record<Priority, number> = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
@@ -93,6 +105,12 @@ export function PhoneHome({ user }: { user: SessionUser }) {
 
   const isMD = user.role === 'MD';
   const address = addressOf(user);
+  const addressHi = addressHiOf(user);
+  // One app-built line, spoken in the language JARVIS is using with him (the speaker icon on a banner).
+  const speakTwin = (en: string, hi: string) => {
+    const t = twin(en, hi);
+    say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback });
+  };
   const paName = data?.pa_name || 'your PA';
   const md = mdWord(data);
   const presence = engine.presence.state;
@@ -130,15 +148,30 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     engine.setAllGroup(g);
     engine.setAllVisible(true);
   };
-  // The third banner turns every 10 seconds through what is waiting, the latest first. The item on show is the
-  // engine's spotlight, so "isko hata do" / "this one, later" by voice means it.
+  // The third banner turns every 10 seconds through what is waiting, the latest first; a swipe moves it by hand and
+  // holds it still for a while. The item on show is the engine's spotlight, so "isko hata do" / "this one, later"
+  // by voice means it.
   const [turn, setTurn] = useState(0);
+  const [pausedUntil, setPausedUntil] = useState(0);
   useEffect(() => {
     if (pile.length < 2) return undefined;
-    const t = setInterval(() => setTurn((n) => n + 1), 10_000);
+    const t = setInterval(() => {
+      if (nowMs() < pausedUntil) return;
+      setTurn((n) => n + 1);
+    }, 10_000);
     return () => clearInterval(t);
-  }, [pile.length]);
-  const shown = pile.length ? pile[turn % pile.length] : null;
+  }, [pile.length, pausedUntil]);
+  const onSwipe = useCallback((dir: 1 | -1) => {
+    setPausedUntil(nowMs() + SWIPE_PAUSE);
+    setTurn((n) => n + dir);
+  }, []);
+  const swipe = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
+    onPanResponderRelease: (_e, g) => {
+      if (Math.abs(g.dx) >= 30) onSwipe(g.dx < 0 ? 1 : -1);
+    },
+  }), [onSwipe]);
+  const shown = pile.length ? pile[((turn % pile.length) + pile.length) % pile.length] : null;
   const setSpotlight = engine.setSpotlight;
   useEffect(() => {
     setSpotlight(shown);
@@ -292,56 +325,76 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           let work: Banner | null = null;
           if (plan.length) {
             const two = plan.slice(0, 2);
+            const till = freeUntil ? `till ${timeOf(freeUntil)}` : 'for the rest of the day';
+            const tillHi = freeUntil ? `${timeOf(freeUntil)} तक` : 'आज पूरे दिन';
             work = { key: 'free', icon: 'sparkles-outline', label: 'Free time', when: freeUntil ? `till ${timeOf(freeUntil)}` : 'rest of the day',
               lines: two.map((p) => p.title),
-              sub: `${two.map((p) => p.minutes).join(' + ')} min · ${two.length === 1 ? 'fits now' : 'both fit now'}${plan.length > 2 ? `, ${plan.length - 2} more after` : ''} · tap to open`,
-              go: () => (served ? openPile(chipOf(served), served) : select('late')) };
+              sub: `${two.map((p) => p.minutes).join(' + ')} min${plan.length > 2 ? ` · ${plan.length - 2} more after` : ''}`,
+              go: () => (served ? openPile(chipOf(served), served) : select('late')),
+              speak: () => (served ? engine.readItems([served]) : speakTwin(
+                `${address}, you're free ${till}. ${two.length === 1 ? 'One task fits now' : 'Two tasks fit now'}: ${two.map((p) => p.title).join(' and ')}.`,
+                `${addressHi}, आप ${tillHi} फ़्री हैं। ${two.length === 1 ? 'एक काम' : 'दो काम'} अभी हो सकते हैं: ${two.map((p) => p.title).join(' और ')}।`)) };
           } else if (lateCount) {
             const top = [...(data?.overdue ?? [])].sort((a, b) => RANK[a.priority] - RANK[b.priority])[0];
             if (top) {
+              const more = lateCount - 1;
               work = { key: 'late', icon: 'alert-circle-outline', label: 'Overdue', when: `${lateCount} late`, lines: [top.title],
-                sub: `Due ${top.due_label}${lateCount > 1 ? ` · ${lateCount - 1} more` : ''} · I'll suggest a time when you're free`, go: () => setOpenTask(top) };
+                sub: `Due ${top.due_label}${more ? ` · ${more} more late` : ''}`, go: () => setOpenTask(top),
+                speak: () => speakTwin(`${address}, ${top.title} is late, it was due ${top.due_label}${more ? `, and ${more} more ${more === 1 ? 'is' : 'are'} late` : ''}.`,
+                  `${addressHi}, ${top.title} लेट है, ${top.due_label} तक होना था${more ? `, और ${more} और लेट हैं` : ''}।`) };
             }
           }
           let meet: Banner | null = null;
           if (next) {
-            meet = { key: 'next', icon: kindIcon[next.item.kind] ?? 'time-outline', label: soon ? 'Starting now' : 'Next up', when: timeOf(next.item.scheduled_start ?? next.item.due_at),
+            const at = timeOf(next.item.scheduled_start ?? next.item.due_at);
+            meet = { key: 'next', icon: kindIcon[next.item.kind] ?? 'time-outline', label: soon ? 'Starting now' : 'Next up', when: at,
               lines: [next.item.title], sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}${next.item.priority === 'URGENT' ? ' · urgent' : ''}`,
-              go: () => setOpenTask(next.item) };
+              go: () => setOpenTask(next.item),
+              speak: () => speakTwin(`${address}, ${soon ? 'starting now' : 'next'}: ${next.item.title}, at ${at}, ${inWords(next.start - now)}.`,
+                `${addressHi}, ${soon ? 'अभी शुरू हो रहा है' : 'अगला'}: ${next.item.title}, ${at} बजे, ${inWordsHi(next.start - now)}।`) };
           } else if (ahead) {
+            const who = ahead.assignee.type !== 'MD' && ahead.assignee.staff_name ? ` with ${ahead.assignee.staff_name}` : '';
             meet = { key: 'ahead', icon: kindIcon[ahead.kind] ?? 'people-outline', label: 'Next meeting', when: ahead.due_label, lines: [ahead.title],
-              sub: `${ahead.kind === 'CALL' ? 'Call' : 'Meeting'}${ahead.assignee.type !== 'MD' && ahead.assignee.staff_name ? ` with ${ahead.assignee.staff_name}` : ''} · nothing timed left today`, go: () => setOpenTask(ahead) };
+              sub: `${ahead.kind === 'CALL' ? 'Call' : 'Meeting'}${who} · nothing timed left today`, go: () => setOpenTask(ahead),
+              speak: () => speakTwin(`${address}, nothing timed is left today. Next ${ahead.kind === 'CALL' ? 'call' : 'meeting'}: ${ahead.title}, ${ahead.due_label}.`,
+                `${addressHi}, आज कुछ टाइम वाला बचा नहीं है। अगली ${ahead.kind === 'CALL' ? 'कॉल' : 'मीटिंग'}: ${ahead.title}, ${ahead.due_label}।`) };
           }
           let spot: Banner | null = null;
           if (shown) {
             const at = pile.findIndex((p) => p.key === shown.key) + 1;
             spot = { key: `spot-${shown.key}`, icon: CHIP_ICON[chipOf(shown)], label: `${alertLabel(shown)}${shown.from ? ` · ${shown.from}` : ''}`, when: relativeAgo(shown.fireAt),
-              lines: [shown.concealed ? 'Private reminder' : shown.title],
-              sub: `${at} of ${pile.length} waiting${pile.length > 1 ? ' · the next in 10 s' : ''} · tap to open, or say “isko …”`, go: () => openPile(chipOf(shown), shown) };
+              lines: [shown.concealed ? 'Private reminder' : shown.title], sub: `${at} of ${pile.length} waiting`,
+              go: () => openPile(chipOf(shown), shown), speak: () => engine.readItems([shown]), swipe: true };
           }
           const banners = (soon ? [meet, work, spot] : [work, meet, spot]).filter((b): b is Banner => !!b);
           if (!banners.length) {
-            banners.push({ key: 'now', icon: 'sparkles-outline', label: 'Right now', when: '',
-              lines: [data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…'],
-              sub: !data && loadError ? `${loadError} Check the internet connection, then tap here to try again.` : 'Say “Hey JARVIS” and ask for the plan, or give a task.',
-              go: () => (!data && loadError ? reload(true) : talk()) });
+            const line = data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…';
+            banners.push({ key: 'now', icon: 'sparkles-outline', label: 'Right now', when: '', lines: [line], sub: !data && loadError ? loadError : '',
+              go: () => (!data && loadError ? reload(true) : talk()),
+              speak: () => speakTwin(`${address}, ${data ? 'nothing timed is left today.' : 'I can’t reach the server right now.'}`,
+                `${addressHi}, ${data ? 'आज कुछ टाइम वाला बचा नहीं है।' : 'अभी सर्वर से बात नहीं हो पा रही।'}`) });
           }
           return banners.map((b) => (
-            <Pressable key={b.key} onPress={b.go} style={s.heroWrap}>
-              <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
-                <View style={s.heroTop}>
-                  <View style={s.heroIcon}>
-                    <Icon name={b.icon} size={16} color={colors.white} />
+            <View key={b.key} {...(b.swipe ? swipe.panHandlers : {})}>
+              <Pressable onPress={b.go} style={s.heroWrap}>
+                <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
+                  <View style={s.heroTop}>
+                    <View style={s.heroIcon}>
+                      <Icon name={b.icon} size={16} color={colors.white} />
+                    </View>
+                    <Txt variant="label" numberOfLines={1} style={{ color: 'rgba(255,255,255,0.85)', flexShrink: 1 }}>{b.label}</Txt>
+                    {b.when ? <Txt variant="caption" style={s.heroWhen}>{b.when}</Txt> : null}
+                    <Pressable onPress={() => { tick(); b.speak(); }} hitSlop={10} style={[s.heroSpeak, !b.when && { marginLeft: 'auto' }]} accessibilityLabel="Say it">
+                      <Icon name="volume-high-outline" size={15} color={colors.white} />
+                    </Pressable>
                   </View>
-                  <Txt variant="label" numberOfLines={1} style={{ color: 'rgba(255,255,255,0.85)', flexShrink: 1 }}>{b.label}</Txt>
-                  {b.when ? <Txt variant="caption" style={s.heroWhen}>{b.when}</Txt> : null}
-                </View>
-                {b.lines.map((l, i) => (
-                  <Txt key={i} variant="title" numberOfLines={1} style={{ color: colors.white, marginTop: i ? 2 : 8 }}>{l}</Txt>
-                ))}
-                <Txt variant="small" numberOfLines={2} style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{b.sub}</Txt>
-              </LinearGradient>
-            </Pressable>
+                  {b.lines.map((l, i) => (
+                    <Txt key={i} variant="title" numberOfLines={1} style={{ color: colors.white, marginTop: i ? 2 : 8 }}>{l}</Txt>
+                  ))}
+                  {b.sub ? <Txt variant="small" numberOfLines={2} style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{b.sub}</Txt> : null}
+                </LinearGradient>
+              </Pressable>
+            </View>
           ));
         })()}
 
@@ -443,6 +496,7 @@ const s = StyleSheet.create({
   heroTop: { flexDirection: 'row', alignItems: 'center' },
   heroIcon: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
   heroWhen: { marginLeft: 'auto', paddingLeft: 8, color: colors.white, fontFamily: fonts.semibold, fontSize: 13 },
+  heroSpeak: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.22)', alignItems: 'center', justifyContent: 'center', marginLeft: 10 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 24, marginBottom: 10 },
   lateChip: { flexDirection: 'row', alignItems: 'center', marginLeft: 10, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: colors.dangerSoft },
   report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 16 },
