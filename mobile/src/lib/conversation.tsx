@@ -144,7 +144,26 @@ const THE_OTHERS = /\b(baaki|baki|others?|the rest|rest|sab|sabhi|all|sare|saare
  * brain (his rule, 24 Nov 2026): "sab seen kar do", "sabhi messages ok daal do", "sab done", "sab hata do", "sab 15
  * minute baad", "sirf urgent wale", "only meetings", "approvals wale dikhao", "kitne tasks, kitni meetings?", and
  * "isko hata do / isko baad mein / isko done / ok" for the one on the banner. Never a "kaun sa?" back. */
-const ALL_WORDS = /\b(sab|sabhi|saare|sare|saari|sari|all|everything|dono|teeno)\b|सब|सभी|सारे|सारी/i;
+const ALL_WORDS = /\b(sab|sabhi|saare|sare|saari|sari|all|everything|every|dono|teeno|sab ke sab|sare ke sare|poore|pure ke pure)\b|सब|सभी|सारे|सारी|(\d+)\s*ke\s*\1\b/i;
+const APPROVE_WORDS = /\b(approve|approved|approv|manzoor|manjoor|manzur|sanction|accept)\b|मंज़ूर|मंजूर|अप्रूव|एक्सेप्ट/i;
+const DECLINE_WORDS = /\b(decline|declined|reject|rejected|mana kar|mana karo|mana kardo|approve mat|mat karo|na kar do|nahi karna)\b|मना|रिजेक्ट/i;
+/** Words that carry no name: the batch words above, plus the small words around them. */
+const NOISE = new Set(['ko', 'ka', 'ki', 'ke', 'wala', 'wali', 'wale', 'vala', 'vali', 'vale', 'kar', 'do', 'karo', 'kardo', 'kr', 'the', 'a', 'an', 'to', 'for', 'of',
+  'mere', 'mera', 'meri', 'sir', 'jarvis', 'hey', 'please', 'is', 'isko', 'ise', 'ye', 'yeh', 'this', 'that', 'it', 'mark', 'as', 'them', 'these', 'those', 'one',
+  'in', 'on', 'and', 'aur', 'ya', 'or', 'bhi', 'abhi', 'now', 'kya', 'hai', 'hain', 'h', 'me', 'mein', 'se', 'sab', 'all', 'please', 'plz', 'jo', 'wo', 'woh', 'us', 'unko']);
+/** "Nancy wali", "Pune wala", "Himanshu ka": the items of the batch those words pick out (the best match; ties together). */
+function byWords(text: string, items: EngineItem[]): EngineItem[] {
+  const tokens = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((t) => t.length >= 3 && !NOISE.has(t));
+  if (!tokens.length) return [];
+  let best = 0;
+  const scored = items.map((i) => {
+    const hay = `${i.title} ${i.from ?? ''} ${i.body}`.toLowerCase();
+    const score = tokens.filter((t) => hay.includes(t)).length;
+    best = Math.max(best, score);
+    return { i, score };
+  });
+  return best ? scored.filter((s) => s.score === best).map((s) => s.i) : [];
+}
 const THIS_WORDS = /\b(isko|ise|is|iska|ye|yeh|this|that|it|isse)\b|इसको|इसे|इसका|ये|यह/i;
 const COUNT_WORDS = /\b(kitne|kitni|kitna|how many|count|break ?up)\b|कितने|कितनी|कितना/i;
 const LATER_WORDS = /\b(baad mein|baad me|baad|later|snooze|yaad dilana|yaad dila|batana|bata dena|remind)\b|बाद में|याद दिलाना|बताना/i;
@@ -189,7 +208,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
     setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
-    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, dismissAll, readItems } = useAlertEngine();
+    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
@@ -426,10 +445,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     const urgent = URGENT_WORDS.test(text);
     const named = groups.length > 0 || urgent;
     const subset = items.filter((i) => (!groups.length || groups.includes(groupOf(i))) && (!urgent || i.priority === 'URGENT' || i.priority === 'HIGH'));
-    const bulk = ALL_WORDS.test(text) || named;
-    const thisOne = !bulk && THIS_WORDS.test(text) && !!cur;
-    const targets = thisOne && cur ? [cur] : subset;
+    const verb = LATER_WORDS.test(text) || SEEN_WORDS.test(text) || DONE_WORDS.test(text) || REMOVE_WORDS.test(text)
+      || APPROVE_WORDS.test(text) || DECLINE_WORDS.test(text) || READ_WORDS.test(text) || SHOW_WORDS.test(text);
+    // "Nancy wali approve kar do", "Pune wala done": the words pick the items out of the batch (within the pile named, if any).
+    const picked = verb ? byWords(text, subset) : [];
+    const bulk = ALL_WORDS.test(text) || (named && !picked.length);
+    const thisOne = !bulk && !picked.length && THIS_WORDS.test(text) && !!cur;
+    const chosen = picked.length ? picked : subset;
+    const targets = thisOne && cur ? [cur] : chosen;
     const n = targets.length;
+    const one = thisOne || n === 1;
     const settle = (en: string, hi: string, listenAfter = false) => {
       offerRef.current = null;
       questionRef.current = null;
@@ -468,14 +493,29 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       offerRef.current = keep;
       return true;
     }
-    if (!bulk && !thisOne) return false;
-    const them = thisOne ? 'it' : `all ${n}`;
+    if (!bulk && !thisOne && !picked.length) return false;
+    const them = one ? 'it' : picked.length ? `those ${n}` : `all ${n}`;
+    if (DECLINE_WORDS.test(text) || APPROVE_WORDS.test(text)) {
+      // "20 ke 20 approve kar do", "sab approvals decline", "Nancy wali approve": every approval or request among them, at once.
+      const yes = !DECLINE_WORDS.test(text);
+      const eligible = targets.filter((i) => i.question?.kind === 'approve' || (i.alertKind === 'NEW_REQUEST' && !!i.requestId));
+      if (!eligible.length) {
+        settle(one ? 'That is not an approval.' : 'None of those is an approval.', one ? 'ये कोई मंज़ूरी नहीं है।' : 'उनमें कोई मंज़ूरी नहीं है।', true);
+        return true;
+      }
+      const single = eligible.length === 1;
+      void approveAll(eligible, yes).then((k) => settle(
+        yes ? (single ? 'Approved.' : `Approved ${k}.`) : (single ? 'Declined.' : `Declined ${k}.`),
+        yes ? (single ? 'मंज़ूर कर दिया।' : `${k} मंज़ूर कर दिए।`) : (single ? 'मना कर दिया।' : `${k} मना कर दिए।`),
+      ));
+      return true;
+    }
     if (LATER_WORDS.test(text)) {
       if (!n) { none(); return true; }
       const mins = minutesIn(text);
       void (async () => {
         let back: { label: string; labelHi: string } | null = null;
-        if (!named && !thisOne) back = await snoozeAll(mins);
+        if (!named && !thisOne && !picked.length) back = await snoozeAll(mins);
         else {
           for (const item of targets) {
             const r = await snooze(item, mins);
@@ -490,31 +530,31 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
     if (SEEN_WORDS.test(text)) {
       if (!n) { none(); return true; }
-      void seenAll(targets).then((k) => settle(thisOne ? 'Seen.' : `Done, ${k} marked seen.`, thisOne ? 'देख लिया।' : `हो गया, ${k} देख लिए।`));
+      void seenAll(targets).then((k) => settle(one ? 'Seen.' : `Done, ${k} marked seen.`, one ? 'देख लिया।' : `हो गया, ${k} देख लिए।`));
       return true;
     }
     if (DONE_WORDS.test(text)) {
       if (!n) { none(); return true; }
       void completeAll(targets).then((k) => settle(
-        thisOne ? (k ? 'Marked done.' : 'Okay, cleared.') : `Done: ${k} marked done, the rest cleared.`,
-        thisOne ? (k ? 'पूरा मार्क कर दिया।' : 'ठीक है, हटा दिया।') : `हो गया: ${k} पूरे मार्क किए, बाकी हटा दिए।`,
+        one ? (k ? 'Marked done.' : 'Okay, cleared.') : `Done: ${k} marked done, the rest cleared.`,
+        one ? (k ? 'पूरा मार्क कर दिया।' : 'ठीक है, हटा दिया।') : `हो गया: ${k} पूरे मार्क किए, बाकी हटा दिए।`,
       ));
       return true;
     }
     if (REMOVE_WORDS.test(text)) {
       if (!n) { none(); return true; }
       void dismissAll(targets).then(() => settle(
-        thisOne ? "Removed; it's still on your list." : `Cleared ${n} from the screen; they're still on your lists.`,
-        thisOne ? 'हटा दिया; लिस्ट में है।' : `${n} स्क्रीन से हटा दिए; लिस्ट में हैं।`,
+        one ? "Removed; it's still on your list." : `Cleared ${n} from the screen; they're still on your lists.`,
+        one ? 'हटा दिया; लिस्ट में है।' : `${n} स्क्रीन से हटा दिए; लिस्ट में हैं।`,
       ));
       return true;
     }
     if (UNREAD_WORDS.test(text)) {
       declineOffer();
-      settle(thisOne ? 'Okay, it stays.' : 'Okay, they stay unread on your list.', 'ठीक है, वैसे ही रहेंगे।');
+      settle(one ? 'Okay, it stays.' : 'Okay, they stay unread on your list.', 'ठीक है, वैसे ही रहेंगे।');
       return true;
     }
-    if (!thisOne && !named && SHOW_WORDS.test(text)) {
+    if (!thisOne && !named && !picked.length && SHOW_WORDS.test(text)) {
       // "Sab dikhao" / "show all": laid out as cards with their buttons, the count said, then JARVIS listens.
       const c = split();
       setAllVisible(true);
@@ -522,12 +562,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return true;
     }
     if (!thisOne && (READ_WORDS.test(text) || SHOW_WORDS.test(text) || ONLY_WORDS.test(text) || (named && text.trim().split(/\s+/).length <= 3))) {
-      // "Sirf urgent wale", "only meetings", "approvals wale dikhao", "sab padho": those, one at a time, each with its question.
-      if (!subset.length) { none(); return true; }
+      // "Sirf urgent wale", "only meetings", "approvals wale dikhao", "Nancy wali padho", "sab padho": those, one at a time, each with its question.
+      if (!chosen.length) { none(); return true; }
       offerRef.current = null;
       questionRef.current = null;
       silenceRef.current = 0;
-      readItems(subset);
+      readItems(chosen);
       return true;
     }
     return false;

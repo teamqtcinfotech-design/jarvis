@@ -360,6 +360,20 @@ _OWN_WORD = re.compile(r"\b(apna|apne|apni|khud|own|personal|niji)\b|अपन�
 _PEOPLE_LIST = re.compile(r"\b(staff|team|employees?|log|logon|members?)\b[^.?!]{0,30}\b(list|naam|names?|kaun kaun|kaun hai|kaun kaun hai|members?|directory)\b"
                           r"|\b(list|names?|directory) of (?:my |the |our )?(staff|team|employees|people)\b|\b(staff|team) (?:ki |ka )?list\b"
                           r"|स्टाफ़ (?:की |का )?लिस्ट|स्टाफ (?:की |का )?लिस्ट|टीम (?:की |का )?लिस्ट|कौन कौन", re.IGNORECASE)
+# "Kitne task hain?": a count was asked for, so the answer is the number alone (the rest only when asked).
+_COUNT_Q = re.compile(r"\b(kitne|kitni|kitna|how many|count)\b|कितने|कितनी|कितना", re.IGNORECASE)
+_COUNT_VIEWS = {"tasks", "today", "pending", "upcoming", "late", "official", "private", "pa", "staff", "person", "done", "week",
+                "nodate", "section", "department"}
+
+
+def _first_clause(line: str, hindi: bool = False) -> str:
+    """"Sir, today you have 20 tasks: 10 done, 10 open. First: X" -> "Sir, today you have 20 tasks." (the number was asked)."""
+    if not line:
+        return line
+    head = re.split(r"[:;]", line, maxsplit=1)[0].rstrip(" .।")
+    return head + ("।" if hindi else ".")
+
+
 _WORK_WORDS = re.compile(r"\b(tasks?|kaam|work|diya|diye|di|pending|late|overdue|assign\w*|progress|performance|busy|free|load)\b|टास्क|काम|पेंडिंग", re.IGNORECASE)
 # "Dono", "both", "sab", "all of them": the answer to "which one?" is every one offered.
 _ALL_OF_THEM = re.compile(r"\b(dono|donon|dono ko|dono hi|both|both of them|sab|sabhi|sab ko|saare|sare|all|all of them|teeno|teenon|charo|charon)\b"
@@ -2993,6 +3007,11 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             elif view and view.get("summary"):
                 # The sentence comes from the real numbers, never from the model's own counting.
                 draft["spoken_reply"], summary_hi = view["summary"], view.get("summary_hi", "")
+                if _COUNT_Q.search(full_text) and kind in _COUNT_VIEWS and view.get("rows"):
+                    # "Aaj ke kitne task hain?": the number alone ("today you have 20 tasks."); the split and the first
+                    # item are said only when asked for (his rule: what is asked, only that).
+                    view["summary"] = draft["spoken_reply"] = _first_clause(draft["spoken_reply"])
+                    view["summary_hi"] = summary_hi = _first_clause(summary_hi, hindi=True)
             if view:
                 names_private = any(r.get("private") for r in (view.get("rows") or [])) or any(
                     t.get("private") for t in (view.get("timeline") or []))

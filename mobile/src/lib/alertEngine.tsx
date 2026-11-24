@@ -191,6 +191,8 @@ interface EngineValue {
    *  off the screen (they stay on the lists), read these ones one at a time. Each resolves to how many it touched. */
   seenAll: (items: EngineItem[]) => Promise<number>;
   completeAll: (items: EngineItem[]) => Promise<number>;
+  /** "Sab approve kar do" / "20 ke 20 decline": every approval or request among these decided at once; the rest untouched. */
+  approveAll: (items: EngineItem[], yes: boolean) => Promise<number>;
   dismissAll: (items: EngineItem[]) => Promise<number>;
   readItems: (items: EngineItem[]) => void;
   /** Every unseen server message (news, decisions, nudges), newest first, for the Updates screen. */
@@ -1264,6 +1266,31 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     },
     [acknowledge, settleBatch],
   );
+  const approveAll = useCallback(
+    async (items: EngineItem[], yes: boolean) => {
+      settleBatch();
+      let n = 0;
+      for (const item of items) {
+        let ok = false;
+        if (item.question?.kind === 'approve' && item.question.task) {
+          ok = await api(`/shared-tasks/${item.question.task}/approve/`, { method: 'POST', body: { approve: yes }, idempotencyKey: newIdempotencyKey() })
+            .then(() => true).catch(() => false);
+        } else if (item.alertKind === 'NEW_REQUEST' && item.requestId) {
+          ok = await api(`/requests/${item.requestId}/${yes ? 'accept' : 'decline'}/`, { method: 'POST', body: {}, idempotencyKey: newIdempotencyKey() })
+            .then(() => true).catch(() => false);
+        } else {
+          continue; // not an approval: left as it is
+        }
+        if (ok) {
+          n += 1;
+          await acknowledge(item);
+        }
+      }
+      dataChanged.emit();
+      return n;
+    },
+    [acknowledge, settleBatch],
+  );
   const readItems = useCallback(
     (items: EngineItem[]) => {
       settleBatch();
@@ -1462,6 +1489,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     offerBatch,
     seenAll,
     completeAll,
+    approveAll,
     dismissAll,
     readItems,
     complete,

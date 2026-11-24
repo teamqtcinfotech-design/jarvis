@@ -112,6 +112,21 @@ class ReplyTests(BaseCase):
         d = self.interpret("uske tasks?", _cmd(intent="query", view_kind="tasks"))
         self.assertIn("GST", d["spoken_reply"])
 
+    def test_how_many_is_answered_with_the_number_alone(self):
+        today = tu.today_local()
+        for title in ("Renew the trade licence", "Call the insurance agent", "Sign the Pune agreement"):
+            services.create_private_task(self.md, {"title": title, "due_date": today})
+        d = self.interpret("aaj mere kitne task hain", _cmd(intent="query", view_kind="today", view_types=["TASK", "PAYMENT", "FOLLOW_UP"]))
+        reply = d["spoken_reply"]
+        self.assertNotIn(":", reply)
+        self.assertNotIn("First", reply)
+        for title in ("Renew the trade licence", "Call the insurance agent"):
+            self.assertNotIn(title, reply)
+        self.assertRegex(reply, r"\b3\b")
+        # Asked for the list, not the count: the usual answer, with the first item named.
+        d = self.interpret("aaj ke tasks dikhao", _cmd(intent="query", view_kind="today", view_types=["TASK", "PAYMENT", "FOLLOW_UP"]))
+        self.assertIn(":", d["spoken_reply"])
+
     def test_the_live_voice_line_says_nothing_of_its_own(self):
         text = livevoice.instructions_for(self.md, services.ai_context(self.md))
         self.assertIn("Before a tool call say NOTHING", text)
