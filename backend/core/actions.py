@@ -100,7 +100,6 @@ def run_item(user: User, p: dict) -> dict:
     """Do one card item. Returns {"en", "hi", "undo": [refs], "saved": True}; raises ServiceError / ObjectDoesNotExist.
     Only the actions of the team (and the speaker's own items) are done here; the rest stay with their callers."""
     action = LEGACY.get(p.get("action"), p.get("action"))
-    address, address_hi = services.address_of(user), services.address_hi_of(user)
     due_en = p.get("due_label") or ""
     from .assistant import _due_label_hi  # noqa: PLC0415 — assistant imports this module
     due_hi = _due_label_hi(p.get("due_date") or "", p.get("due_time") or "")
@@ -111,13 +110,13 @@ def run_item(user: User, p: dict) -> dict:
     if action == "private_task":
         task = services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
         when = f" I'll remind you {due_en}." if due_en else ""
-        return {"en": f"Saved, {address}.{when}{rep_en}", "hi": f"सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
+        return {"en": f"Saved.{when}{rep_en}", "hi": "सेव हो गया।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
                 "undo": [{"type": "private", "id": str(task.id)}], "title": task.title}
     if action == "own_task":
         task = services.create_own_task(user, data)
         when = f" I'll remind you {due_en}." if due_en else ""
-        return {"en": f"Saved in your own work, {address}.{when}{rep_en}",
-                "hi": f"आपके अपने काम में सेव हो गया, {address_hi}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
+        return {"en": f"Saved in your own work.{when}{rep_en}",
+                "hi": "आपके अपने काम में सेव हो गया।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
                 "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title}
     if action == "md_request":
         # Work for the MD from anyone else: straight onto his list (ringing until he sees it), like work for anyone.
@@ -128,12 +127,12 @@ def run_item(user: User, p: dict) -> dict:
         sir, sir_hi, he = services.md_address(), services.md_address_hi(), services.md_pronouns()[0]
         if task.kind == "APPROVAL":
             amt = services.rupees(task.amount)
-            return {"en": f"Done, {address}: I've asked {sir}'s approval" + (f" for {amt}" if amt else "") + f". I'll tell you what {he} decides.",
-                    "hi": f"हो गया, {address_hi}: {sir_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।",
+            return {"en": f"I've asked {sir}'s approval" + (f" for {amt}" if amt else "") + f". I'll tell you what {he} decides.",
+                    "hi": f"{sir_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।",
                     "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [md.spoken_name]}
         when = f" for {due_en}" if due_en else ""
-        return {"en": f"Done, {address}: it's on {sir}'s list{when}.{rep_en} I'll tell you when {he} has seen it, and when it's done.",
-                "hi": f"हो गया, {address_hi}: {sir_hi} की लिस्ट में डाल दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} देख लेने पर और पूरा होने पर बताऊँगा।",
+        return {"en": f"It's on {sir}'s list{when}.{rep_en} I'll tell you when {he} has seen it, and when it's done.",
+                "hi": f"{sir_hi} की लिस्ट में डाल दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} देख लेने पर और पूरा होने पर बताऊँगा।",
                 "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [md.spoken_name]}
     if action in {"person_task", "person_meeting"}:
         people = _people_of(user, p)
@@ -154,16 +153,16 @@ def run_item(user: User, p: dict) -> dict:
             names.append(person)
         who, who_hi = services.names_phrase(names), services.names_phrase(names, hindi=True)
         if meeting:
-            en = f"Saved, {address}. I've told {who}, and I'll remind you both.{rep_en}"
-            hi = f"सेव हो गया, {address_hi}। {who_hi} को बता दिया है, और आप दोनों को याद दिला दूँगा।{rep_hi}"
+            en = f"Saved. I've told {who}, and I'll remind you both.{rep_en}"
+            hi = f"सेव हो गया। {who_hi} को बता दिया है, और आप दोनों को याद दिला दूँगा।{rep_hi}"
         elif data["kind"] == "APPROVAL":
             amt = services.rupees(services.clean_amount(data.get("amount")))
-            en = f"Done, {address}: I've asked {who}'s approval" + (f" for {amt}" if amt else "") + ". I'll tell you what they decide."
-            hi = f"हो गया, {address_hi}: {who_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।"
+            en = f"I've asked {who}'s approval" + (f" for {amt}" if amt else "") + ". I'll tell you what they decide."
+            hi = f"{who_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।"
         else:
             when = f" for {due_en}" if due_en else ""
-            en = f"Done, {address}: given to {who}{when}.{rep_en} I'll tell you when it's done."
-            hi = f"हो गया, {address_hi}: {who_hi} को दे दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} पूरा होने पर बताऊँगा।"
+            en = f"Given to {who}{when}.{rep_en} I'll tell you when it's done."
+            hi = f"{who_hi} को दे दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} पूरा होने पर बताऊँगा।"
         return {"en": en, "hi": hi, "undo": refs, "title": p.get("title", ""), "people": [u.spoken_name for u in names]}
     if action == "arrange_request":
         # "Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de": Nikki gets the ask (ringing until seen); the
@@ -178,10 +177,10 @@ def run_item(user: User, p: dict) -> dict:
         meeting = task.arrange.get("about_title") or "the meeting"
         was, was_hi = task.arrange.get("from_label") or "", task.arrange.get("from_label_hi") or ""
         to, to_hi = task.arrange.get("to_label") or "", task.arrange.get("to_label_hi") or ""
-        en = (f"Done, {address}: I've asked {who} to move your {meeting}" + (f" ({was})" if was else "") + (f" to {to}" if to else "")
+        en = (f"I've asked {who} to move your {meeting}" + (f" ({was})" if was else "") + (f" to {to}" if to else "")
               + ". It stays as it is until " + ("she" if services.gender_of(people[0]) == "female" else "he" if services.gender_of(people[0]) == "male" else "they")
               + " confirm" + ("s" if services.gender_of(people[0]) in ("female", "male") else "") + "; I'll tell you then.")
-        hi = (f"हो गया, {address_hi}: {who} को कहा है कि आपकी {meeting}" + (f" ({was_hi})" if was_hi else "") + (f" {to_hi} पर कर दे" if to_hi else "")
+        hi = (f"{who} को कहा है कि आपकी {meeting}" + (f" ({was_hi})" if was_hi else "") + (f" {to_hi} पर कर दे" if to_hi else "")
               + "। कन्फ़र्म होने तक वो वैसी ही रहेगी; तब बताऊँगा।")
         return {"en": en, "hi": hi, "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [who]}
     if action == "organise":
@@ -198,10 +197,10 @@ def run_item(user: User, p: dict) -> dict:
                                           priority=p.get("priority") if p.get("priority") in {"URGENT", "HIGH", "NORMAL", "LOW"} else "NORMAL")
         who, who_hi = services.names_phrase(people), services.names_phrase(people, hindi=True)
         if when:
-            en = f"Okay {address}, I'll send it to {who} at {tu.fmt_time(when)}."
-            hi = f"ठीक है {address_hi}, {tu.fmt_time_hi(when)} बजे {who_hi} को भेज दूँगा।"
+            en = f"I'll send it to {who} at {tu.fmt_time(when)}."
+            hi = f"{tu.fmt_time_hi(when)} बजे {who_hi} को भेज दूँगा।"
         else:
-            en, hi = f"Sent to {who}, {address}.", f"{who_hi} को भेज दिया, {address_hi}।"
+            en, hi = f"Sent to {who}.", f"{who_hi} को भेज दिया।"
         return {"en": en, "hi": hi, "undo": [{"type": "alerts", "ids": [str(a.id) for a in alerts]}],
                 "title": text[:80], "people": [u.spoken_name for u in people]}
     raise ServiceError("invalid", "I can't do that here.", 422)
@@ -232,15 +231,14 @@ def run_card(user: User, card: dict) -> dict:
         saved += 1
         refs += r["undo"]
         lines.append(r)
-    address, address_hi = services.address_of(user), services.address_hi_of(user)
     if len(items) == 1 and lines:
         en, hi = lines[0]["en"], lines[0]["hi"]
     elif not failed:
-        en, hi = f"Done, {address}: all {saved} saved.", f"हो गया, {address_hi}: सभी {saved} सेव हो गए।"
+        en, hi = f"All {saved} saved.", f"सभी {saved} सेव हो गए।"
     else:
         names = "; ".join(f"{t} ({m.rstrip('.')})" for t, m in failed)
-        en = f"Saved {saved} of {len(items)}, {address}. Could not save: {names}."
-        hi = f"{len(items)} में से {saved} सेव हुए, {address_hi}। ये नहीं हो पाए: {names}।"
+        en = f"Saved {saved} of {len(items)}. Could not save: {names}."
+        hi = f"{len(items)} में से {saved} सेव हुए। ये नहीं हो पाए: {names}।"
     if refs:
         remember_done(user, refs, card.get("title") or "")
     return {"en": en, "hi": hi, "saved": saved, "failed": failed, "undo": refs}

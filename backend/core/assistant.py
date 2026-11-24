@@ -763,6 +763,7 @@ _BOOKABLE = {"private_task", "own_task", "person_meeting", "pa_self_task", "pa_m
 # again: the bookable ones, and work for the MD (it sits in his diary now and would otherwise clash with itself).
 _REPEATABLE = _BOOKABLE | {"md_request"}
 DUPLICATE_WINDOW = timedelta(minutes=3)
+ECHO_SECONDS = 20  # the same sentence again within this long is the pipeline repeating itself, not the person
 
 
 def _just_saved(user: User, action: str, title: str, when: datetime | None, assignees: list | None = None) -> bool:
@@ -906,8 +907,8 @@ def _book_and_push(user: User, draft: dict, card: dict, moves: list, address: st
         same_day = date.fromisoformat(d) == day
         moved_en.append(f"{m['title']} moved to {tu.fmt_time(at) if same_day else _due_label(d, t)}")
         moved_hi.append(f"{m['title']} अब {tu.fmt_time_hi(at) if same_day else _due_label_hi(d, t)}")
-    en = f"Done, {address}: {booked['title']} at {tu.fmt_time(booked['start'])}."
-    hi = f"हो गया, {address_hi}: {booked['title']} {tu.fmt_time_hi(booked['start'])}।"
+    en = f"Booked: {booked['title']} at {tu.fmt_time(booked['start'])}."
+    hi = f"बुक हो गई: {booked['title']} {tu.fmt_time_hi(booked['start'])}।"
     if moved_en:
         en += " " + "; ".join(moved_en) + "."
         hi += " " + "; ".join(moved_hi) + "।"
@@ -1029,8 +1030,8 @@ def _book_card(user: User, draft: dict, pending: dict, card: dict, address: str,
     d = tu.to_local(booked["start"])
     when_en = _due_label(d.date().isoformat(), d.strftime("%H:%M"))
     when_hi = _due_label_hi(d.date().isoformat(), d.strftime("%H:%M"))
-    en = f"Done, {address}: {booked['title']}, {when_en}, {tu.minutes_phrase(booked['minutes'])}.{note_en}"
-    hi = f"हो गया, {address_hi}: {booked['title']}, {when_hi}, {tu.minutes_phrase_hi(booked['minutes'])} की।{note_hi}"
+    en = f"Booked: {booked['title']}, {when_en}, {tu.minutes_phrase(booked['minutes'])}.{note_en}"
+    hi = f"बुक हो गई: {booked['title']}, {when_hi}, {tu.minutes_phrase_hi(booked['minutes'])} की।{note_hi}"
     return _after_card(user, draft, pending, address, en, hi)
 
 
@@ -1090,7 +1091,7 @@ def _move_to_free_slot(user: User, draft: dict, item: dict, address: str, addres
     actions.remember_done(user, [{"type": "moved", "scope": scope, "id": str(task.id), "before": before}], task.title)
     draft["targets"], draft["target"], draft["booked"], draft["card_done"], draft["undo"] = [item], item, True, True, True
     when_en, when_hi = _due_label(sug["due_date"], sug["due_time"]), _due_label_hi(sug["due_date"], sug["due_time"])
-    _say(draft, f"Done, {address}: {task.title} moved to {when_en}.", f"हो गया, {address_hi}: {task.title} अब {when_hi}।")
+    _say(draft, f"{task.title} moved to {when_en}.", f"{task.title} अब {when_hi}।")
 
 
 def _clash_subject(text: str, pending: dict, sched: dict) -> str:
@@ -1143,7 +1144,6 @@ def _settle_clash(user: User, cmd: dict, text: str, pending: dict, sched: dict, 
     """His answer to "X is already there; shall I ...?" is carried out here and now: the new one is booked (where
     proposed, where he said, or shortened), or the other one moves or goes, and whatever else waited follows. The
     phone and the closed-app voice both get the finished line."""
-    address_hi = services.address_hi_of(user)
     lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
     options = sched.get("options") if isinstance(sched.get("options"), dict) else {}
     other = (sched.get("clashes") or [{}])[0]
@@ -1159,7 +1159,7 @@ def _settle_clash(user: User, cmd: dict, text: str, pending: dict, sched: dict, 
     way, extra = _clash_way(text, cmd, pending, sched)
     title = pending.get("title") or "it"
     if way == "drop_new":
-        return _after_card(user, draft, pending, address, f"Okay {address}, dropped {title}.", f"ठीक है {address_hi}, {title} छोड़ दिया।", settled=False)
+        return _after_card(user, draft, pending, address, f"Dropped {title}.", f"{title} छोड़ दिया।", settled=False)
     if way == "fit":
         mins = (options.get("fit") or {}).get("duration_minutes") if isinstance(options.get("fit"), dict) else None
         if not (isinstance(mins, int) and 5 <= mins <= 1440):
@@ -1974,7 +1974,10 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         cmd = {**cmd, "intent": "unknown", "title": "", "spoken_reply": "", "spoken_reply_hi": "", "needs_clarification": False,
                "clarification_question": "", "more_items": [], "kind": "TASK"}
     if cmd.get("intent") in {"confirm_pending", "cancel_pending"} and not awaiting:
-        cmd["intent"] = "unknown"  # nothing is waiting to be confirmed
+        if cmd["intent"] == "cancel_pending" and choices and choices.get("items"):
+            cmd["_drop_choices"] = True  # "nahi" / "rehne do" to "which one?": the question is withdrawn, nothing is touched
+        else:
+            cmd["intent"] = "unknown"  # nothing is waiting to be confirmed
     if choices and choices.get("items") and cmd.get("target_refs") and cmd.get("intent") in {"unknown", "query", "small_talk"}:
         cmd["intent"] = choices["intent"]  # the model picked items but forgot to carry the pending intent
     if choices and choices.get("items") and not cmd.get("target_refs") and _ALL_OF_THEM.search(text) and len(text.split()) <= 5 \
@@ -2113,10 +2116,16 @@ def _auto_save(user: User, draft: dict, cmd: dict, full_text: str) -> None:
         if _just_saved(user, it["action"], key, when, who):
             continue
         fresh.append(it)
-    address, address_hi = services.address_of(user), services.address_hi_of(user)
     lang = draft.get("reply_language") if draft.get("reply_language") in {"en", "hi"} else "en"
     if not fresh:
-        en, hi = f"{address}, that's already done.", f"{address_hi}, ये पहले ही हो चुका है।"
+        # The same sentence a second time within moments (the live line calling the form again, the phone retrying a
+        # slow answer): it was done once, and nothing is said twice. Said again after a while: told it is already done.
+        last = actions.last_done(user)
+        try:
+            echo = bool(last) and (timezone.now() - datetime.fromisoformat(str(last["at"]))).total_seconds() <= ECHO_SECONDS
+        except (TypeError, ValueError):
+            echo = False
+        en, hi = ("", "") if echo else ("That's already done.", "ये पहले ही हो चुका है।")
         result = {"saved": 0, "failed": []}
     else:
         card = {**fresh[0], "batch": fresh[1:]}
@@ -2270,8 +2279,8 @@ def _hand_over(user: User, draft: dict, person: User, item: dict, address: str, 
         return
     draft["booked"], draft["settled"] = True, {"ref_type": "shared_task", "ref_id": str(task.id)}
     told = old.spoken_name if old is not None and old.id != user.id and old.is_active else ""
-    _say(draft, f"Done, {address}: {task.title} is with {person.spoken_name} now." + (f" {told} has been told." if told else ""),
-         f"हो गया, {address_hi}: {task.title} अब {person.spoken_name} के पास है।" + (f" {told} को बता दिया।" if told else ""))
+    _say(draft, f"{task.title} is with {person.spoken_name} now." + (f" {told} has been told." if told else ""),
+         f"{task.title} अब {person.spoken_name} के पास है।" + (f" {told} को बता दिया।" if told else ""))
 
 
 def _steps_of(raw) -> list[str]:
@@ -2356,7 +2365,7 @@ def _act_on_item(user: User, cmd: dict, intent: str, draft: dict, ctx: dict, on_
                 return
             services.add_task_note(user, task.id, text)
             told = services.names_phrase([u for u in (task.created_by, task.assignee_user) if u is not None and u.id != user.id and u.is_active])
-            _say(draft, f"Noted, {address}." + (f" I've told {told}." if told else ""), f"नोट कर लिया, {address_hi}।" + (f" {told} को बता दिया।" if told else ""))
+            _say(draft, "Noted." + (f" I've told {told}." if told else ""), "नोट कर लिया।" + (f" {told} को बता दिया।" if told else ""))
             draft["booked"] = True
         elif intent == "tick_step":
             idx = services.find_step(task, words or full_text)
@@ -2390,8 +2399,8 @@ def _act_on_item(user: User, cmd: dict, intent: str, draft: dict, ctx: dict, on_
                     out = services.mark_seen(user, alert, tell=True)
                     told = services.giver_words(out.recipient)[0] if out is not None else told
                 draft["booked"], draft["settled"] = True, {"ref_type": "shared_task", "ref_id": str(task.id)}
-                _say(draft, f"Okay {address}, noted: {task.title}." + (f" I've told {told} you've seen it." if told else ""),
-                     f"ठीक है {address_hi}, नोट कर लिया: {task.title}।" + (f" {told} को बता दिया कि आपने देख लिया।" if told else ""))
+                _say(draft, f"Noted: {task.title}." + (f" I've told {told} you've seen it." if told else ""),
+                     f"नोट कर लिया: {task.title}।" + (f" {told} को बता दिया कि आपने देख लिया।" if told else ""))
                 return
             if not isinstance(task, SharedTask) or task.kind != Kind.APPROVAL:
                 _say(draft, f"{address}, '{task.title}' is not an approval.", f"{address_hi}, '{task.title}' कोई मंज़ूरी नहीं है।")
@@ -2404,11 +2413,11 @@ def _act_on_item(user: User, cmd: dict, intent: str, draft: dict, ctx: dict, on_
             asker_hi = services.giver_words(task.created_by)[1] if asker else ""
             draft["booked"] = True
             if approve:
-                _say(draft, f"Approved, {address}: {task.title}" + (f", {amt}" if amt else "") + "." + (f" {asker} has been told." if asker else ""),
-                     f"मंज़ूर, {address_hi}: {task.title}" + (f", {amt}" if amt else "") + "।" + (f" {asker_hi} को बता दिया।" if asker_hi else ""))
+                _say(draft, f"Approved: {task.title}" + (f", {amt}" if amt else "") + "." + (f" {asker} has been told." if asker else ""),
+                     f"मंज़ूर: {task.title}" + (f", {amt}" if amt else "") + "।" + (f" {asker_hi} को बता दिया।" if asker_hi else ""))
             else:
-                _say(draft, f"Declined, {address}: {task.title}." + (f" {asker} has been told." if asker else ""),
-                     f"नामंज़ूर, {address_hi}: {task.title}।" + (f" {asker_hi} को बता दिया।" if asker_hi else ""))
+                _say(draft, f"Declined: {task.title}." + (f" {asker} has been told." if asker else ""),
+                     f"नामंज़ूर: {task.title}।" + (f" {asker_hi} को बता दिया।" if asker_hi else ""))
     except services.ServiceError as err:
         _say(draft, f"Sorry {address}, {err.message}", f"माफ़ कीजिए {address_hi}, {err.message}")
 
@@ -2648,18 +2657,18 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             draft["action"], draft["card_done"], draft["booked"], draft["undo"] = "answer", True, bool(done), bool(done)
             names = _named(done, 5)
             if done and not failed and not requests:
-                _say(draft, (f"Deleted {names}, {address}. It's cancelled, not erased: say undo to bring it back." if len(done) == 1
-                             else f"Deleted {len(done)}, {address}: {names}. Say undo to bring them back."),
-                     (f"{names} हटा दिया, {address_hi}। कैंसल हुआ है, मिटा नहीं: वापस लाने के लिए बोलिए undo।" if len(done) == 1
-                      else f"{len(done)} हटा दिए, {address_hi}: {names}। वापस लाने के लिए बोलिए undo।"))
+                _say(draft, (f"Deleted {names}. It's cancelled, not erased: say undo to bring it back." if len(done) == 1
+                             else f"Deleted {len(done)}: {names}. Say undo to bring them back."),
+                     (f"{names} हटा दिया। कैंसल हुआ है, मिटा नहीं: वापस लाने के लिए बोलिए undo।" if len(done) == 1
+                      else f"{len(done)} हटा दिए: {names}। वापस लाने के लिए बोलिए undo।"))
             elif requests and not done:
                 _say(draft, f"{address}, that is {sir}'s own work: I've asked {sir} to cancel it.",
                      f"{address_hi}, ये {sir_hi} का अपना काम है: {sir_hi} से कैंसल करने को कहा है।")
             else:
                 left = _named(failed, 5)
-                _say(draft, (f"Deleted {names}, {address}." if done else f"{address}, ") + (f" Could not delete {left}: it has changed, try again." if failed else "")
-                     + (f" {requests} asked of {sir}." if requests else ""),
-                     (f"{names} हटा दिया, {address_hi}।" if done else f"{address_hi}, ") + (f" {left} नहीं हटा: वो बदल गया है, फिर कहिए।" if failed else ""))
+                _say(draft, ((f"Deleted {names}." if done else "") + (f" Could not delete {left}: it has changed, try again." if failed else "")
+                             + (f" {requests} asked of {sir}." if requests else "")).strip(),
+                     ((f"{names} हटा दिया।" if done else "") + (f" {left} नहीं हटा: वो बदल गया है, फिर कहिए।" if failed else "")).strip())
         elif chosen or len(matches) == 1:
             draft["targets"] = matches
             draft["target"] = matches[0]
@@ -2738,7 +2747,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             draft["setting_patch"] = clean
             if not draft["spoken_reply"]:
                 what = ", ".join(services.describe_pref(k, v) for k, v in clean.items())
-                _say(draft, f"Done {address}: {what}.", f"हो गया {address_hi}: {what}।")
+                _say(draft, f"Done: {what}.", f"हो गया: {what}।")
         except services.ServiceError as err:
             _ask(draft, f"{address}, {err.message}")
     elif intent == "organise":
@@ -2810,9 +2819,11 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             # "Nahi" to the clash question drops the one being added; the rest said with it, and anything that came in
             # while it waited, still goes through (the next clash, if any, is asked now).
             title = card.get("title") or "it"
-            return _after_card(user, draft, card, address, f"Okay {address}, dropped {title}.", f"ठीक है {address_hi}, {title} छोड़ दिया।", settled=False)
-        if not draft["spoken_reply"]:
-            _say(draft, f"Okay {address}, cancelled. Nothing was saved.", f"ठीक है {address_hi}, कैंसल कर दिया। कुछ सेव नहीं हुआ।")
+            return _after_card(user, draft, card, address, f"Dropped {title}.", f"{title} छोड़ दिया।", settled=False)
+        if cmd.get("_drop_choices"):
+            _say(draft, "Okay, leaving it.", "ठीक है, रहने देता हूँ।")  # "nahi" to "which one?": the question is withdrawn
+        elif not draft["spoken_reply"]:
+            _say(draft, "Cancelled. Nothing was saved.", "कैंसल कर दिया। कुछ सेव नहीं हुआ।")
     elif intent == "snooze":
         # "Later": the reminder or alert JARVIS just spoke comes back when he said: a duration, a moment, or his
         # usual snooze. The phone (or the background conversation) applies it to the thing that was asked about.
@@ -2834,8 +2845,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         if until <= now_local:
             until += timedelta(days=1)  # "4 baje" said at 5 PM means tomorrow at 4
         draft["snooze_until"] = until.replace(microsecond=0).isoformat()
-        _say(draft, f"Okay {address}, I'll remind you {services.moment_label(until)}.",
-             f"ठीक है {address_hi}, {services.moment_label_hi(until)} याद दिला दूँगा।")
+        _say(draft, f"I'll remind you {services.moment_label(until)}.",
+             f"{services.moment_label_hi(until)} याद दिला दूँगा।")
     elif intent == "dismiss_alert":
         draft["action"] = "dismiss"  # the phone clears the alert on screen
         draft["needs_clarification"] = False
@@ -3053,7 +3064,9 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             lead_hi = f" {tu.minutes_phrase_hi(lead)} पहले याद दिला दूँगा।" if told else ""
             _say(draft, f"{address}, {draft['title']}, {draft['due_label']}, {tu.minutes_phrase(mins)}.{lead_en} Shall I save it?",
                  f"{address_hi}, {draft['title']}, {due_hi}, {tu.minutes_phrase_hi(mins)} की।{lead_hi} सेव कर दूँ?")
-        elif draft["action"] != "team_delegation" and (not draft["spoken_reply"] or draft["engine"] == "rules"):
+        elif draft["action"] != "team_delegation" and (not draft["spoken_reply"] or draft["engine"] == "rules" or "?" not in draft["spoken_reply"]):
+            # A card that waits for a yes must ASK. A model line that states instead ("Kar diya Sir") would call it done
+            # before it is: the server's own question stands in.
             what = {
                 "private_task": "Personal task",
                 "md_request": f"Task for {services.md_address()}",
@@ -3124,11 +3137,11 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             draft["action"], draft["reminder_saved"] = "answer", True
             thing = "" if draft["title"] == "Reminder" else f": {draft['title']}"
             if exact_at:
-                _say(draft, f"Okay {address}, I'll remind you in {tu.minutes_phrase(due_in)}{thing}.",
-                     f"ठीक है {address_hi}, {tu.minutes_phrase_hi(due_in)} में याद दिला दूँगा{thing}।")
+                _say(draft, f"I'll remind you in {tu.minutes_phrase(due_in)}{thing}.",
+                     f"{tu.minutes_phrase_hi(due_in)} में याद दिला दूँगा{thing}।")
             else:
-                _say(draft, f"Okay {address}, I'll remind you {_due_label(draft['due_date'], draft['due_time'])}{thing}.",
-                     f"ठीक है {address_hi}, {_due_label_hi(draft['due_date'], draft['due_time'])} याद दिला दूँगा{thing}।")
+                _say(draft, f"I'll remind you {_due_label(draft['due_date'], draft['due_time'])}{thing}.",
+                     f"{_due_label_hi(draft['due_date'], draft['due_time'])} याद दिला दूँगा{thing}।")
         except services.ServiceError as exc:
             draft["action"] = "answer"
             _say(draft, f"Sorry {address}, I could not set that reminder: {exc.message}",

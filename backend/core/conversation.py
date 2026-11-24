@@ -197,7 +197,7 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         resp = _answer_asked(user, asked, False, address, address_hi, said_in)
     elif action == "cancel_pending":
         state["pending"], state["choices"], state["offer"] = None, None, None
-        resp = _resp(show or f"Okay {address}, cancelled.", speak, lang, listen=True, action=action)
+        resp = _resp(show or "Okay, cancelled.", speak, lang, listen=True, action=action)
     elif action == "end":
         state = {**EMPTY, "history": []}
         resp = _resp(show, speak, lang, listen=False, action="end")
@@ -355,36 +355,36 @@ def _answer_asked(user: User, asked: dict, yes: bool, address: str, address_hi: 
             key = asked.get("key", "")
             if not yes:
                 ReminderAck.objects.get_or_create(user=user, key=key)  # leave it: it goes quiet, stays on the list
-                return _resp(f"Okay {address}, leaving it.", *_twin(lang, f"ठीक है {address_hi}, रहने देता हूँ।"), listen=True, action="answer")
+                return _resp("Okay, leaving it.", *_twin(lang, "ठीक है, रहने देता हूँ।"), listen=True, action="answer")
             ref = _task_ref_from_key(key)
             if ref is None:
                 raise ObjectDoesNotExist
             to_sir = _complete_one(user, ref)
             ReminderAck.objects.get_or_create(user=user, key=key)
             if to_sir:
-                return _resp(f"Sent to {sir} to confirm, {address}.", *_twin(lang, f"{sir_hi} को कन्फ़र्म करने के लिए भेज दिया, {address_hi}।"),
+                return _resp(f"Sent to {sir} to confirm.", *_twin(lang, f"{sir_hi} को कन्फ़र्म करने के लिए भेज दिया।"),
                              listen=True, action="saved")
-            return _resp(f"Marked as done, {address}.", *_twin(lang, f"पूरा हुआ मार्क कर दिया, {address_hi}।"), listen=True, action="saved")
+            return _resp("Marked as done.", *_twin(lang, "पूरा हुआ मार्क कर दिया।"), listen=True, action="saved")
         alert = Alert.objects.get(id=asked.get("id"), recipient=user)
         q = services.alert_question(alert) or {}
         if q.get("kind") == "accept" and alert.ref_id:
             if yes:
                 services.accept_request(user, alert.ref_id)
-                line = (f"Accepted, {address}. It's on your list.", f"मंज़ूर कर दिया, {address_hi}। आपकी लिस्ट में आ गया।")
+                line = ("Accepted. It's on your list.", "मंज़ूर कर दिया। आपकी लिस्ट में आ गया।")
             else:
                 services.decline_request(user, alert.ref_id)
-                line = (f"Declined, {address}.", f"मना कर दिया, {address_hi}।")
+                line = ("Declined.", "मना कर दिया।")
         elif q.get("kind") == "move" and yes and isinstance(q.get("target"), dict):
             t = q["target"]
             _change_one(user, {"scope": t.get("scope"), "id": t.get("id"), "version": t.get("version") or 1},
                         {"due_date": q.get("to") or (tu.today_local() + timedelta(days=1)).isoformat()}, "Moved from the morning briefing")
-            line = (f"Moved {t.get('title', title)} to tomorrow, {address}.", f"{t.get('title', title)} कल पर ले गया, {address_hi}।")
+            line = (f"Moved {t.get('title', title)} to tomorrow.", f"{t.get('title', title)} कल पर ले गया।")
         elif q.get("kind") == "seen" and yes:
             told = services.mark_seen(user, alert, tell=True)
             to, to_hi = services.giver_words(told.recipient) if told else (sir, sir_hi)
-            line = (f"Told {to}, {address}.", f"{to_hi} को बता दिया, {address_hi}।")
+            line = (f"Told {to}.", f"{to_hi} को बता दिया।")
         else:
-            line = (f"Okay {address}.", f"ठीक है {address_hi}।")
+            line = ("Okay.", "ठीक है।")
         if alert.ring and alert.seen_at is None:
             services.mark_seen(user, alert, tell=False)  # answered: it was seen ("no" = nobody is told)
         if not alert.acknowledged_at:
@@ -426,7 +426,6 @@ def _change_one(user: User, t: dict, changes: dict, reason: str) -> bool:
 def _execute(user: User, p: dict, address: str, lang: str = "en") -> dict:
     """Do what the card says. lang: the language of the "yes" just spoken; the confirmation follows it.
     A card with further items (two meetings in one breath) saves each of them in turn and reports on all."""
-    address_hi = services.address_hi_of(user)
     batch = [b for b in (p.get("batch") or []) if isinstance(b, dict)]
     if not batch:
         return _execute_one(user, p, address, lang)
@@ -441,12 +440,12 @@ def _execute(user: User, p: dict, address: str, lang: str = "en") -> dict:
         (saved if resp["action"] == "saved" else failed).append((item, resp))
     n, k = len(saved), len(failed)
     if not failed:
-        spoken = f"Saved all {n}, {address}."
-        hi = f"सभी {n} सेव हो गए, {address_hi}।"
+        spoken = f"Saved all {n}."
+        hi = f"सभी {n} सेव हो गए।"
     else:
         names = "; ".join(f"{i.get('title') or 'one item'} ({r['show'].split(': ', 1)[-1].rstrip('.')})" for i, r in failed)
-        spoken = f"Saved {n} of {n + k}, {address}. Could not save: {names}."
-        hi = f"{n + k} में से {n} सेव हुए, {address_hi}। ये नहीं हो पाए: {names}।"
+        spoken = f"Saved {n} of {n + k}. Could not save: {names}."
+        hi = f"{n + k} में से {n} सेव हुए। ये नहीं हो पाए: {names}।"
     return _resp(spoken, *_twin(lang, hi), listen=True, action="saved" if saved else "error")
 
 
@@ -475,8 +474,8 @@ def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
                 raise ServiceError(command.error_code or "rejected",
                                    command.error_message or "the staff app did not accept it.", 422)
             if command.state == IntegrationCommand.State.SUCCEEDED:
-                spoken = f"Done, {address}. {staff.name} has the task now. I'll keep track of it."
-                hi = f"हो गया, {address_hi}। {staff.name} के पास टास्क पहुँच गया। मैं नज़र रखूँगा।"
+                spoken = f"{staff.name} has the task now. I'll keep track of it."
+                hi = f"{staff.name} के पास टास्क पहुँच गया। मैं नज़र रखूँगा।"
             else:
                 spoken = f"{address}, sent to {staff.name}. I'm waiting for the staff app to confirm and will tell you."
                 hi = f"{address_hi}, {staff.name} को भेज दिया। स्टाफ़ ऐप के कन्फ़र्म करने का इंतज़ार है, बता दूँगा।"
@@ -485,8 +484,8 @@ def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
             r = services.delegate_to_team(user, data, ids, category_key=p.get("category_key") or "",
                                           description=p.get("transcript", ""))
             n = len(r["assigned"])
-            spoken = f"{address}, given to {n} {'person' if n == 1 else 'people'}."
-            hi = f"{address_hi}, {n} लोगों को दे दिया।"
+            spoken = f"Given to {n} {'person' if n == 1 else 'people'}."
+            hi = f"{n} लोगों को दे दिया।"
             if r["pending"]:
                 spoken += f" {len(r['pending'])} still being confirmed."
                 hi += f" {len(r['pending'])} अभी कन्फ़र्म होने बाकी हैं।"
@@ -505,26 +504,26 @@ def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
             verb = "Accepted" if a == "accept_request" else "Declined"
             verb_hi = "मंज़ूर कर" if a == "accept_request" else "मना कर"
             if len(targets) == 1:
-                spoken = f"{verb}, {address}." + (" It's on your list." if a == "accept_request" else "")
-                hi = f"{verb_hi} दिया, {address_hi}।" + (" आपकी लिस्ट में आ गया।" if a == "accept_request" else "")
+                spoken = f"{verb}." + (" It's on your list." if a == "accept_request" else "")
+                hi = f"{verb_hi} दिया।" + (" आपकी लिस्ट में आ गया।" if a == "accept_request" else "")
             else:
-                spoken = f"{verb} all {len(targets)}, {address}."
-                hi = f"सभी {len(targets)} {verb_hi} दिए, {address_hi}।"
+                spoken = f"{verb} all {len(targets)}."
+                hi = f"सभी {len(targets)} {verb_hi} दिए।"
         elif a == "complete":
             if not targets:
                 raise ServiceError("invalid", "I don't know which task.", 422)
             to_sir = sum(1 for t in targets if _complete_one(user, t))
             if len(targets) == 1:
-                spoken = f"Sent to {sir} to confirm, {address}." if to_sir else f"Marked as done, {address}."
-                hi = (f"{sir_hi} को कन्फ़र्म करने के लिए भेज दिया, {address_hi}।" if to_sir
-                      else f"पूरा हुआ मार्क कर दिया, {address_hi}।")
+                spoken = f"Sent to {sir} to confirm." if to_sir else "Marked as done."
+                hi = (f"{sir_hi} को कन्फ़र्म करने के लिए भेज दिया।" if to_sir
+                      else "पूरा हुआ मार्क कर दिया।")
             else:
-                spoken = f"Marked {len(targets)} as done, {address}." + (f" {to_sir} sent to {sir} to confirm." if to_sir else "")
-                hi = f"{len(targets)} पूरे हुए मार्क कर दिए, {address_hi}।" + (f" {to_sir} {sir_hi} को कन्फ़र्म करने भेजे।" if to_sir else "")
+                spoken = f"Marked {len(targets)} as done." + (f" {to_sir} sent to {sir} to confirm." if to_sir else "")
+                hi = f"{len(targets)} पूरे हुए मार्क कर दिए।" + (f" {to_sir} {sir_hi} को कन्फ़र्म करने भेजे।" if to_sir else "")
         elif a == "remember":
             services.add_memory(user, p.get("memory_text", ""))
-            spoken = f"Done, {address}. I'll remember that."
-            hi = f"हो गया, {address_hi}। याद रखूँगा।"
+            spoken = "I'll remember that."
+            hi = "याद रखूँगा।"
         elif a in {"change_task", "delete_task"}:
             if not targets:
                 raise ServiceError("invalid", "I don't know which task.", 422)
@@ -539,14 +538,14 @@ def _execute_one(user: User, p: dict, address: str, lang: str = "en") -> dict:
             what = "Changed" if a == "change_task" else "Deleted"
             what_hi = "बदल" if a == "change_task" else "हटा"
             if to_sir:
-                spoken = f"Sent to {sir} to confirm, {address}."
-                hi = f"{sir_hi} को कन्फ़र्म करने के लिए भेज दिया, {address_hi}।"
+                spoken = f"Sent to {sir} to confirm."
+                hi = f"{sir_hi} को कन्फ़र्म करने के लिए भेज दिया।"
             elif len(targets) == 1:
-                spoken = f"{what}, {address}." + (" It's cancelled, not erased." if a == "delete_task" else "")
-                hi = f"{what_hi} दिया, {address_hi}।" + (" कैंसल हुआ है, मिटा नहीं।" if a == "delete_task" else "")
+                spoken = f"{what}." + (" It's cancelled, not erased." if a == "delete_task" else "")
+                hi = f"{what_hi} दिया।" + (" कैंसल हुआ है, मिटा नहीं।" if a == "delete_task" else "")
             else:
-                spoken = f"{what} {len(targets)}, {address}."
-                hi = f"{len(targets)} {what_hi} दिए, {address_hi}।"
+                spoken = f"{what} {len(targets)}."
+                hi = f"{len(targets)} {what_hi} दिए।"
         else:
             raise ServiceError("invalid", "I can't do that from here.", 422)
     except ServiceError as err:

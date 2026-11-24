@@ -1343,7 +1343,7 @@ class SchedulingTests(BaseCase):
             spoken_reply="Sir, task for Priya: courier the contract at 3 PM. Shall I save it?"))
         self.assertEqual(r["action"], "saved")  # clear: given at once
         self.assertNotIn("already has", r["show"])  # a task is never held up by her diary
-        self.assertIn("given to Priya", r["show"])
+        self.assertIn("Given to Priya", r["show"])
         self.assertTrue(SharedTask.objects.filter(title="Courier the Contract", assignee_user=self.pa).exists())
 
     def test_app_flow_settles_the_clash_on_the_server(self):
@@ -2561,8 +2561,8 @@ class TwoThingsInOneBreathTests(BaseCase):
         r = self.turn(self.md_client, "4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath", self.two_meetings())
         self.assertEqual(r["action"], "private_task")
         r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
-        self.assertEqual((r["action"], r["show"]), ("saved", "Done, Sir: all 2 saved."), r)
-        self.assertEqual(r["say"], "हो गया, सर: सभी 2 सेव हो गए।")
+        self.assertEqual((r["action"], r["show"]), ("saved", "All 2 saved."), r)
+        self.assertEqual(r["say"], "सभी 2 सेव हो गए।")
         self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before + 2)
         titles = set(t.title for t in PrivateTask.objects.filter(owner=self.md))
         self.assertTrue({"Meeting with Aman", "Meeting with Sharma ji"} <= titles)
@@ -2593,7 +2593,7 @@ class TwoThingsInOneBreathTests(BaseCase):
         r = self.turn(self.md_client, "3 baje Mehta ji ko call aur Priya ko bolo Pune hotel book kare", cmd)
         self.assertEqual(r["action"], "private_task", r)   # a rough (offline) reading still waits for the yes
         r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
-        self.assertEqual((r["action"], r["show"]), ("saved", "Done, Sir: all 2 saved."), r)
+        self.assertEqual((r["action"], r["show"]), ("saved", "All 2 saved."), r)
         self.assertIn("Call Mehta ji", list(PrivateTask.objects.filter(owner=self.md).values_list("title", flat=True)))  # (encrypted title: read, not filtered)
         self.assertTrue(SharedTask.objects.filter(title="Book the Pune hotel", assignee_type="USER", assignee_user=self.pa).exists())
 
@@ -2785,7 +2785,7 @@ class LanguageTests(BaseCase):
         self.assertEqual((r["action"], r["say_lang"]), ("saved", "hi"))
         self.assertIn("सेव हो गया", r["say"])
         self.assertIn("कल 4 बजे याद दिला दूँगा", r["say"])
-        self.assertTrue(r["show"].startswith("Saved, Sir."))
+        self.assertTrue(r["show"].startswith("Saved."), r["show"])
         # Nothing waiting, asked in English: English.
         r = self.turn(self.md_client, "yes please", _cmd(intent="confirm_pending"))
         self.assertEqual(r["say_lang"], "en")
@@ -3044,7 +3044,7 @@ class MeetingJugglingTests(BaseCase):
         self.turn(self.md_client, "12 baje Bose se meeting", _cmd(intent="create_task", title="Meeting with Bose", kind="MEETING",
                                                                  due_date=day.isoformat(), due_time="12:00", engine="ai"))
         r = self.turn(self.md_client, "nahi rehne do", _cmd(intent="cancel_pending"))
-        self.assertIn("dropped Meeting with Bose", r["show"])
+        self.assertIn("Dropped Meeting with Bose", r["show"])
         self.assertFalse([t for t in PrivateTask.objects.filter(owner=self.md) if t.title == "Meeting with Bose"])
         # Nothing waits any more: a later "haan" saves nothing.
         r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
@@ -3397,7 +3397,7 @@ class ManagerTests(BaseCase):
         d = self.turn(self.md_client, "Mansi ko bolo vendor list bana de",
                       _cmd(intent="assign_to_staff", staff_name="Mansi", title="Make the vendor list", engine="ai"))
         self.assertEqual(d["action"], "saved", d)   # clear: given at once
-        self.assertIn("given to Mansi", d["show"])
+        self.assertIn("Given to Mansi", d["show"])
         task = SharedTask.objects.get(title="Make the vendor list")
         self.assertEqual((task.assignee_type, task.assignee_user, task.origin), ("USER", self.mg, "GIVEN"))
         self.assertTrue(Alert.objects.filter(recipient=self.mg, ref_type="shared_task", ref_id=str(task.id)).exists())

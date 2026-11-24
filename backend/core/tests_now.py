@@ -131,10 +131,14 @@ class AskNikkiToArrangeTests(NowCase):
         self.assertEqual(item["arrangement"]["about"]["title"], "Meeting with Sharmaji")
         self.assertIn("today at", item["arrangement"]["about"]["when"])
         self.assertIn(tu.fmt_time(self.now), item["arrangement"]["to"])
-        # The same command again (heard twice): asked once.
+        # The same command again within moments (heard twice): asked once, and nothing is said a second time.
         d2 = self.ask()
         self.assertEqual(SharedTask.objects.filter(assignee_user=self.nikki).count(), 1)
-        self.assertIn("already", d2["spoken_reply"])
+        self.assertEqual(d2["spoken_reply"], "", d2)
+        with mock.patch("core.assistant.ECHO_SECONDS", -1):  # said again after a while: told it is already asked
+            d3 = self.ask()
+        self.assertEqual(SharedTask.objects.filter(assignee_user=self.nikki).count(), 1)
+        self.assertIn("already", d3["spoken_reply"])
         # Nikki confirms: the meeting moves, keeping its hour; Sir hears it from her; a second confirm changes nothing.
         Alert.objects.filter(recipient=self.md).delete()
         r = self.nikki_client.post(f"/api/v1/pa-tasks/{ask.id}/status/", {"status": "COMPLETED", "expected_version": ask.version}, format="json")

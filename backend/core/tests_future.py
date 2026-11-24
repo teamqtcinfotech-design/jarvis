@@ -118,7 +118,7 @@ class WhichOneTests(BaseCase):
         self.assertFalse(d.get("needs_clarification"), d["spoken_reply"])
         self.assertTrue(d["booked"] and d["card_done"] and d["undo"], d)
         self.assertEqual({t["id"] for t in d["targets"]}, {str(self.first.id), str(self.second.id)})
-        self.assertIn("Deleted 2, Sir", d["spoken_reply"])
+        self.assertIn("Deleted 2:", d["spoken_reply"])
         self.assertIn(services.tu.fmt_day(self.day2), d["spoken_reply"])
         self.assertEqual({t.status for t in services.private_qs(self.md).filter(id__in=[self.first.id, self.second.id])}, {"CANCELLED"})
         d = self.interpret("undo", _cmd(intent="undo", spoken_reply="Ji."))
@@ -132,7 +132,7 @@ class WhichOneTests(BaseCase):
                   "filters": {"kind": "upcoming", "types": ["MEETING"]}}
         d = self.interpret("isko hata do", _cmd(intent="delete_task", title="", spoken_reply="Ji."), screen=screen)
         self.assertTrue(d["booked"], d["spoken_reply"])
-        self.assertIn(f"Deleted Meeting with Aman ({services.tu.fmt_day(self.day2)} at 11 AM), Sir", d["spoken_reply"])
+        self.assertIn(f"Deleted Meeting with Aman ({services.tu.fmt_day(self.day2)} at 11 AM).", d["spoken_reply"])
         self.assertEqual(services.private_qs(self.md).get(id=self.second.id).status, "CANCELLED")
         self.assertEqual(services.private_qs(self.md).get(id=self.first.id).status, "OPEN")
         # Two on the card and nothing named: the question lists what is on the card; "dono" takes both.
@@ -280,7 +280,7 @@ class OneBreathTests(BaseCase):
         d5 = self.tool("answer", {"reply": "yes", "said": "haan"}, pending=d4)
         khanna = self.titles()["Meeting with Khanna"]
         self.assertGreaterEqual(khanna.due_at, self.board.scheduled_end)
-        self.assertTrue(d5["spoken_reply"].startswith("Done, Sir: Meeting with Khanna"), d5["spoken_reply"])
+        self.assertTrue(d5["spoken_reply"].startswith("Booked: Meeting with Khanna"), d5["spoken_reply"])
         self.assertIn("Call with CA", d5["spoken_reply"])
         self.assertIn("Call with SBI branch manager", d5["spoken_reply"])
         self.assertEqual(d5["spoken_reply"].count("Shall I"), 1)
@@ -318,7 +318,7 @@ class OneBreathTests(BaseCase):
         d2 = self.tool("own_item", {"what": "Buy flowers", "when_words": "", "personal": True, "said": "flowers lene hain"}, pending=d1)
         d3 = self.tool("answer", {"reply": "no", "said": "nahi rehne do"}, pending=d2)
         self.assertTrue(d3["card_done"])
-        self.assertIn("dropped Meeting with Khanna", d3["spoken_reply"])
+        self.assertIn("Dropped Meeting with Khanna", d3["spoken_reply"])
         self.assertIn("The other 1 saved too: Buy flowers", d3["spoken_reply"])
         self.assertNotIn("Meeting with Khanna", self.titles())
         self.assertIn("Buy flowers", self.titles())
