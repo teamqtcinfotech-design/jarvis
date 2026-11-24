@@ -186,6 +186,24 @@ export function WaitingCard() {
           </Pressable>
         </View>
       ) : null}
+      {others ? (
+        // The whole batch at once, the same as his words "sab seen", "sab baad mein", "sab hata do".
+        <View style={[s.more, { marginTop: 6 }]}>
+          <Txt variant="caption" style={{ flex: 1 }}>All {others + 1}:</Txt>
+          <Pressable onPress={() => { engine.seenAll(engine.batchItems()).catch(() => undefined); }} hitSlop={8} style={s.moreBtn} accessibilityLabel="Mark all seen">
+            <Icon name="eye-outline" size={14} color={colors.accent} />
+            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Seen</Txt>
+          </Pressable>
+          <Pressable onPress={() => { engine.snoozeAll().catch(() => undefined); }} hitSlop={8} style={[s.moreBtn, { marginLeft: 10 }]} accessibilityLabel="All later">
+            <Icon name="time-outline" size={14} color={colors.accent} />
+            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Later</Txt>
+          </Pressable>
+          <Pressable onPress={() => { engine.dismissAll(engine.batchItems()).catch(() => undefined); }} hitSlop={8} style={[s.moreBtn, { marginLeft: 10 }]} accessibilityLabel="Clear all from the screen">
+            <Icon name="close-circle-outline" size={14} color={colors.accent} />
+            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Clear</Txt>
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }

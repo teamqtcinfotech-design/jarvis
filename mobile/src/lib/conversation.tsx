@@ -152,7 +152,10 @@ const SEEN_WORDS = /\b(seen|dekh liya|dekh li|dekha|padh liya|padh li|mark(?:ed)
 const DONE_WORDS = /\b(done|ho gaya|ho gaye|hogaya|complete|completed|poora|poore|pura|pure|khatam|finished?)\b|हो गया|हो गए|पूरा|पूरे|ख़त्म/i;
 const REMOVE_WORDS = /\b(hata do|hatao|hata|htao|remove|dismiss|clear|band karo|band kar|delete)\b|हटा|हटाओ|बंद करो/i;
 const UNREAD_WORDS = /\b(unread|unseen|rehne do|rahne do|chhodo|chhod do|mat padho|nahi padhna)\b|रहने दो|छोड़ दो|अनरीड/i;
-const READ_WORDS = /\b(padho|padh do|padh ke|read|sunao|suna do|batao|bata do|dikhao|dikha do|show|list)\b|पढ़ो|सुनाओ|दिखाओ|बताओ/i;
+const READ_WORDS = /\b(padho|padh do|padh ke|read|sunao|suna do|batao|bata do)\b|पढ़ो|सुनाओ|बताओ/i;
+const SHOW_WORDS = /\b(dikhao|dikha do|dikhaao|show|list)\b|दिखाओ/i;
+/** "Koi update hai?", "kuch aaya?", "anything for me?": the count by kind, then "padhun?"; nothing is read unasked. */
+const UPDATE_Q = /\b(koi update|kuch update|update hai|updates? (?:hai|hain|aaya|aaye)|kya aaya|kya aya|kuch aaya|kuch aya|kuch naya|kya naya|koi notification|koi alert|notifications?|alerts?|mere liye kuch|anything (?:for me|new|waiting)|what'?s new|any updates?)\b|कोई अपडेट|क्या आया|कुछ नया|कुछ आया/i;
 const ONLY_WORDS = /\b(sirf|only|just|wale|wali|vale|vali)\b|सिर्फ़|सिर्फ|वाले|वाली/i;
 const URGENT_WORDS = /\b(urgent|zaroori|jaroori|zaruri|important|high)\b|ज़रूरी|जरूरी|अर्जेंट/i;
 /** A sentence that gives work, sends a message or sets a time is never a word on the batch. */
@@ -186,7 +189,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
     setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
-    allVisible, waiting, batchItems, seenAll, completeAll, dismissAll, readItems } = useAlertEngine();
+    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, dismissAll, readItems } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
@@ -437,14 +440,31 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: listenAfter ? listen : undefined });
     };
     const none = () => settle('None of those among them.', 'उनमें से कोई नहीं है।', true);
-    // "Kitne tasks, kitni meetings?" while the count is on the table: the split by kind; "padhun?" still stands.
-    if (COUNT_WORDS.test(text) && (offerRef.current || questionRef.current || named)) {
+    const split = () => {
       const piles = new Map<AlertGroup, number>();
       for (const i of items) piles.set(groupOf(i), (piles.get(groupOf(i)) ?? 0) + 1);
-      const en = GROUP_ORDER.filter((g) => piles.get(g)).map((g) => `${piles.get(g)} ${GROUP_WORDS[g].en[piles.get(g) === 1 ? 0 : 1]}`).join(', ');
-      const hi = GROUP_ORDER.filter((g) => piles.get(g)).map((g) => `${piles.get(g)} ${GROUP_WORDS[g].hi}`).join(', ');
+      return {
+        en: GROUP_ORDER.filter((g) => piles.get(g)).map((g) => `${piles.get(g)} ${GROUP_WORDS[g].en[piles.get(g) === 1 ? 0 : 1]}`).join(', '),
+        hi: GROUP_ORDER.filter((g) => piles.get(g)).map((g) => `${piles.get(g)} ${GROUP_WORDS[g].hi}`).join(', '),
+      };
+    };
+    // "Koi update hai?": yes, with the count by kind, and "padhun?"; nothing is read unasked.
+    if (UPDATE_Q.test(text) && !bulk && !THIS_WORDS.test(text) && !SEEN_WORDS.test(text) && !DONE_WORDS.test(text) && !REMOVE_WORDS.test(text) && !LATER_WORDS.test(text)) {
+      const o = offerBatch();
+      if (!o) {
+        settle('No, nothing new for you.', 'नहीं, आपके लिए कुछ नया नहीं है।');
+        return true;
+      }
+      const c = split();
+      settle(`Yes: ${c.en}. Shall I read them?`, `जी: ${c.hi}। पढ़ूँ?`, true);
+      offerRef.current = o; // "haan" reads them one at a time; "baad mein" puts the batch to sleep
+      return true;
+    }
+    // "Kitne tasks, kitni meetings?" while the count is on the table: the split by kind; "padhun?" still stands.
+    if (COUNT_WORDS.test(text) && (offerRef.current || questionRef.current || named)) {
+      const c = split();
       const keep = offerRef.current;
-      settle(`${en || 'Nothing is waiting'}.`, `${hi || 'कुछ इंतज़ार में नहीं'}।`, !!keep);
+      settle(`${c.en || 'Nothing is waiting'}.`, `${c.hi || 'कुछ इंतज़ार में नहीं'}।`, !!keep);
       offerRef.current = keep;
       return true;
     }
@@ -494,8 +514,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       settle(thisOne ? 'Okay, it stays.' : 'Okay, they stay unread on your list.', 'ठीक है, वैसे ही रहेंगे।');
       return true;
     }
-    if (!thisOne && (READ_WORDS.test(text) || ONLY_WORDS.test(text) || (named && text.trim().split(/\s+/).length <= 3))) {
-      // "Sirf urgent wale", "only meetings", "approvals wale padho", "sab padho": those, one at a time, each with its question.
+    if (!thisOne && !named && SHOW_WORDS.test(text)) {
+      // "Sab dikhao" / "show all": laid out as cards with their buttons, the count said, then JARVIS listens.
+      const c = split();
+      setAllVisible(true);
+      settle(`${c.en}.`, `${c.hi}।`, true);
+      return true;
+    }
+    if (!thisOne && (READ_WORDS.test(text) || SHOW_WORDS.test(text) || ONLY_WORDS.test(text) || (named && text.trim().split(/\s+/).length <= 3))) {
+      // "Sirf urgent wale", "only meetings", "approvals wale dikhao", "sab padho": those, one at a time, each with its question.
       if (!subset.length) { none(); return true; }
       offerRef.current = null;
       questionRef.current = null;

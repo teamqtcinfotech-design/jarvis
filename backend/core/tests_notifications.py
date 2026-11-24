@@ -55,9 +55,10 @@ class WindowTests(NotificationsCase):
         self.assertEqual(set(titles), {"Sign the GST file", "Sharmaji meeting", "Vendor ka call aaya tha", "Vendor Advance"})
         self.assertEqual(view["subtitle"], "4 in the last 10 minutes · 4 still waiting for you")
         self.assertTrue(view["summary"].startswith("Sir, in the last 10 minutes: "), view["summary"])
-        self.assertIn("1 approval: Vendor Advance (Nikki), waiting", view["summary"])
-        self.assertIn("1 meeting: Sharmaji meeting (Nikki)", view["summary"])
-        self.assertIn("1 message: Vendor ka call aaya tha (Mansi)", view["summary"])
+        # Counts by pile only, never a title or a message (his rule): the card below carries them.
+        self.assertEqual(view["summary"], "Sir, in the last 10 minutes: 1 approval, 1 meeting, 1 task, 1 message. 4 still waiting for you.")
+        self.assertNotIn("Vendor Advance", view["summary"])
+        self.assertIn("Vendor Advance", [r["title"] for r in view["rows"]])
         self.assertIn("पिछले 10 मिनट में", view["summary_hi"])
         # The piles are the tiles; the request keeps the span, so "inme se sirf meetings" starts from the same window.
         self.assertEqual(self.stats(view), {"Approvals": 1, "Meetings": 1, "Tasks": 1, "Messages": 1, "Waiting for you": 4})
@@ -84,7 +85,7 @@ class WindowTests(NotificationsCase):
         d = self.interpret(self.md_client, "inme se kitne meetings ke liye hain", _cmd(intent="query", view_kind="alerts", view_types=["MEETING"]),
                            screen={"kind": "alerts", "title": "Notifications", "items": [], "filters": {"kind": "alerts", "minutes": 10}})
         self.assertEqual(d["view"]["request"], {"kind": "alerts", "types": ["MEETING"], "minutes": 10})
-        self.assertEqual(d["spoken_reply"], "Sir, in the last 10 minutes: 1 meeting: Sharmaji meeting (Nikki). 1 still waiting for you.")
+        self.assertEqual(d["spoken_reply"], "Sir, in the last 10 minutes: 1 meeting. 1 still waiting for you.")  # counts only, never a title
         d = self.interpret(self.md_client, "inme se Mansi ki taraf se kitne hain", _cmd(intent="query", view_kind="alerts", view_who="Mansi"))
         self.assertEqual(d["view"]["request"]["minutes"], 10)  # from the list remembered a moment ago
         self.assertEqual([r["title"] for r in d["view"]["rows"]], ["Vendor ka call aaya tha"])
@@ -108,7 +109,7 @@ class PilesTests(NotificationsCase):
         view = datacards.build(self.md, "alerts", params={"types": ["MESSAGE"]})
         self.assertEqual([r["title"] for r in view["rows"]], ["Vendor ka call aaya tha"])
         self.assertEqual(view["title"], "Notifications · messages")
-        self.assertEqual(view["summary"], "Sir, today: 1 message: Vendor ka call aaya tha (Mansi). 1 still waiting for you.")
+        self.assertEqual(view["summary"], "Sir, today: 1 message. 1 still waiting for you.")  # counts only, never the message itself
         # "Inme se meetings aur approvals": two piles, counted apart.
         view = datacards.build(self.md, "alerts", params={"types": ["MEETING", "APPROVAL"]})
         self.assertEqual(self.stats(view), {"Approvals": 1, "Meetings": 1, "Waiting for you": 2})

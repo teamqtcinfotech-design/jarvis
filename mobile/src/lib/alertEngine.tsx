@@ -185,6 +185,8 @@ interface EngineValue {
   dismiss: (item: EngineItem) => void;
   /** Everything waiting for him right now (banner, stack, held), the latest first: what his bulk words act on. */
   batchItems: () => EngineItem[];
+  /** "Koi update hai?": the batch counted and offered to read ("padhun?"), nothing said here; null when nothing waits. */
+  offerBatch: () => HeldOffer | null;
   /** His words on the whole batch, or a filtered part of it, done at once and in silence: all seen, all done, all
    *  off the screen (they stay on the lists), read these ones one at a time. Each resolves to how many it touched. */
   seenAll: (items: EngineItem[]) => Promise<number>;
@@ -312,16 +314,15 @@ export function describeWaiting(items: EngineItem[], address: string, addressHi:
   }
   const en: string[] = [];
   const hi: string[] = [];
+  // Counts only, never a title (his rule): he reads them one at a time when he says so.
   for (const g of GROUP_ORDER) {
     const pile = piles.get(g);
     if (!pile?.length) continue;
     const w = GROUP_WORDS[g];
-    const names = pile.slice(0, 3).map((i) => (i.concealed ? 'a private reminder' : i.from && g !== 'update' ? `${i.title} from ${i.from}` : i.title));
-    const rest = pile.length > 3 ? ` and ${pile.length - 3} more` : '';
-    en.push(`${pile.length} ${pile.length === 1 ? w.en[0] : w.en[1]}: ${names.join('; ')}${rest}`);
-    hi.push(`${pile.length} ${w.hi}: ${pile.slice(0, 3).map((i) => i.title).join('; ')}${pile.length > 3 ? ` और ${pile.length - 3}` : ''}`);
+    en.push(`${pile.length} ${pile.length === 1 ? w.en[0] : w.en[1]}`);
+    hi.push(`${pile.length} ${w.hi}`);
   }
-  return { en: `${address}, waiting for you: ${en.join('. ')}.`, hi: `${addressHi}, आपके लिए इंतज़ार में: ${hi.join('। ')}।` };
+  return { en: `${address}, waiting for you: ${en.join(', ')}.`, hi: `${addressHi}, आपके लिए इंतज़ार में: ${hi.join(', ')}।` };
 }
 
 function buzzSilently(urgent: boolean) {
@@ -1212,6 +1213,14 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     newsRef.current = [];
     toPresent.current = [];
   }, []);
+  const offerBatch = useCallback((): HeldOffer | null => {
+    const items = batchItems();
+    if (!items.length) return null;
+    newsRef.current = items;
+    offerKind.current = 'news';
+    offerSeq.current += 1;
+    return { id: offerSeq.current, count: items.length, kind: 'news', ...countOffer(items.length, address, addressHi, null) };
+  }, [batchItems, address, addressHi]);
   const seenAll = useCallback(
     async (items: EngineItem[]) => {
       settleBatch();
@@ -1450,6 +1459,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     snooze,
     snoozeAll,
     batchItems,
+    offerBatch,
     seenAll,
     completeAll,
     dismissAll,

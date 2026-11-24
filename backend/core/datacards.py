@@ -855,7 +855,6 @@ def _alerts_view(user, p: dict) -> dict:
     task_ids = [a.ref_id for a in alerts if a.ref_type == "shared_task" and a.ref_id]
     tasks = {str(t.id): t for t in SharedTask.objects.filter(id__in=task_ids)} if task_ids else {}
     rows, by_pile, waiting_n = [], {k: 0 for k in _PILE_ORDER}, 0
-    firsts: dict[str, list] = {k: [] for k in _PILE_ORDER}
     for a in alerts:
         task = tasks.get(a.ref_id) if a.ref_type == "shared_task" else None
         pile, state = _pile_of(a, task), _alert_state(a, task)
@@ -879,8 +878,6 @@ def _alerts_view(user, p: dict) -> dict:
         by_pile[pile] += 1
         if state in ("unseen", "waiting"):
             waiting_n += 1
-        if len(firsts[pile]) < 2:
-            firsts[pile].append(f"{what}" + (f" ({who})" if who and pile != "update" else "") + (f", {state}" if pile == "approval" else ""))
     rows.sort(key=lambda r: _PILE_ORDER.index(r["pile"]))
     narrowed_en = []
     if want_piles:
@@ -913,10 +910,11 @@ def _alerts_view(user, p: dict) -> dict:
         if not n:
             continue
         w = _PILE_WORDS[k]
-        parts_en.append(f"{n} {w[0] if n == 1 else w[1]}: {'; '.join(firsts[k])}" + (f" and {n - len(firsts[k])} more" if n > len(firsts[k]) else ""))
-        parts_hi.append(f"{n} {w[2]}: {'; '.join(firsts[k])}")
-    en = f"{period_en}: " + ". ".join(parts_en) + "." + (f" {waiting_n} still waiting for you." if waiting_n else "")
-    hi = f"{period_hi}: " + "। ".join(parts_hi) + "।" + (f" {waiting_n} अभी भी आपके इंतज़ार में।" if waiting_n else "")
+        # Counts only, never a title: he reads them one at a time when he says so (his rule, 24 Nov 2026).
+        parts_en.append(f"{n} {w[0] if n == 1 else w[1]}")
+        parts_hi.append(f"{n} {w[2]}")
+    en = f"{period_en}: " + ", ".join(parts_en) + "." + (f" {waiting_n} still waiting for you." if waiting_n else "")
+    hi = f"{period_hi}: " + ", ".join(parts_hi) + "।" + (f" {waiting_n} अभी भी आपके इंतज़ार में।" if waiting_n else "")
     return _summ(view, address, address_hi, en, hi)
 
 

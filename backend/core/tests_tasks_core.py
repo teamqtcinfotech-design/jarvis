@@ -235,7 +235,8 @@ class EveryTaskIsEncryptedAtRestTests(TaskCoreCase):
         self.assertTrue(row[1].startswith("enc1:"), row[1][:12])        # notes: randomised
         for cell in row:
             self.assertNotIn("Pune", cell or "")
-            self.assertNotIn("40", cell or "")
+            self.assertNotIn("40,000", cell or "")   # not a bare "40": random ciphertext can contain any two digits
+            self.assertNotIn("40 hazaar", cell or "")
         # Reading back and exact lookups by title are unchanged.
         self.assertEqual(SharedTask.objects.get(id=task.id).title, "Pay the Pune vendor")
         self.assertTrue(SharedTask.objects.filter(title="Pay the Pune vendor").exists())
