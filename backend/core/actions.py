@@ -107,16 +107,17 @@ def run_item(user: User, p: dict) -> dict:
         raise ServiceError("invalid", "the task has no title.", 422)
     data = _task_data(p)
     rep_en, rep_hi = _repeat_tail(data)
+    # Every line here states who and what, short (his rule, 24 Nov 2026): never a bare "done" or "sent".
     if action == "private_task":
         task = services.create_private_task(user, data, source=PrivateTask.Source.VOICE)
         when = f" I'll remind you {due_en}." if due_en else ""
-        return {"en": f"Saved.{when}{rep_en}", "hi": "सेव हो गया।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
+        return {"en": f"Saved: {task.title}.{when}{rep_en}", "hi": f"सेव हो गया: {task.title}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
                 "undo": [{"type": "private", "id": str(task.id)}], "title": task.title}
     if action == "own_task":
         task = services.create_own_task(user, data)
         when = f" I'll remind you {due_en}." if due_en else ""
-        return {"en": f"Saved in your own work.{when}{rep_en}",
-                "hi": "आपके अपने काम में सेव हो गया।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
+        return {"en": f"Saved in your own work: {task.title}.{when}{rep_en}",
+                "hi": f"आपके अपने काम में सेव हो गया: {task.title}।" + (f" {due_hi} याद दिला दूँगा।" if due_hi else "") + rep_hi,
                 "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title}
     if action == "md_request":
         # Work for the MD from anyone else: straight onto his list (ringing until he sees it), like work for anyone.
@@ -131,8 +132,8 @@ def run_item(user: User, p: dict) -> dict:
                     "hi": f"{sir_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।",
                     "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [md.spoken_name]}
         when = f" for {due_en}" if due_en else ""
-        return {"en": f"It's on {sir}'s list{when}.{rep_en} I'll tell you when {he} has seen it, and when it's done.",
-                "hi": f"{sir_hi} की लिस्ट में डाल दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} देख लेने पर और पूरा होने पर बताऊँगा।",
+        return {"en": f"It's on {sir}'s list{when}: {task.title}.{rep_en}",
+                "hi": f"{sir_hi} की लिस्ट में डाल दिया" + (f", {due_hi}" if due_hi else "") + f": {task.title}।{rep_hi}",
                 "undo": [{"type": "shared", "id": str(task.id)}], "title": task.title, "people": [md.spoken_name]}
     if action in {"person_task", "person_meeting"}:
         people = _people_of(user, p)
@@ -152,17 +153,21 @@ def run_item(user: User, p: dict) -> dict:
             refs.append({"type": "shared", "id": str(task.id)})
             names.append(person)
         who, who_hi = services.names_phrase(names), services.names_phrase(names, hindi=True)
-        if meeting:
-            en = f"Saved. I've told {who}, and I'll remind you both.{rep_en}"
-            hi = f"सेव हो गया। {who_hi} को बता दिया है, और आप दोनों को याद दिला दूँगा।{rep_hi}"
+        title = " ".join(str(p.get("title") or "").split())
+        if not names:
+            en, hi = f"Saved: {title}.{rep_en}", f"सेव हो गया: {title}।{rep_hi}"
+        elif meeting:
+            # "Himanshu ko 4 baje aane ke liye bol diya hai": who was told to come, and when.
+            en = f"{who} {'has' if len(names) == 1 else 'have'} been told to come{f' {due_en}' if due_en else ''}.{rep_en}"
+            hi = f"{who_hi} को{f' {due_hi}' if due_hi else ''} आने के लिए बोल दिया है।{rep_hi}"
         elif data["kind"] == "APPROVAL":
             amt = services.rupees(services.clean_amount(data.get("amount")))
             en = f"I've asked {who}'s approval" + (f" for {amt}" if amt else "") + ". I'll tell you what they decide."
             hi = f"{who_hi} से" + (f" {amt} की" if amt else "") + " मंज़ूरी माँग ली है। फ़ैसला आने पर बताऊँगा।"
         else:
-            when = f" for {due_en}" if due_en else ""
-            en = f"Given to {who}{when}.{rep_en} I'll tell you when it's done."
-            hi = f"{who_hi} को दे दिया" + (f", {due_hi}" if due_hi else "") + f"।{rep_hi} पूरा होने पर बताऊँगा।"
+            # "Nikki ko kal tak reconciliation karne ko bol diya hai": who has what, by when.
+            en = f"{who} {'has' if len(names) == 1 else 'have'} it{f' for {due_en}' if due_en else ''}: {title}.{rep_en}"
+            hi = f"{who_hi} को{f' {due_hi} तक' if due_hi else ''} {title} करने को बोल दिया है।{rep_hi}"
         return {"en": en, "hi": hi, "undo": refs, "title": p.get("title", ""), "people": [u.spoken_name for u in names]}
     if action == "arrange_request":
         # "Nikki ko bolo Sharmaji wali meeting abhi arrange karwa de": Nikki gets the ask (ringing until seen); the
@@ -200,7 +205,7 @@ def run_item(user: User, p: dict) -> dict:
             en = f"I'll send it to {who} at {tu.fmt_time(when)}."
             hi = f"{tu.fmt_time_hi(when)} बजे {who_hi} को भेज दूँगा।"
         else:
-            en, hi = f"Sent to {who}.", f"{who_hi} को भेज दिया।"
+            en, hi = f"The message has gone to {who}.", f"ये मैसेज {who_hi} को भेज दिया है।"
         return {"en": en, "hi": hi, "undo": [{"type": "alerts", "ids": [str(a.id) for a in alerts]}],
                 "title": text[:80], "people": [u.spoken_name for u in people]}
     raise ServiceError("invalid", "I can't do that here.", 422)

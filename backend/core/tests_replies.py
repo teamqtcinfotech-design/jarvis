@@ -37,7 +37,8 @@ class ReplyTests(BaseCase):
     def test_a_done_line_states_the_fact_without_the_address(self):
         d = self.give_nikki()
         self.assertTrue(d["booked"], d)
-        self.assertTrue(d["spoken_reply"].startswith("Given to Nikki for tomorrow"), d["spoken_reply"])
+        self.assertTrue(d["spoken_reply"].startswith("Nikki has it for tomorrow: Bank ka reconciliation."), d["spoken_reply"])
+        self.assertIn("Nikki को कल तक Bank ka reconciliation करने को बोल दिया है", d["reply_hi"])
         self.assertNotIn("Sir", d["spoken_reply"])
         self.assertNotIn("सर", d["reply_hi"])
         self.assertNotIn("Ji Sir", d["spoken_reply"])  # the model's own filler line is never what is said

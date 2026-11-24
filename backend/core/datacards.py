@@ -4,6 +4,7 @@ Every view is built from ``services.dashboard(user)``, so the privacy rules hold
 never contain Sir's private items, and a locked phone (include_private=False) leaves them out for Sir too.
 The phone only draws; nothing here changes data.
 """
+import re
 from datetime import date, datetime, time, timedelta
 
 from django.db.models import Q
@@ -843,10 +844,17 @@ def _alerts_view(user, p: dict) -> dict:
     pile ("sirf messages"), a state (seen / unseen / approved / declined / waiting), a sender ("Mansi ne jo bheja"),
     a priority. The counts are said by pile, so "inme se kitne meetings ke liye" is answered from the same card."""
     address, address_hi = _addr(user)
-    since, until, period_en, period_hi = _window(p)
     senders = _senders(p)
     want_piles = {_TYPE_PILES[t] for t in (p.get("types") or []) if t in _TYPE_PILES}
     want_state = p.get("filter") or ""
+    words = [w for w in re.findall(r"\w+", str(p.get("words") or "").lower()) if len(w) > 2]
+    # "Approval ke liye kya hai", "Himanshu ki taraf se koi message", "sign karne ko kuch hai": nothing said about
+    # when means what is WAITING for him, from any recent day (his rule, 24 Nov 2026), not only today's arrivals.
+    asked_waiting = (not p.get("from") and not p.get("minutes") and want_state in ("", "waiting", "open", "unseen")
+                     and (bool(want_piles) or senders is not None or bool(words) or bool(want_state)))
+    if asked_waiting and not want_state:
+        want_state = "open"
+    since, until, period_en, period_hi = _window(p, default_days=30 if asked_waiting else 0)
     want_priority = {"urgent": {"URGENT"}, "high": {"HIGH"}, "important": {"URGENT", "HIGH"}}.get(p.get("priority") or "")
     qs = Alert.objects.filter(recipient=user, created_at__gte=since, created_at__lt=until).select_related("sender").order_by("-created_at")
     if senders is not None:
@@ -868,6 +876,8 @@ def _alerts_view(user, p: dict) -> dict:
         local = tu.to_local(a.created_at)
         who = services.giver_words(a.sender)[0] if a.sender_id else "JARVIS"
         what = (task.title if task is not None else a.body if a.ref_type == "message" else a.title) or a.title
+        if words and not any(w in (what or "").lower() for w in words):
+            continue
         rows.append({
             "id": a.ref_id if a.ref_type in ("shared_task", "request") else str(a.id), "scope": "shared" if a.ref_type == "shared_task" else "",
             "title": what, "kind": _PILE_WORDS[pile][0].title(), "priority": a.priority, "status": state.title(),
@@ -882,13 +892,14 @@ def _alerts_view(user, p: dict) -> dict:
     narrowed_en = []
     if want_piles:
         narrowed_en.append(" and ".join(_PILE_WORDS[k][1] for k in _PILE_ORDER if k in want_piles))
-    if want_state:
+    if p.get("filter"):
         narrowed_en.append({"open": "still waiting"}.get(want_state, want_state))
     if senders:
         narrowed_en.append(f"from {p['who']}")
     title = "Notifications" + (f" · {', '.join(narrowed_en)}" if narrowed_en else "")
     view = _table("alerts", title, rows[:80], [("kind", "What"), ("title", "Says"), ("who", "From"), ("status", "Status"), ("when", "When")],
-                  subtitle=f"{len(rows)} {period_en}" + (f" · {waiting_n} still waiting for you" if waiting_n else ""))
+                  subtitle=f"{len(rows)} waiting for you" if asked_waiting else
+                  f"{len(rows)} {period_en}" + (f" · {waiting_n} still waiting for you" if waiting_n else ""))
     view["stats"] = [{"label": _PILE_WORDS[k][1].title(), "value": n, "tone": "accent" if k in ("approval", "request") else "info", "icon": {
         "approval": "ribbon-outline", "request": "mail-unread-outline", "meeting": "people-outline", "task": "checkbox-outline",
         "message": "chatbubble-ellipses-outline", "update": "notifications-outline"}[k]} for k, n in by_pile.items() if n]
@@ -899,6 +910,14 @@ def _alerts_view(user, p: dict) -> dict:
         piles_hi = " या ".join(_PILE_WORDS[k][2] for k in _PILE_ORDER if k in want_piles)
         base = f"no {piles_en}" if want_piles else "nothing"
         tail = f" from {p['who']}" if senders else ""
+        if asked_waiting:
+            # "No, Sir, nothing to sign is waiting." / "No, Sir, no approvals from Mansi are waiting."
+            about_en = f" about {p.get('words')}" if words else ""
+            about_hi = f"{p.get('words')} के लिए " if words else ""
+            tail_hi = f"{p['who']} की तरफ़ से " if senders else ""
+            view["summary"] = f"No, {address}, " + (f"{base}{about_en}{tail} are waiting." if want_piles else f"nothing{about_en}{tail} is waiting.")
+            view["summary_hi"] = f"नहीं {address_hi}, {tail_hi}{about_hi}" + (f"कोई {piles_hi} नहीं है।" if want_piles else "कुछ नहीं है।")
+            return view
         state_en = {"seen": "that you have seen", "unseen": "unseen", "approved": "approved", "declined": "declined",
                     "waiting": "waiting for you", "open": "still waiting"}.get(want_state, "")
         en = f"{base}{tail} {state_en} {period_en}." if state_en else f"{base}{tail} came {period_en}."
@@ -913,6 +932,14 @@ def _alerts_view(user, p: dict) -> dict:
         # Counts only, never a title: he reads them one at a time when he says so (his rule, 24 Nov 2026).
         parts_en.append(f"{n} {w[0] if n == 1 else w[1]}")
         parts_hi.append(f"{n} {w[2]}")
+    if asked_waiting:
+        # What is waiting, exactly as asked: a few are named with who sent them; many are counted (read on "padho").
+        said, said_hi = ", ".join(parts_en), ", ".join(parts_hi)
+        if len(rows) <= 3:
+            names = "; ".join(r["title"] + (f" ({r['who']})" if r["who"] and r["who"] != "JARVIS" else "") + (f", {r['amount']}" if r["amount"] else "")
+                             for r in rows)
+            return _summ(view, address, address_hi, f"yes, {said} waiting: {names}.", f"जी, {said_hi} इंतज़ार में: {names}।")
+        return _summ(view, address, address_hi, f"yes, {said} waiting.", f"जी, {said_hi} इंतज़ार में।")
     en = f"{period_en}: " + ", ".join(parts_en) + "." + (f" {waiting_n} still waiting for you." if waiting_n else "")
     hi = f"{period_hi}: " + ", ".join(parts_hi) + "।" + (f" {waiting_n} अभी भी आपके इंतज़ार में।" if waiting_n else "")
     return _summ(view, address, address_hi, en, hi)

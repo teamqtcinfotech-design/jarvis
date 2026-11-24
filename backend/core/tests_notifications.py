@@ -109,7 +109,8 @@ class PilesTests(NotificationsCase):
         view = datacards.build(self.md, "alerts", params={"types": ["MESSAGE"]})
         self.assertEqual([r["title"] for r in view["rows"]], ["Vendor ka call aaya tha"])
         self.assertEqual(view["title"], "Notifications · messages")
-        self.assertEqual(view["summary"], "Sir, today: 1 message. 1 still waiting for you.")  # counts only, never the message itself
+        # Asked for one pile with nothing said about when = what is waiting; a few are named (his rule, 24 Nov evening).
+        self.assertEqual(view["summary"], "Sir, yes, 1 message waiting: Vendor ka call aaya tha (Mansi).")
         # "Inme se meetings aur approvals": two piles, counted apart.
         view = datacards.build(self.md, "alerts", params={"types": ["MEETING", "APPROVAL"]})
         self.assertEqual(self.stats(view), {"Approvals": 1, "Meetings": 1, "Waiting for you": 2})
@@ -164,11 +165,56 @@ class ApprovedOnlyTests(NotificationsCase):
         view = datacards.build(self.md, "approvals", params={"filter": "waiting"})
         self.assertEqual([r["title"] for r in view["rows"]], ["Printer Toner"])
         self.assertEqual(view["summary"], "Sir, 1 approval waiting for you in the last 30 days: Printer Toner (₹10,000).")
-        # In the notifications card the approval pile says the state of each.
-        view = datacards.build(self.md, "alerts", params={"types": ["APPROVAL"]})
+        # In today's notifications card the approval pile says the state of each (a pile with no day named would be
+        # only what is waiting).
+        today = timezone.localdate().isoformat()
+        view = datacards.build(self.md, "alerts", params={"types": ["APPROVAL"], "from": today, "to": today})
         states = {r["title"]: r["status"] for r in view["rows"]}
         self.assertEqual(states, {"Vendor Advance": "Approved", "Office Chairs": "Declined", "Printer Toner": "Waiting"})
         self.assertEqual(self.stats(view)["Waiting for you"], 1)
         approved = datacards.build(self.md, "alerts", params={"types": ["APPROVAL"], "filter": "approved"})
         self.assertEqual([r["title"] for r in approved["rows"]], ["Vendor Advance"])
         self.assertEqual(SharedTask.objects.get(id=approval.id).status, Status.COMPLETED)
+
+
+class WaitingQuestionTests(NotificationsCase):
+    """"Approval ke liye kya hai", "Mansi ki taraf se koi message?", "sign karne ko kuch hai?": asked by kind, sender
+    or words with nothing said about when = what is WAITING, from any recent day; a few are named, many are counted,
+    nothing is said plainly (his rule, 24 Nov 2026)."""
+
+    def test_a_narrowed_question_with_no_period_means_what_is_waiting_from_any_day(self):
+        old, task, meeting, approval = self.fill()
+        Alert.objects.filter(ref_id=str(approval.id)).update(created_at=timezone.now() - timedelta(days=3))
+        view = datacards.build(self.md, "alerts", params={"types": ["APPROVAL"]})
+        self.assertEqual([r["title"] for r in view["rows"]], ["Vendor Advance"])
+        self.assertTrue(view["summary"].startswith("Sir, yes, 1 approval waiting: Vendor Advance (Nikki)"), view["summary"])
+        self.assertEqual(view["subtitle"], "1 waiting for you")
+        self.assertTrue(view["summary_hi"].startswith("सर, जी, 1 मंज़ूरी इंतज़ार में: Vendor Advance (Nikki)"), view["summary_hi"])
+
+    def test_a_sender_question_names_the_few(self):
+        self.fill()
+        view = datacards.build(self.md, "alerts", params={"who": "Mansi", "types": ["MESSAGE"]})
+        self.assertEqual(view["summary"], "Sir, yes, 1 message waiting: Vendor ka call aaya tha (Mansi).")
+
+    def test_nothing_to_sign_is_said_plainly(self):
+        self.fill()
+        view = datacards.build(self.md, "alerts", params={"words": "sign"})
+        self.assertEqual([r["title"] for r in view["rows"]], ["Sign the GST file"])
+        self.assertEqual(view["summary"], "Sir, yes, 1 task waiting: Sign the GST file (Nikki).")
+        view = datacards.build(self.md, "alerts", params={"words": "lease"})
+        self.assertEqual(view["summary"], "No, Sir, nothing about lease is waiting.")
+        self.assertEqual(view["summary_hi"], "नहीं सर, lease के लिए कुछ नहीं है।")
+        view = datacards.build(self.md, "alerts", params={"types": ["APPROVAL"], "who": "Mansi"})
+        self.assertEqual(view["summary"], "No, Sir, no approvals from Mansi are waiting.")
+
+    def test_many_waiting_are_counted_not_named(self):
+        self.fill()
+        for n in range(4):
+            services.send_message_to(self.mansi, [self.md], f"Note {n}")
+        view = datacards.build(self.md, "alerts", params={"types": ["MESSAGE"]})
+        self.assertEqual(view["summary"], "Sir, yes, 5 messages waiting.")
+        self.assertNotIn("Note", view["summary"])
+
+    def test_the_brain_is_told(self):
+        from core import ai_brain
+        self.assertIn("WHAT IS WAITING, asked by kind, sender or words", ai_brain.COMMAND_SYSTEM_PROMPT)

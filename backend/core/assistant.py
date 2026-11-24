@@ -1054,11 +1054,14 @@ def _book_card(user: User, draft: dict, pending: dict, card: dict, address: str,
     return _after_card(user, draft, pending, address, en, hi)
 
 
-# How he answers a clash question, in his own words. Which one he means: the one being added ("is", "ye", "isko", its
-# name) or the one already there ("us", "wo", "purani", "doosri", its name); what to do with it: move it on, drop it,
-# keep it short, keep it where it is. A name beats a pronoun; nobody named means the new one (the one he is adding is
-# what bends, as he asked: "jo abhi add kar raha hoon, na ki jo already schedule hai").
-_THIS_ONE = re.compile(r"\b(is|isko|ise|isi|iska|ye|yeh|yah|this|this one|nayi|naya|nai|new one|the new|abhi wal[ai])\b", re.IGNORECASE)
+# How he answers a clash question, in his own words. Which one he means: the one being added ("nayi wali", its name)
+# or the one already there ("us", "wo", "purani", "doosri", its name); what to do with it: move it on, drop it, keep
+# it short, keep it where it is. A name beats a pronoun. A bare "is" / "ye" / "isko" is the meeting JARVIS just named
+# (the one already there) when he moves or drops it ("theek hai, isko aage kar do" = Sharma ji's moves; his rule,
+# 24 Nov 2026), and the new one when he keeps it where he said ("isko yahin rakho"). Nobody named and no pronoun
+# means the new one (the one he is adding is what bends, as he asked on 21 Nov).
+_THIS_ONE = re.compile(r"\b(nayi|naya|nai|new one|the new|abhi wal[ai]|jo (?:abhi )?(?:add|bana|rakh) (?:kar )?rah[ai])\b", re.IGNORECASE)
+_PRONOUN_ONE = re.compile(r"\b(is|isko|ise|isi|iska|ye|yeh|yah|this|this one)\b", re.IGNORECASE)
 _OTHER_ONE = re.compile(r"\b(us|usko|use|usi|uska|wo|woh|that|that one|purani|purana|pehle wal[ai]|pehli wali|old one|the old|doosr[ai]|dusr[ai]|"
                         r"the other|other one|baaki|baki)\b", re.IGNORECASE)
 _WHENEVER = re.compile(r"\b(kabhi bhi|kahin bhi|jab bhi|jab (?:main |mai )?free|jab time (?:ho|mile)|jab jagah|jahan jagah|jahan time|whenever|"
@@ -1067,9 +1070,11 @@ _WHENEVER = re.compile(r"\b(kabhi bhi|kahin bhi|jab bhi|jab (?:main |mai )?free|
 _MOVE_WORDS = re.compile(r"\b(aage|age|shift|move|baad|badal|badlo|later|push|reschedule|adjust|khiska|postpone|aage karo|aage kar)\b", re.IGNORECASE)
 _DROP_WORDS = re.compile(r"\b(hatao|hata do|hata|cancel|chhodo|chhod do|choddo|chodo|rehne do|mat rakho|mat karo|nahi chahiye|drop|delete|remove|skip|"
                          r"nikaal|nikal do)\b", re.IGNORECASE)
+_HARD_DROP = re.compile(r"\b(hatao|hata do|hata|cancel|chhodo|chhod do|choddo|chodo|mat rakho|mat karo|nahi chahiye|drop|delete|remove|skip|"
+                        r"nikaal|nikal do)\b", re.IGNORECASE)
 _SHORT_WORDS = re.compile(r"\b(chhoti|choti|chhota|chota|short|shorter|minute|minutes|min|kam kar|small|half|aadhe|aadha)\b", re.IGNORECASE)
 _KEEP_WORDS = re.compile(r"\b(yahin|wahi|wahin|same time|isi time|usi time|as it is|waise hi|hi rakho|hi rakh|keep (?:it )?(?:there|here)|"
-                         r"dono rakho|dono rakh|both|overlap|same)\b", re.IGNORECASE)
+                         r"dono rakho|dono rakh|both|overlap|same|pe hi|par hi|baje hi|hi chahiye|hi rakhn[ai]|hi hog[ai]|zaroori|has to be|must)\b", re.IGNORECASE)
 
 
 def _title_hits(text: str, title: str) -> int:
@@ -1124,6 +1129,13 @@ def _clash_subject(text: str, pending: dict, sched: dict) -> str:
         return "other"
     if this and not that:
         return "new"
+    if not this and _PRONOUN_ONE.search(text):
+        # "Isko" alone: the meeting JARVIS just named when it is moved or dropped, the new one when it is kept.
+        moving = bool(_MOVE_WORDS.search(text) or _WHENEVER.search(text))
+        if _KEEP_WORDS.search(text) and not moving:
+            return "new"
+        if moving or _DROP_WORDS.search(text):
+            return "other"
     return ""
 
 
@@ -1137,15 +1149,23 @@ def _clash_way(text: str, cmd: dict, pending: dict, sched: dict) -> tuple[str, d
     d, t = _safe_date(str(cmd.get("due_date") or "")), _safe_time(str(cmd.get("due_time") or ""))
     subject = _clash_subject(text, pending, sched)
     moving = bool(_MOVE_WORDS.search(text) or _WHENEVER.search(text))
+    same_time = (t and t == _safe_time(str(pending.get("due_time") or "")) and (not d or d == _safe_date(str(pending.get("due_date") or ""))))
+    if same_time and subject != "other" and options.get("push"):
+        return "push", {}   # "Mehta ji 4 pe hi": the time said again is insisted on, so the other one moves
     if d or t:
         return ("time_other" if subject == "other" else "new_time"), {"due_date": d, "due_time": t}
-    if _DROP_WORDS.search(text) and not moving:
+    keeping = bool(_KEEP_WORDS.search(text)) and not moving
+    # "Usko wahin rehne do" keeps it where it is; "rehne do" alone, or any harder word, drops it.
+    dropping = bool(_HARD_DROP.search(text)) or (bool(_DROP_WORDS.search(text)) and not keeping)
+    if dropping and not moving:
         return ("drop_other" if subject == "other" else "drop_new"), {}
     if _SHORT_WORDS.search(text) and options.get("fit") and subject != "other" and not moving:
         return "fit", {}
+    if subject == "other" and keeping:
+        return "move", {}   # "usko wahin rehne do": the other stays, so the new one goes elsewhere (his words beat the model's reading)
     if subject == "other" and (moving or picked == "push"):
         return "push", {}
-    if subject == "new" and _KEEP_WORDS.search(text) and not moving:
+    if subject == "new" and keeping:
         return "push", {}   # "isko yahin rakho": this one stays, so the other moves on
     if subject == "new" and (moving or picked == "move"):
         return "move", {}
@@ -3218,14 +3238,14 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             when_hi = (f"{tu.minutes_phrase_hi(due_in)} में ({tu.fmt_time_hi(exact_at)})" if exact_at
                        else _due_label_hi(draft["due_date"], draft["due_time"]))
             told = lead and (not exact_at or due_in > lead)
-            en = f"Booked, {address}: {draft['title']}, {when_en}, {tu.minutes_phrase(mins)}."
-            hi = f"बुक हो गई, {address_hi}: {draft['title']}, {when_hi}, {tu.minutes_phrase_hi(mins)} की।"
+            en = f"Booked: {draft['title']}, {when_en}, {tu.minutes_phrase(mins)}."
+            hi = f"बुक हो गई: {draft['title']}, {when_hi}, {tu.minutes_phrase_hi(mins)} की।"
             if told:
                 en += f" I'll remind you {tu.minutes_phrase(lead)} before."
                 hi += f" {tu.minutes_phrase_hi(lead)} पहले याद दिला दूँगा।"
             if action in ("pa_meeting", "person_meeting"):
-                en += f" {pa_name} has been told."
-                hi += f" {pa_name} को बता दिया है।"
+                en += f" {pa_name} has been told to come."
+                hi += f" {pa_name} को आने के लिए बोल दिया है।"
             for note in sched_now.get("notes") or []:
                 en += f" {note}"
             for note in sched_now.get("notes_hi") or []:

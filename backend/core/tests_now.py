@@ -55,7 +55,7 @@ class AbhiOnWorkTests(NowCase):
             intent="send_alert", staff_name="Nikki", recipients=["Nikki"], title="Come to Sir's office now",
             notes="Sir ke office mein abhi aa jaiye.", due_date=self.now.date().isoformat(), due_time=self.hhmm(self.now)))
         self.assertTrue(d["booked"], d["spoken_reply"])
-        self.assertIn("Sent to Nikki", d["spoken_reply"])
+        self.assertIn("gone to Nikki", d["spoken_reply"])
         alert = Alert.objects.get(recipient=self.nikki, ref_type="message")
         self.assertIsNone(alert.snoozed_until)  # not held for later: now
         self.assertTrue(alert.ring)

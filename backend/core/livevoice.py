@@ -218,9 +218,11 @@ TOOLS = [
          "reply": {"type": "string", "enum": ["yes", "no", "later"]},
          "choice": {"type": "string", "enum": ["", "fit", "push", "move"],
                     "description": "to a clash question: '' for a plain yes (the server does what it proposed); move = put the NEW one at the "
-                                   "time offered or wherever it is free ('isko aage kabhi bhi rakh do', 'jab free ho', 'kahin bhi daal do'); "
-                                   "push = the new one stays where said and the OTHER meeting moves on ('SBI wali ko aage karo', 'doosri shift karo'); "
-                                   "fit = keep the new one short. Put the speaker's words in said: the server also reads which meeting they named."},
+                                   "time offered or wherever it is free ('nayi wali baad mein rakho', 'jab free ho', 'kahin bhi daal do'); "
+                                   "push = the new one stays where said and the OTHER meeting moves on ('theek hai, isko aage kar do', 'SBI wali ko "
+                                   "aage karo', 'doosri shift karo', 'Mehta ji 4 pe hi'); fit = keep the new one short. A bare 'isko' / 'usko' after "
+                                   "the clash question is the meeting JARVIS just named. Put the speaker's words in said: the server also reads "
+                                   "which meeting they named."},
          "keep_original": {"type": "boolean", "description": "true when the speaker declines the time JARVIS offered and wants it exactly as first said"},
          "which_ids": {"type": "array", "items": {"type": "string"}, "description": "for 'which one?': the ids chosen, else empty"},
          "all": {"type": "boolean", "description": "for 'which one?': 'both' / 'all of them'"},

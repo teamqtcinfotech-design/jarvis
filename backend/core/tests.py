@@ -1349,7 +1349,7 @@ class SchedulingTests(BaseCase):
             spoken_reply="Sir, task for Priya: courier the contract at 3 PM. Shall I save it?"))
         self.assertEqual(r["action"], "saved")  # clear: given at once
         self.assertNotIn("already has", r["show"])  # a task is never held up by her diary
-        self.assertIn("Given to Priya", r["show"])
+        self.assertIn("Priya has it", r["show"])
         self.assertTrue(SharedTask.objects.filter(title="Courier the Contract", assignee_user=self.pa).exists())
 
     def test_app_flow_settles_the_clash_on_the_server(self):
@@ -2969,6 +2969,42 @@ class MeetingJugglingTests(BaseCase):
         aman.refresh_from_db()
         self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "11:30")
 
+    def test_isko_aage_after_the_clash_moves_the_one_jarvis_named(self):
+        # His rule (24 Nov 2026): "theek hai, isko aage kar do" after "11 baje Aman review hai" moves Aman review,
+        # whatever the model read the pronoun as; the new one stays at 11.
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        self.turn(self.md_client, "11 baje priority meeting", self._new(day, at="11:00", minutes=30))
+        r = self.turn(self.md_client, "theek hai, isko aage kar do", _cmd(intent="confirm_pending", setting_value="move"))
+        self.assertEqual(r["action"], "saved", r)
+        aman.refresh_from_db()
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "11:30")
+        new = next(t for t in PrivateTask.objects.filter(priority=Priority.URGENT) if t.title == "Priority meeting")  # the title is encrypted
+        self.assertEqual(tu.to_local(new.due_at).strftime("%H:%M"), "11:00")
+
+    def test_insisting_on_the_time_moves_the_other(self):
+        # "Mehta ji 4 pe hi": the time said again is kept, and the meeting in the way moves on.
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        self.turn(self.md_client, "11 baje priority meeting", self._new(day, at="11:00", minutes=30))
+        r = self.turn(self.md_client, "priority meeting 11 baje hi", _cmd(intent="confirm_pending", due_date=day.isoformat(), due_time="11:00"))
+        self.assertEqual(r["action"], "saved", r)
+        aman.refresh_from_db()
+        self.assertEqual(tu.to_local(aman.due_at).strftime("%H:%M"), "11:30")
+        new = next(t for t in PrivateTask.objects.filter(priority=Priority.URGENT) if t.title == "Priority meeting")  # the title is encrypted
+        self.assertEqual(tu.to_local(new.due_at).strftime("%H:%M"), "11:00")
+
+    def test_usko_wahin_rehne_do_keeps_the_other_and_moves_the_new_one(self):
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        self.turn(self.md_client, "11 baje priority meeting", self._new(day, at="11:00", minutes=30))
+        r = self.turn(self.md_client, "usko wahin rehne do", _cmd(intent="confirm_pending", setting_value="push"))
+        self.assertEqual(r["action"], "saved", r)
+        aman.refresh_from_db()
+        self.assertEqual((tu.to_local(aman.due_at).strftime("%H:%M"), aman.status), ("11:00", "OPEN"))
+        new = next(t for t in PrivateTask.objects.filter(priority=Priority.URGENT) if t.title == "Priority meeting")  # the title is encrypted
+        self.assertNotEqual(tu.to_local(new.due_at).strftime("%H:%M"), "11:00")
+
     def test_one_time_is_never_given_to_two_meetings(self):
         day = _workday(2)
         aman = self._meeting("Aman review", day, time(11, 0))
@@ -3403,7 +3439,7 @@ class ManagerTests(BaseCase):
         d = self.turn(self.md_client, "Mansi ko bolo vendor list bana de",
                       _cmd(intent="assign_to_staff", staff_name="Mansi", title="Make the vendor list", engine="ai"))
         self.assertEqual(d["action"], "saved", d)   # clear: given at once
-        self.assertIn("Given to Mansi", d["show"])
+        self.assertIn("Mansi has it", d["show"])
         task = SharedTask.objects.get(title="Make the vendor list")
         self.assertEqual((task.assignee_type, task.assignee_user, task.origin), ("USER", self.mg, "GIVEN"))
         self.assertTrue(Alert.objects.filter(recipient=self.mg, ref_type="shared_task", ref_id=str(task.id)).exists())
