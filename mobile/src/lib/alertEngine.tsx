@@ -216,6 +216,15 @@ interface EngineValue {
   /** The item the home screen's rotating banner shows right now: his "isko" / "this one" means it (null elsewhere). */
   spotlight: EngineItem | null;
   setSpotlight: (item: EngineItem | null) => void;
+  /** "Padhna band karo": the reading stops where it is; what was not read stays on the list, nothing is dropped. */
+  stopReading: () => void;
+  /** How many items still wait to be read one by one after the current one (a read is in progress when > 0). */
+  pendingReads: () => number;
+  /** "Isse pehle wala": the item read before this one is said again. */
+  previous: () => void;
+  /** "Mujhse abhi bolo mat": nothing is spoken until then; what arrives is kept and counted when the quiet ends. */
+  quietUntil: number;
+  setQuietFor: (minutes: number) => void;
 }
 
 const EngineContext = createContext<EngineValue | null>(null);
@@ -446,6 +455,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const snoozed = useRef(new Map<string, { item: EngineItem; until: number }>());
   const scheduledSig = useRef('');
   const presenceRef = useRef<PresenceState>(presence.state);
+  const quietRef = useRef(0); // "mujhse abhi bolo mat": nothing is spoken until this moment (ms)
   const prefsRef = useRef(prefs);
   useEffect(() => {
     prefsRef.current = prefs;
@@ -536,10 +546,13 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [setCurrent, setQueued],
   );
 
+  // The order things were read aloud in, so "isse pehle wala" can go back one.
+  const readOrder = useRef<string[]>([]);
   const deliver = useCallback(
     (item: EngineItem, mode: 'loud' | 'silent') => {
       show(item, mode);
       if (mode === 'loud') {
+        readOrder.current = [...readOrder.current.filter((k) => k !== item.key), item.key].slice(-40);
         Haptics.notificationAsync(
           item.priority === 'URGENT' ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success,
         ).catch(() => undefined);
@@ -630,6 +643,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const [allVisible, setAllVisible] = useState(false);
   const [allGroup, setAllGroup] = useState<AlertGroup | 'other' | null>(null);
   const [spotlight, setSpotlight] = useState<EngineItem | null>(null);
+  const [quietUntil, setQuietUntil] = useState(0);
+  const quietTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const presentNextRef = useRef(presentNext);
   useEffect(() => {
     presentNextRef.current = presentNext;
@@ -676,6 +691,19 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     setOffer({ id: offerSeq.current, count: items.length, kind: 'held', ...words });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
   }, [address, addressHi]);
+  // "Mujhse abhi bolo mat, 1 ghante tak": held and silent till then; at the end, the count of what came.
+  const setQuietFor = useCallback((minutes: number) => {
+    const until = Date.now() + Math.max(1, minutes) * 60_000;
+    quietRef.current = until;
+    setQuietUntil(until);
+    if (quietTimer.current) clearTimeout(quietTimer.current);
+    quietTimer.current = setTimeout(() => {
+      quietTimer.current = null;
+      quietRef.current = 0;
+      setQuietUntil(0);
+      offerHeldIfBack();
+    }, until - Date.now());
+  }, [offerHeldIfBack]);
 
   // News that arrives while he is here (work given, messages, staff updates, nudges, suggestions) is never read out
   // unasked: it goes on the banner's stack, and after a moment JARVIS says only how many came and asks whether to
@@ -704,6 +732,28 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     },
     [show, tell, address, addressHi],
   );
+
+  // "Padhna band karo": the reading stops here; what was not read stays on the list. "Isse pehle wala": one back.
+  const stopReading = useCallback(() => {
+    toPresent.current = [];
+    newsRef.current = [];
+    setOffer(null);
+  }, []);
+  const pendingReads = useCallback(() => toPresent.current.length, []);
+  const previous = useCallback(() => {
+    const cur = currentRef.current;
+    const order = readOrder.current;
+    const at = cur ? order.lastIndexOf(cur.key) : order.length;
+    const pile = [currentRef.current, ...queueRef.current, ...heldRef.current].filter((i): i is EngineItem => !!i);
+    for (let i = at - 1; i >= 0; i -= 1) {
+      const back = pile.find((p) => p.key === order[i]);
+      if (back) {
+        presentItem(back);
+        return;
+      }
+    }
+    sayTwin('Nothing before this one.', 'इससे पहले कुछ नहीं है।', { interrupt: true });
+  }, [presentItem]);
 
   const setVoiceProbe = useCallback((probe: (() => Promise<boolean>) | null) => {
     voiceProbe.current = probe;
@@ -748,6 +798,11 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       const missed = item.source === 'reminder' && item.followups === 0 && now - item.fireAt > STALE_MS;
       if (missed) {
         hold(item, 'missed'); // fired while the app was closed or the phone asleep
+        return null;
+      }
+      if (now < quietRef.current) {
+        // "Mujhse abhi bolo mat": kept, shown without a sound, counted when the quiet ends.
+        hold(item, 'quiet');
         return null;
       }
       if (item.priority === 'LOW' && item.source === 'server' && !item.ring) {
@@ -1491,6 +1546,11 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     setAllGroup,
     spotlight,
     setSpotlight,
+    stopReading,
+    pendingReads,
+    previous,
+    quietUntil,
+    setQuietFor,
     meetingMode,
     setMeetingMode,
     offer,

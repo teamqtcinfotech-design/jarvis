@@ -215,13 +215,13 @@ class BatchClashTests(BaseCase):
         self.assertIn("URGENT meeting then, Board review at 4 PM; that stays", d["spoken_reply"])
         self.assertNotIn("push", d["schedule"]["options"])
         self.assertTrue(d["schedule"]["suggested"], d["schedule"])  # the way out offered: another time, taken with a plain yes
-        self.assertIn("Shall I put it at", d["spoken_reply"])
+        self.assertIn("Shall I put Meeting with Ankur at", d["spoken_reply"])
         # A yes with "push" cannot move it: said so, asked again, nothing booked.
         d2 = self.interpret("board review aage kar do", _cmd(intent="confirm_pending", setting_value="push", spoken_reply="Ji."),
                             awaiting="JARVIS asked about the clash", pending=d)
         self.assertFalse(d2.get("booked"))
         self.assertIn("Board review is urgent and stays", d2["spoken_reply"])
-        self.assertIn("Shall I put it at", d2["spoken_reply"])
+        self.assertIn("Shall I put Meeting with Ankur at", d2["spoken_reply"])
 
 
 class OneBreathTests(BaseCase):
@@ -252,7 +252,7 @@ class OneBreathTests(BaseCase):
                                        "due_date": day, "due_time": "11:30", "said": "Monday saadhe gyarah baje Khanna ji ke saath meeting"})
         self.assertTrue(d1["schedule"]["hard"], d1["say"])
         self.assertIn("URGENT meeting then, Board meeting at 11 AM; that stays", d1["spoken_reply"])
-        self.assertIn("Shall I put it at", d1["spoken_reply"])
+        self.assertIn("Shall I put Meeting with Khanna at", d1["spoken_reply"])
         self.assertTrue(d1["say"])  # the Hindi twin, since he spoke Hinglish
         self.assertEqual(d1["schedule"]["default"], "move")
         # 2. A payment the same breath: saved at once, nothing said (the question stands), the card comes back as it was.

@@ -9,7 +9,7 @@ import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { type GestureResponderEvent, PanResponder, type PanResponderGestureState, type PanResponderInstance, Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { type AlertGroup, chipOf, type EngineItem, pileOf, useAlertEngine } from '@/lib/alertEngine';
@@ -37,12 +37,29 @@ import { Icon, IconButton, Txt } from './ui';
 const DOT: Record<string, string> = { present: colors.success, away: colors.faint, facedown: colors.inkSoft, meeting: colors.gold, quiet: colors.inkSoft };
 const ORB_CORNER = 84; // the small orb in the corner (its halo makes it look a little smaller than this)
 
-function nextTimed(items: TaskItem[], now: number): { item: TaskItem; start: number } | null {
-  const timed = items
-    .map((t) => ({ item: t, start: Date.parse(t.scheduled_start ?? t.due_at ?? '') }))
-    .filter((x) => !Number.isNaN(x.start) && x.start >= now - 5 * 60_000 && x.item.status !== 'COMPLETED' && x.item.status !== 'CANCELLED')
+/** What is ahead by the clock: everything with a time, plus meetings and calls that have only a day (counted at the
+ *  end of that day), earliest first. The Next up banner shows the first and swipes through the rest. A task with
+ *  only a date is not "next up": it belongs to the day, not to a moment. */
+function timedAhead(items: TaskItem[], now: number): { item: TaskItem; start: number }[] {
+  const meeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
+  return items
+    .filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED' && (t.scheduled_start || t.due_at || (meeting(t) && t.due_date)))
+    .map((t) => ({ item: t, start: Date.parse(t.scheduled_start ?? t.due_at ?? `${t.due_date}T23:59:59`) }))
+    .filter((x) => !Number.isNaN(x.start) && x.start >= now - 5 * 60_000)
     .sort((a, b) => a.start - b.start);
-  return timed[0] ?? null;
+}
+
+/** A banner that moves by hand: a sideways drag (taken from the tap inside it, kept from the page's scroll). */
+function makeSwipe(onDir: (dir: 1 | -1) => void): PanResponderInstance {
+  const sideways = (_e: GestureResponderEvent, g: PanResponderGestureState) => Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5;
+  return PanResponder.create({
+    onMoveShouldSetPanResponder: sideways,
+    onMoveShouldSetPanResponderCapture: sideways,
+    onPanResponderTerminationRequest: () => false,
+    onPanResponderRelease: (_e, g) => {
+      if (Math.abs(g.dx) >= 30) onDir(g.dx < 0 ? 1 : -1);
+    },
+  });
 }
 
 const inWords = (ms: number) => {
@@ -60,11 +77,12 @@ const inWordsHi = (ms: number) => {
   return `${h} घंटे${m % 60 ? ` ${m % 60} मिनट` : ''} में`;
 };
 const nowMs = () => Date.now();
+const localIso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const SWIPE_PAUSE = 30_000; // after he swipes the turning banner it holds still this long
 
 /** One information banner (his home screen, 24 Nov 2026): what it is, when, one or two lines; a tap opens it, the
  *  speaker icon makes JARVIS say it. The text is information only, never "say this" or "tap that". */
-type Banner = { key: string; icon: string; label: string; when: string; lines: string[]; sub: string; go: () => void; speak: () => void; swipe?: boolean };
+type Banner = { key: string; icon: string; label: string; when: string; lines: string[]; sub: string; go: () => void; speak: () => void; swipe?: PanResponderInstance };
 /** Work that can be fitted into free time (never a meeting or a call) and its usual minutes when none is estimated. */
 const USUAL: Partial<Record<Kind, number>> = { TASK: 30, PAYMENT: 10, FOLLOW_UP: 15 };
 const RANK: Record<Priority, number> = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
@@ -120,7 +138,18 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime].filter((t) => t.kind === 'APPROVAL' && t.status !== 'COMPLETED' && t.status !== 'CANCELLED')
     : [];
   const pending = (data?.requests.filter((r) => r.state === 'PENDING').length ?? 0) + approvals.length;
-  const next = data ? nextTimed([...data.today, ...data.overdue], now) : null;
+  const ahead = data ? timedAhead([...data.overdue, ...data.today, ...data.upcoming], now) : [];
+  const next = ahead[0] ?? null;
+  // The Next up banner swipes through what is ahead; the index comes back to the first when the list changes.
+  const [meetAt, setMeetAt] = useState(0);
+  const meetSwipe = useMemo(() => makeSwipe((dir) => setMeetAt((n) => n + dir)), []);
+  const shownMeet = ahead.length ? ahead[((meetAt % ahead.length) + ahead.length) % ahead.length] : null;
+  const meetIdx = shownMeet ? ahead.indexOf(shownMeet) : 0;
+  const midnight = (() => {
+    const d = new Date(now);
+    d.setHours(24, 0, 0, 0);
+    return d.getTime();
+  })();
   // Free right now? Nothing timed is running, and the next timed item is at least half an hour away (or there is none).
   const freeTill = (() => {
     if (!data) return null;
@@ -137,7 +166,6 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     return { until: coming ? new Date(coming.start).toISOString() : null };
   })();
   // Today means today: late items from earlier days are a banner, not rows that crowd out the day.
-  const isMeeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
   const lateCount = data?.overdue.length ?? 0;
   // What is waiting, by chip: task alerts under Tasks, meeting alerts under Meetings, messages under Messages, the
   // rest (approvals, requests, updates, reminders) under Alerts. The held items count too: the sheet shows them.
@@ -165,12 +193,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     setPausedUntil(nowMs() + SWIPE_PAUSE);
     setTurn((n) => n + dir);
   }, []);
-  const swipe = useMemo(() => PanResponder.create({
-    onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
-    onPanResponderRelease: (_e, g) => {
-      if (Math.abs(g.dx) >= 30) onSwipe(g.dx < 0 ? 1 : -1);
-    },
-  }), [onSwipe]);
+  const spotSwipe = useMemo(() => makeSwipe(onSwipe), [onSwipe]);
   const shown = pile.length ? pile[((turn % pile.length) + pile.length) % pile.length] : null;
   const setSpotlight = engine.setSpotlight;
   useEffect(() => {
@@ -185,7 +208,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     if (!data) return [];
     if (served?.question?.plan?.length) return served.question.plan.map((p) => ({ title: p.title, minutes: p.minutes }));
     if (!freeTill) return [];
-    const end = freeTill.until ? Date.parse(freeTill.until) : now + 4 * 60 * 60_000;
+    const end = freeTill.until ? Date.parse(freeTill.until) : midnight; // nothing timed ahead today: the day runs to midnight
     const cands = [...data.overdue, ...data.today.filter((t) => !t.due_at || Date.parse(t.due_at) <= now), ...data.anytime]
       .filter((t) => USUAL[t.kind] !== undefined && t.status !== 'COMPLETED' && t.status !== 'CANCELLED' && !(t.scheduled_start && Date.parse(t.scheduled_start) >= now))
       .map((t, i) => ({ t, i, group: t.overdue ? 0 : t.due_date ? 1 : 2 }))
@@ -201,11 +224,6 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     return out;
   })();
   const freeUntil = freeTill?.until ?? served?.question?.until ?? null;
-  // The next meeting or call ahead (another day), for when nothing timed is left today.
-  const ahead = data
-    ? data.upcoming.filter((t) => isMeeting(t) && t.status !== 'COMPLETED' && t.status !== 'CANCELLED')
-        .sort((a, b) => (a.due_at ?? a.due_date ?? '').localeCompare(b.due_at ?? b.due_date ?? ''))[0] ?? null
-    : null;
   // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
   const voiceItem = conv.itemToOpen && data
     ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.team_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
@@ -325,9 +343,9 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           let work: Banner | null = null;
           if (plan.length) {
             const two = plan.slice(0, 2);
-            const till = freeUntil ? `till ${timeOf(freeUntil)}` : 'for the rest of the day';
-            const tillHi = freeUntil ? `${timeOf(freeUntil)} तक` : 'आज पूरे दिन';
-            work = { key: 'free', icon: 'sparkles-outline', label: 'Free time', when: freeUntil ? `till ${timeOf(freeUntil)}` : 'rest of the day',
+            const till = freeUntil ? `till ${timeOf(freeUntil)}` : 'till midnight';
+            const tillHi = freeUntil ? `${timeOf(freeUntil)} तक` : 'रात 12 बजे तक';
+            work = { key: 'free', icon: 'sparkles-outline', label: 'Free time', when: freeUntil ? `till ${timeOf(freeUntil)}` : 'till midnight',
               lines: two.map((p) => p.title),
               sub: `${two.map((p) => p.minutes).join(' + ')} min${plan.length > 2 ? ` · ${plan.length - 2} more after` : ''}`,
               go: () => (served ? openPile(chipOf(served), served) : select('late')),
@@ -345,26 +363,30 @@ export function PhoneHome({ user }: { user: SessionUser }) {
             }
           }
           let meet: Banner | null = null;
-          if (next) {
-            const at = timeOf(next.item.scheduled_start ?? next.item.due_at);
-            meet = { key: 'next', icon: kindIcon[next.item.kind] ?? 'time-outline', label: soon ? 'Starting now' : 'Next up', when: at,
-              lines: [next.item.title], sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}${next.item.priority === 'URGENT' ? ' · urgent' : ''}`,
-              go: () => setOpenTask(next.item),
-              speak: () => speakTwin(`${address}, ${soon ? 'starting now' : 'next'}: ${next.item.title}, at ${at}, ${inWords(next.start - now)}.`,
-                `${addressHi}, ${soon ? 'अभी शुरू हो रहा है' : 'अगला'}: ${next.item.title}, ${at} बजे, ${inWordsHi(next.start - now)}।`) };
-          } else if (ahead) {
-            const who = ahead.assignee.type !== 'MD' && ahead.assignee.staff_name ? ` with ${ahead.assignee.staff_name}` : '';
-            meet = { key: 'ahead', icon: kindIcon[ahead.kind] ?? 'people-outline', label: 'Next meeting', when: ahead.due_label, lines: [ahead.title],
-              sub: `${ahead.kind === 'CALL' ? 'Call' : 'Meeting'}${who} · nothing timed left today`, go: () => setOpenTask(ahead),
-              speak: () => speakTwin(`${address}, nothing timed is left today. Next ${ahead.kind === 'CALL' ? 'call' : 'meeting'}: ${ahead.title}, ${ahead.due_label}.`,
-                `${addressHi}, आज कुछ टाइम वाला बचा नहीं है। अगली ${ahead.kind === 'CALL' ? 'कॉल' : 'मीटिंग'}: ${ahead.title}, ${ahead.due_label}।`) };
+          if (shownMeet) {
+            // Today's item by the clock; another day's by its day. The first is "Next up"; a swipe shows what follows.
+            const m = shownMeet.item;
+            const isToday = m.due_date ? m.due_date === localIso(new Date(now)) : shownMeet.start < midnight;
+            const at = isToday && (m.scheduled_start ?? m.due_at) ? timeOf(m.scheduled_start ?? m.due_at) : m.due_label;
+            const first = meetIdx === 0;
+            const who = m.assignee.type !== 'MD' && m.assignee.staff_name ? ` with ${m.assignee.staff_name}` : '';
+            const kindWord = m.kind === 'CALL' ? 'Call' : m.kind === 'MEETING' ? 'Meeting' : 'Task';
+            const kindHi = m.kind === 'CALL' ? 'कॉल' : m.kind === 'MEETING' ? 'मीटिंग' : 'काम';
+            meet = { key: `meet-${m.scope}-${m.id}`, icon: kindIcon[m.kind] ?? 'time-outline',
+              label: first ? (soon ? 'Starting now' : 'Next up') : `After that · ${meetIdx + 1} of ${ahead.length}`, when: at,
+              lines: [m.title],
+              sub: `${isToday ? inWords(shownMeet.start - now) : `${kindWord}${who}`}${m.scope === 'private' ? ' · private' : ''}${m.priority === 'URGENT' ? ' · urgent' : ''}`,
+              go: () => setOpenTask(m), swipe: meetSwipe,
+              speak: () => speakTwin(
+                `${address}, ${first ? (soon ? 'starting now' : 'next') : 'after that'}: ${m.title}, ${at}${isToday ? `, ${inWords(shownMeet.start - now)}` : ''}.`,
+                `${addressHi}, ${first ? (soon ? 'अभी शुरू हो रहा है' : 'अगला') : 'उसके बाद'}: ${m.title}, ${at}${isToday ? ` बजे, ${inWordsHi(shownMeet.start - now)}` : ''}${!isToday ? ` (${kindHi})` : ''}।`) };
           }
           let spot: Banner | null = null;
           if (shown) {
             const at = pile.findIndex((p) => p.key === shown.key) + 1;
             spot = { key: `spot-${shown.key}`, icon: CHIP_ICON[chipOf(shown)], label: `${alertLabel(shown)}${shown.from ? ` · ${shown.from}` : ''}`, when: relativeAgo(shown.fireAt),
               lines: [shown.concealed ? 'Private reminder' : shown.title], sub: `${at} of ${pile.length} waiting`,
-              go: () => openPile(chipOf(shown), shown), speak: () => engine.readItems([shown]), swipe: true };
+              go: () => openPile(chipOf(shown), shown), speak: () => engine.readItems([shown]), swipe: spotSwipe };
           }
           const banners = (soon ? [meet, work, spot] : [work, meet, spot]).filter((b): b is Banner => !!b);
           if (!banners.length) {
@@ -375,7 +397,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
                 `${addressHi}, ${data ? 'आज कुछ टाइम वाला बचा नहीं है।' : 'अभी सर्वर से बात नहीं हो पा रही।'}`) });
           }
           return banners.map((b) => (
-            <View key={b.key} {...(b.swipe ? swipe.panHandlers : {})}>
+            <View key={b.key} {...(b.swipe ? b.swipe.panHandlers : {})}>
               <Pressable onPress={b.go} style={s.heroWrap}>
                 <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
                   <View style={s.heroTop}>

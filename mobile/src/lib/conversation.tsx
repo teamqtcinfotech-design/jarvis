@@ -195,8 +195,33 @@ function minutesIn(text: string): number | undefined {
   if (/\b(ek ghante|ek ghanta|an hour|one hour)\b|एक घंटे/i.test(text)) return 60;
   return undefined;
 }
+// His words about JARVIS's own voice (24 Nov 2026): "padhna band karo" / "bas" / "ruko" stops the reading where it is
+// (nothing is dropped); "isse pehle wala" goes back one; "mujhse abhi bolo mat" keeps JARVIS quiet for a while.
+const STOP_WORDS = /\b(stop|ruko|ruk jao|bas karo|bas|chup|mat padho|padhna band|sunana band|nahi padhna|don'?t read|stop reading|stop speaking)\b|रुको|बस|चुप|मत पढ़ो|पढ़ना बंद/i;
+const PREV_WORDS = /\b(pichhla|pichla|previous|pehle wala|pehle wali|isse pehle|iske pehle|usse pehle|go back|peeche wala)\b|पिछला|पहले वाला|इससे पहले|उससे पहले/i;
+const QUIET_WORDS = /\b(bolo mat|mat bolo|bolo hi mat|bolna mat|chup raho|chup ho jao|be quiet|don'?t speak|don'?t disturb|disturb mat|suggestions? mat|yaad mat dila|remind mat|mute|silent rehna)\b|बोलो मत|मत बोलो|चुप रहो|डिस्टर्ब मत/i;
+/** "5 baje tak": minutes from now till that clock time today (the evening reading when the morning one has gone). */
+function untilMinutes(text: string): number | undefined {
+  const m = text.match(/(\d{1,2})(?::(\d{2}))?\s*(?:baje|बजे|pm|am|o'?clock)/i);
+  if (!m) return undefined;
+  let h = Number(m[1]);
+  const mi = Number(m[2] ?? 0);
+  const now = new Date();
+  if (/pm/i.test(m[0]) && h < 12) h += 12;
+  if (!/am|pm/i.test(m[0]) && h <= 12 && h * 60 + mi <= now.getHours() * 60 + now.getMinutes()) h += 12;
+  const target = new Date(now);
+  target.setHours(h, mi, 0, 0);
+  const diff = Math.round((target.getTime() - now.getTime()) / 60_000);
+  return diff > 0 ? diff : undefined;
+}
+const clockIn = (minutes: number) => {
+  const d = new Date(Date.now() + minutes * 60_000);
+  const h = d.getHours() % 12 || 12;
+  const mm = d.getMinutes();
+  return `${h}${mm ? `:${String(mm).padStart(2, '0')}` : ''} ${d.getHours() < 12 ? 'AM' : 'PM'}`;
+};
 // Going through the alerts by voice: skip to the next one; lay them all out.
-const NEXT_WORDS = /^(?:ok(?:ay)?[,.]?\s*)?(?:next|agla|agli|aage|skip|chhodo|rehne do|next (?:one|wala|notification|alert)|agla (?:wala|notification|alert)|अगला|आगे|स्किप)[.!]?$/i;
+const NEXT_WORDS =/^(?:ok(?:ay)?[,.]?\s*)?(?:next|agla|agli|aage|skip|chhodo|rehne do|next (?:one|wala|notification|alert)|agla (?:wala|notification|alert)|अगला|आगे|स्किप)[.!]?$/i;
 const SHOW_ALL_WORDS = /\b(?:show (?:me )?(?:all|the) (?:incoming |new |pending )?(?:notification|notifications|alerts?|banners?)|show (?:me )?all|sab(?:hi)? (?:notification|notifications|alerts?|banners?)|(?:notification|notifications|alerts?|banners?)(?: dikhao| dikha do| dikhaao| batao|\?)|saare (?:notification|notifications|alerts?)|kya (?:aaya|aya) hai|what(?:'s| is| has) (?:waiting|new|come|pending for me)|सब (?:नोटिफ़िकेशन|नोटिफिकेशन|अलर्ट)|क्या आया है)/i;
 const QUALIFIED = /\d|\b(?:last|pichhle|pichle|minute|minutes|min|ghante|ghanta|hour|hours|aaj|kal|today|yesterday|seen|unseen|dekhe|dekha|approved|approve|declined|waiting|sirf|only|from|se|wale|wali|urgent|important|meeting|meetings|task|tasks|message|messages|approval|approvals|mansi|nikki|himanshu|seema|sir)\b/i;
 
@@ -208,7 +233,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
     setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
-    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems, spotlight } = useAlertEngine();
+    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems, spotlight,
+    stopReading, pendingReads, previous: previousAlert, setQuietFor } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
@@ -456,7 +482,19 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       || APPROVE_WORDS.test(text) || DECLINE_WORDS.test(text) || READ_WORDS.test(text) || SHOW_WORDS.test(text);
     // "Nancy wali approve kar do", "Pune wala done": the words pick the items out of the batch (within the pile named, if any).
     const picked = verb ? byWords(text, subset) : [];
-    const bulk = ALL_WORDS.test(text) || (named && !picked.length);
+    // "16 jo nahi padhe unko padh do", "unread wale padho", "baaki padho": the whole batch (or what is left of it).
+    const readAll = READ_WORDS.test(text) && /\b\d+\b|\b(unko|inko|unread|nahi padhe|baaki|baki|saare|sab)\b|उनको|बाकी/i.test(text);
+    const bulk = ALL_WORDS.test(text) || (named && !picked.length) || readAll;
+    // "Aage wale bhi padho", "agla padho", "aur padho" while a read is on: the next one, never the count again.
+    if (!picked.length && pendingReads() > 0 && text.split(/\s+/).length <= 6
+        && (READ_WORDS.test(text) || /\b(aage|agle|agla|aur|next|baaki|baki)\b|आगे|अगला|और|बाकी/i.test(text))
+        && !LATER_WORDS.test(text) && !SEEN_WORDS.test(text) && !DONE_WORDS.test(text) && !REMOVE_WORDS.test(text)) {
+      questionRef.current = null;
+      expectingRef.current = false;
+      silenceRef.current = 0;
+      skipAlert();
+      return true;
+    }
     const thisOne = !bulk && !picked.length && THIS_WORDS.test(text) && !!cur;
     const chosen = picked.length ? picked : subset;
     const targets = thisOne && cur ? [cur] : chosen;
@@ -595,6 +633,58 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     return false;
   };
 
+  // "Till when?" was asked after "mujhse abhi bolo mat" with no time said: the next sentence answers it.
+  const quietAskRef = useRef(false);
+  const sayNow = (en: string, hi: string, listenAfter = false) => {
+    offerRef.current = null;
+    questionRef.current = null;
+    expectingRef.current = listenAfter;
+    silenceRef.current = 0;
+    push('jarvis', en);
+    const t = twin(en, hi);
+    say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: listenAfter ? listen : undefined });
+  };
+  /** His words about JARVIS's own voice: stop reading, go back one, be quiet for a while. True when done here. */
+  const handleQuiet = (text: string): boolean => {
+    const words = text.trim().split(/\s+/).length;
+    if (quietAskRef.current) {
+      quietAskRef.current = false;
+      const mins = minutesIn(text) ?? untilMinutes(text) ?? 60;
+      setQuietFor(mins);
+      sayNow(`Okay, quiet till ${clockIn(mins)}.`, `ठीक है, ${clockIn(mins)} तक चुप रहूँगा।`);
+      return true;
+    }
+    if (QUIET_WORDS.test(text) && words <= 10) {
+      stopSpeaking();
+      declineOffer();
+      stopReading();
+      const mins = minutesIn(text) ?? untilMinutes(text);
+      if (mins) {
+        setQuietFor(mins);
+        sayNow(`Okay, quiet till ${clockIn(mins)}.`, `ठीक है, ${clockIn(mins)} तक चुप रहूँगा।`);
+      } else {
+        quietAskRef.current = true;
+        sayNow('Till when?', 'कब तक?', true);
+      }
+      return true;
+    }
+    if (STOP_WORDS.test(text) && words <= 5) {
+      stopSpeaking();
+      declineOffer();
+      stopReading();
+      sayNow('Okay.', 'ठीक है।');
+      return true;
+    }
+    if (PREV_WORDS.test(text) && words <= 7 && (currentAlert || questionRef.current || pendingReads() > 0)) {
+      questionRef.current = null;
+      expectingRef.current = false;
+      silenceRef.current = 0;
+      previousAlert();
+      return true;
+    }
+    return false;
+  };
+
   const heard = (said: string) => {
     Haptics.selectionAsync().catch(() => undefined); // instant "got it" tick
     setHeldVisible(false); // he is talking: nothing should sit on top of the conversation
@@ -648,6 +738,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: listen });
       return;
     }
+    if (handleQuiet(text)) return; // "bas", "isse pehle wala", "abhi bolo mat": about JARVIS's own voice, done here
     if (handleBatch(text)) return; // a word on the batch or the banner: done here, never a "which one?"
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
@@ -961,7 +1052,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const liveTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
     const said = String(args.said ?? '').trim();
     const pq = questionRef.current;
-    if (said && handleBatch(said)) {
+    if (said && (handleQuiet(said) || handleBatch(said))) {
       // A word on the batch or the banner, done on the phone: the line it says is the voice's answer.
       const until = nowMs() + 8000;
       while (!hasCollected() && nowMs() < until) await new Promise((r) => setTimeout(r, 60));

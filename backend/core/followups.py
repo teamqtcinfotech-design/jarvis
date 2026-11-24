@@ -184,13 +184,18 @@ def free_time(now=None) -> int:
         listed = ", ".join(names[:3]) + (f" and {n - 3} more" if n > 3 else "")  # the banner's body, never spoken
         till, till_hi = tu.fmt_time(end), tu.fmt_time_hi(end)
         address, address_hi = services.address_of(user), services.address_hi_of(user)
-        # Spoken without a single title (his rule: never read names out unasked; "dikhao" shows them, the banner lists them).
+        # Spoken WITH the names (his rule of 24 Nov evening: "aap ye kar sakte hain, ye kar sakte hain", a human
+        # assistant names the work): the first two with their minutes, the rest as a count.
+        mins = [p["minutes"] for p in plan["placed"]]
         if n == 1:
-            spoken = f"{address}, you're free till {till}. One {what} item could be done now. Shall I put it in?"
-            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। एक {what_hi} काम अभी हो सकता है। रख दूँ?"
+            spoken = f"{address}, you're free till {till}. {names[0]} could be done now, {mins[0]} minutes. Shall I put it in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {names[0]} अभी हो सकता है, {mins[0]} मिनट का। रख दूँ?"
         else:
-            spoken = f"{address}, you're free till {till}. {n} {what} items could be done now. Shall I put them in?"
-            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {n} {what_hi} काम अभी हो सकते हैं। रख दूँ?"
+            two = f"{names[0]} ({mins[0]} min) and {names[1]} ({mins[1]} min)"
+            two_hi = f"{names[0]} ({mins[0]} मिनट) और {names[1]} ({mins[1]} मिनट)"
+            more, more_hi = (f", and {n - 2} more", f", और {n - 2} और") if n > 2 else ("", "")
+            spoken = f"{address}, you're free till {till}. {two}{more} could be done now. Shall I put them in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {two_hi}{more_hi} अभी हो सकते हैं। रख दूँ?"
         question = {"kind": "place", "en": "Shall I put it in?" if n == 1 else "Shall I put them in?", "hi": "रख दूँ?",
                     "plan": plan["placed"], "until": end.isoformat()}
         raised += _raise(user, key, f"Free till {till}: {n} {what} item{'s' if n > 1 else ''} could be done", listed, spoken,

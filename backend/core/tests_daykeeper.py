@@ -44,15 +44,16 @@ class DayKeeperTests(BaseCase):
         self.assertEqual([p["title"] for p in q["plan"]], ["Send the bank statement", "Renew the trade licence"])
         self.assertEqual([p["start"][11:16] for p in q["plan"]], ["11:00", "11:30"])
         self.assertIn("free till 2 PM", alert.spoken_text)
-        self.assertIn("2 late items", alert.spoken_text)
         self.assertTrue(alert.spoken_text.endswith("Shall I put them in?"), alert.spoken_text)
         self.assertEqual(alert.spoken_text.count("Sir"), 1)
         self.assertIn("रख दूँ?", alert.spoken_text_hi)
-        # Never a title in the spoken line; the banner's body carries them.
+        # The suggestion NAMES the work with its minutes (his rule, 24 Nov evening: "aap ye kar sakte hain"); the
+        # banner's body carries them too.
+        self.assertIn("Send the bank statement (30 min) and Renew the trade licence (30 min) could be done now", alert.spoken_text)
         for title in ("Send the bank statement", "Renew the trade licence"):
-            self.assertNotIn(title, alert.spoken_text)
-            self.assertNotIn(title, alert.spoken_text_hi)
+            self.assertIn(title, alert.spoken_text_hi)
             self.assertIn(title, alert.body)
+        self.assertIn("2 late items", alert.title)
         # The same stretch is not asked about again.
         self.assertEqual(self.keeper(), 0)
 

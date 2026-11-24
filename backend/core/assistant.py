@@ -1118,10 +1118,52 @@ def _move_to_free_slot(user: User, draft: dict, item: dict, address: str, addres
     _say(draft, f"{task.title} moved to {when_en}.", f"{task.title} अब {when_hi}।")
 
 
+_CLOCK_WORDS = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(baje|bje|बजे|am|pm|o'?clock)", re.IGNORECASE)
+
+
+def _clash_position(text: str, other: str, new: str) -> tuple[str, str]:
+    """Both meetings named in one breath ("Sharma ji ko 5 baje kar do, Mehta ji ko 4 baje rakho"): the one named
+    closest BEFORE the first clock time (or the verb) is the subject, and that clock time is its time. Returns
+    ("other" | "new" | "", "HH:MM" | "")."""
+    low = text.lower()
+    clock = _CLOCK_WORDS.search(low)
+    anchor = clock or _MOVE_WORDS.search(low) or _DROP_WORDS.search(low)
+    if anchor is None:
+        return "", ""
+
+    def last_hit(title: str) -> int:
+        best = -1
+        for w in _distinctive(title).split():
+            if len(w) <= 2:
+                continue
+            for m in re.finditer(r"\b" + re.escape(w) + r"\b", low):
+                if m.start() < anchor.start():
+                    best = max(best, m.start())
+        return best
+
+    o, n = last_hit(other), last_hit(new)
+    if o < 0 and n < 0 or o == n:
+        return "", ""
+    hhmm = ""
+    if clock is not None:
+        hour, minute, suffix = int(clock.group(1)), int(clock.group(2) or 0), clock.group(3).lower()
+        if suffix in ("am", "pm"):
+            hour = hour % 12 + (12 if suffix == "pm" else 0)
+        elif hour <= 12:
+            hour = hinglish_parser._hour_for_part(hour, None)  # noqa: SLF001 — the same business-hours reading as the parser
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            hhmm = f"{hour:02d}:{minute:02d}"
+    return ("other" if o > n else "new"), hhmm
+
+
 def _clash_subject(text: str, pending: dict, sched: dict) -> str:
     """"new" (the one being added), "other" (the one already there) or "" when the words name neither."""
     other = (sched.get("clashes") or [{}])[0].get("title") or ""
     o, n = _title_hits(text, other), _title_hits(text, pending.get("title") or "")
+    if o and n:
+        pos, _t = _clash_position(text, other, pending.get("title") or "")
+        if pos:
+            return pos
     if o != n:
         return "other" if o > n else "new"
     that, this = bool(_OTHER_ONE.search(text)), bool(_THIS_ONE.search(text))
@@ -1148,6 +1190,12 @@ def _clash_way(text: str, cmd: dict, pending: dict, sched: dict) -> tuple[str, d
     picked = picked if picked in {"fit", "push", "move"} else ""
     d, t = _safe_date(str(cmd.get("due_date") or "")), _safe_time(str(cmd.get("due_time") or ""))
     subject = _clash_subject(text, pending, sched)
+    if subject == "other":
+        # "Sharma ji ko 5 baje kar do, Mehta ji ko 4 baje rakho": the time said next to the other's name is the
+        # other's new time, whatever time the model put in the command.
+        _pos, near = _clash_position(text, (sched.get("clashes") or [{}])[0].get("title") or "", pending.get("title") or "")
+        if near:
+            t = near
     moving = bool(_MOVE_WORDS.search(text) or _WHENEVER.search(text))
     same_time = (t and t == _safe_time(str(pending.get("due_time") or "")) and (not d or d == _safe_date(str(pending.get("due_date") or ""))))
     if same_time and subject != "other" and options.get("push"):
@@ -1478,8 +1526,11 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
             head_en = f"{address}, {item} {when_en}: you have an URGENT meeting then, {c['title']} at {tu.fmt_time(c['start'])}; that stays."
             head_hi = f"{address_hi}, {when_hi} {item}: उस समय आपकी अर्जेंट मीटिंग {c['title']} है ({tu.fmt_time_hi(c['start'])}); वो वहीं रहेगी।"
             warnings.append(f"Urgent meeting then: {c['title']} ({span})")
-        tail_en = f" Shall I put it at {alt_en} instead?" if sug else " Shall I save it anyway?"
-        tail_hi = f" {alt_hi} रख दूँ?" if sug else " फिर भी सेव कर दूँ?"
+        # The one that would move is NAMED in the question ("shall I put Mehta ji's at 5?"): a bare "it" left him
+        # asking "kisko?" (24 Nov 2026).
+        new_name = (draft.get("title") or "").strip() or "it"
+        tail_en = f" Shall I put {new_name} at {alt_en} instead?" if sug else " Shall I save it anyway?"
+        tail_hi = f" {new_name} {alt_hi} रख दूँ?" if sug else " फिर भी सेव कर दूँ?"
         default = ""
         # His own new meeting or call over one already there. Every way out stays on the card (keep it short, move the
         # other, put this one elsewhere) so any of them can be asked for in his own words; ONE is proposed aloud and a
@@ -1519,8 +1570,8 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
                 tail_en = f"{why_en} shall I move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}?"
                 tail_hi = f"{why_hi} {plan[0]['title']} को {tu.fmt_time_hi(plan[0]['start'])} कर दूँ{more_hi}?"
             elif default == "move":
-                tail_en = f" Shall I put it at {alt_en}?"
-                tail_hi = f" इसे {alt_hi} रख दूँ?"
+                tail_en = f" Shall I put {new_name} at {alt_en}?"
+                tail_hi = f" {new_name} {alt_hi} रख दूँ?"
             elif default == "fit":
                 tail_en = f" Shall I keep it to {tu.minutes_phrase(gap)}?"
                 tail_hi = f" इसे {tu.minutes_phrase_hi(gap)} की रखूँ?"

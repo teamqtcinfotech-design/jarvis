@@ -1169,7 +1169,7 @@ class SchedulingTests(BaseCase):
         self.assertEqual(r["action"], "private_task")
         self.assertIn("Call Mehta ji – GST Notice", r["show"])
         # One way out is proposed (the new one moves to the next free time); the others stay on the card for his words.
-        self.assertIn("Shall I put it at 5 PM?", r["show"])
+        self.assertIn("Shall I put Meeting with Sharma ji – Pune Franchise at 5 PM?", r["show"])  # the one that moves is named
         self.assertNotIn("keep this to", r["show"])
         self.assertEqual(r["say_lang"], "hi")
         self.assertIn("5 बजे रख दूँ?", r["say"])
@@ -1366,7 +1366,7 @@ class SchedulingTests(BaseCase):
         waiting = fake.call_args.args[1]["awaiting_confirmation"]
         self.assertEqual(waiting["offered_time"]["due_time"], "17:00")
         self.assertEqual(waiting["original_time"]["due_time"], "16:00")
-        self.assertIn("Shall I put it at", waiting["jarvis_asked"])
+        self.assertIn("Shall I put Meeting with Sharma ji – Pune Franchise at", waiting["jarvis_asked"])
         # "Put it later": booked at the offered time here and now (the phone closes the card), nothing moved.
         yes = r.json()
         self.assertTrue(yes["booked"] and yes["card_done"], yes["spoken_reply"])
@@ -2944,7 +2944,7 @@ class MeetingJugglingTests(BaseCase):
         d = self.interpret(self.md_client, "1:10 pe Verma meeting", _cmd(intent="create_task", title="Verma meeting", kind="MEETING",
                                                                       due_date=day.isoformat(), due_time="13:10", duration_minutes=15, engine="ai"))
         self.assertEqual(d["schedule"]["default"], "move")
-        self.assertIn("you already have Aman review at 1:15 PM. Shall I put it at", d["spoken_reply"])
+        self.assertIn("you already have Aman review at 1:15 PM. Shall I put Verma meeting at", d["spoken_reply"])  # the one that moves is named
         self.assertEqual(PrivateTask.objects.count(), before)
 
     def test_fit_keeps_it_to_the_gap(self):
