@@ -1146,6 +1146,27 @@ def build(user, kind: str, include_private: bool = True, day: date | None = None
     return view
 
 
+def focus_of(user, view: dict | None) -> tuple[list[dict], str]:
+    """What the next sentence may point at from this view (kept by services.remember_last_view): its items in the
+    order they were shown (id + title; routine blocks and rows without an id left out), and the one person it is
+    about ("Nikki") when it is about one person, else "". So "the second one", "doosra wala" and "uska" work with no
+    card on the screen (the live voice line, the background listener)."""
+    if not isinstance(view, dict):
+        return [], ""
+    rows = view.get("rows") or view.get("timeline") or []
+    items = [{"id": str(r["id"]), "title": str(r["title"])} for r in rows if isinstance(r, dict) and r.get("id") and r.get("title")]
+    profile = view.get("profile")
+    if isinstance(profile, dict) and profile.get("name"):
+        return items, str(profile["name"])
+    who = str((view.get("request") or {}).get("who") or "").strip()
+    if who:
+        from . import listviews  # noqa: PLC0415 — listviews builds on this module
+        subject = listviews.resolve_subject(user, who)
+        if subject.get("type") in ("pa", "staff_one", "md"):
+            return items, str(subject.get("label") or who)
+    return items, ""
+
+
 def _first_two(rows: list[dict], key: str = "when") -> tuple[str, str]:
     """'A (10 AM), B (tomorrow)' in English and Hindi for the first two rows of a table."""
     def one(r, hindi):

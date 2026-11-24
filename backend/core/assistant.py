@@ -208,13 +208,75 @@ def _full_items(user: User) -> dict:
     return out
 
 
-def _pointed(user: User, on_screen: dict | None, full_text: str, chosen: list[dict]) -> list[dict]:
-    """What "it" / "ye" / "dono" means when a card is on screen: the items of that card. One item on the card and
-    nothing else named = that item; "dono" / "sab" = all of them; words from a title = those; else nothing."""
-    if chosen or not isinstance(on_screen, dict) or not on_screen.get("items"):
+# A place in the list ("the second one", "doosra wala", "दूसरा task", "aakhri wala"): Roman words whole, Devanagari as
+# written (no word boundary: matras are not word characters). -1 = the last one.
+_ORDINAL_WORDS = {
+    0: ("first", "1st", "pehla", "pehli", "pahla", "pahli", "pehle wala", "pehle wali", "pehle waala", "pehle waali",
+        "पहला", "पहली", "पहले वाला", "पहले वाली"),
+    1: ("second", "2nd", "doosra", "doosri", "dusra", "dusri", "doosre wala", "dusre wala", "doosre wali", "dusre wali",
+        "दूसरा", "दूसरी", "दूसरे वाला", "दूसरे वाली"),
+    2: ("third", "3rd", "teesra", "teesri", "tisra", "tisri", "teesre wala", "tisre wala", "तीसरा", "तीसरी", "तीसरे वाला"),
+    3: ("fourth", "4th", "chautha", "chauthi", "chauthe wala", "चौथा", "चौथी", "चौथे वाला"),
+    4: ("fifth", "5th", "paanchva", "paanchvi", "paanchwa", "paanchwi", "panchva", "panchvi", "panchwa",
+        "पाँचवाँ", "पाँचवा", "पांचवा", "पांचवां", "पाँचवीं", "पांचवीं", "पांचवी"),
+    -1: ("last one", "last wala", "last wali", "last item", "last task", "last meeting", "aakhri", "akhri", "aakhiri", "antim",
+         "आख़िरी", "आखिरी", "अंतिम"),
+}
+_ORDINAL_ROMAN = {idx: re.compile(r"(?<!\w)(?:" + "|".join(re.escape(w) for w in words if w.isascii()) + r")(?!\w)", re.IGNORECASE)
+                  for idx, words in _ORDINAL_WORDS.items()}
+_ORDINAL_HINDI = {idx: tuple(w for w in words if not w.isascii()) for idx, words in _ORDINAL_WORDS.items()}
+_ORDINAL_NUMBER = re.compile(r"\b(?:number|no\.?|item|option|नंबर)\s*(\d{1,2})\b|\b(\d{1,2})\s*(?:number|nambar|नंबर)", re.IGNORECASE)
+# "it", "that one", "isko": the sentence points at something rather than naming it.
+_POINTING = re.compile(r"\b(it|this|that|these|those|ye|yeh|isko|iska|iski|ise|is|usko|uska|uski|use|us|wo|woh|wahi|yahi)\b"
+                       r"|इसको|इसे|इसका|इसकी|उसको|उसे|उसका|उसकी|ये|यह|वो|वह", re.IGNORECASE)
+# "she", "uska", "unko": the person spoken about a moment ago (last_list.about), not named again.
+_PRONOUN = re.compile(r"\b(she|he|her|his|him|usko|uska|uski|uske|unko|unka|unki|unke|unhe|unhein|unhen)\b"
+                      r"|उसको|उसका|उसकी|उसके|उनको|उनका|उनकी|उनके|उन्हें", re.IGNORECASE)
+
+
+def _ordinal_index(text: str) -> int | None:
+    """The place named in the sentence as a list index (0 = first, -1 = last), or None when none or more than one."""
+    low = text.lower()
+    found = set()
+    for idx, pattern in _ORDINAL_ROMAN.items():
+        if pattern.search(low):
+            found.add(idx)
+    for idx, words in _ORDINAL_HINDI.items():
+        if any(w in text for w in words):
+            found.add(idx)
+    m = _ORDINAL_NUMBER.search(low)
+    if m:
+        n = int(m.group(1) or m.group(2))
+        if n >= 1:
+            found.add(n - 1)
+    return found.pop() if len(found) == 1 else None
+
+
+def _last_items(ctx: dict) -> list[dict]:
+    """The items of the list JARVIS answered with a moment ago (services.last_view), for when the phone sent no card."""
+    return [i for i in ((ctx.get("last_list") or {}).get("items") or []) if isinstance(i, dict) and i.get("id")]
+
+
+def _pointed(user: User, on_screen: dict | None, full_text: str, chosen: list[dict], last_items: list | None = None) -> list[dict]:
+    """What "it" / "ye" / "dono" / "the second one" means: the items of the card on screen, else (no card: the live
+    voice line, the background listener) the items of the list JARVIS answered with a moment ago. "Doosra" / "the
+    first one" = that place in the list AS IT WAS SHOWN (a place whose item has since closed points at nothing, so
+    JARVIS asks instead of acting on the wrong one); "dono" / "sab" = all of them; words from a title = those; one
+    item and nothing else named = that item (from the remembered list only when the sentence points, "isko", "it");
+    else nothing. Every id goes through the items this person may act on right now (_full_items), so a remembered
+    id never reaches a closed item or someone else's."""
+    if chosen:
+        return chosen
+    on_card = isinstance(on_screen, dict) and bool(on_screen.get("items"))
+    listed = [i for i in (on_screen["items"] if on_card else (last_items or [])) if isinstance(i, dict) and i.get("id")]
+    if not listed:
         return chosen
     full = _full_items(user)
-    shown = [full[i["id"]] for i in on_screen["items"] if isinstance(i, dict) and i.get("id") in full]
+    idx = _ordinal_index(full_text)
+    if idx is not None:
+        pick = listed[idx] if -len(listed) <= idx < len(listed) else None
+        return [full[pick["id"]]] if pick is not None and pick["id"] in full else []
+    shown = [full[i["id"]] for i in listed if i["id"] in full]
     if not shown:
         return chosen
     if _ALL_OF_THEM.search(full_text):
@@ -222,7 +284,21 @@ def _pointed(user: User, on_screen: dict | None, full_text: str, chosen: list[di
     by_words = _match_items(full_text, shown)
     if by_words:
         return by_words
-    return shown if len(shown) == 1 else []
+    if len(shown) == 1 and (on_card or _POINTING.search(full_text)):
+        return shown
+    return []
+
+
+def _pick_choice(text: str, items: list[dict], by_words: bool = True) -> list[dict]:
+    """The answer to "which one?" read by the server: "doosra" / "the first one" by its place among the choices
+    offered, or (by_words) the words of exactly one title ("Pune wala"); [] when the answer fits none or several."""
+    idx = _ordinal_index(text)
+    if idx is not None:
+        return [items[idx]] if -len(items) <= idx < len(items) else []
+    if by_words:
+        hits = _match_items(text, items)
+        return hits if len(hits) == 1 else []
+    return []
 
 
 def _cancel_now(user: User, targets: list[dict]) -> tuple[list[dict], list[dict], int]:
@@ -1907,6 +1983,14 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         # model made of it. A longer sentence that happens to contain "sab" is its own instruction.
         cmd["target_refs"] = [i["id"] for i in choices["items"]]
         cmd["intent"] = choices["intent"]
+    if choices and choices.get("items") and not cmd.get("target_refs") and not cmd.get("more_items") \
+            and cmd.get("intent") in {"unknown", "query", "small_talk", "confirm_pending", "cancel_pending", choices["intent"]}:
+        # The answer to "which one?" read by the server as well: "doosra" / "the first one" by its place among the
+        # choices, or the words of one title ("Pune wala"), so the same question is never asked again once answered.
+        picked = _pick_choice(text, choices["items"], by_words=cmd.get("intent") not in {"confirm_pending", "cancel_pending"})
+        if picked:
+            cmd["target_refs"] = [i["id"] for i in picked]
+            cmd["intent"] = choices["intent"]
 
     # While a draft waits, a change keeps the original sentence (it becomes the task description);
     # a side question or a brand-new topic stands on its own. A new item said while his own clash question is open
@@ -2525,6 +2609,10 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         open_items = ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]
         by_id = {i["id"]: i for i in open_items}
         chosen = _chosen(cmd, by_id)
+        if not chosen and (cmd.get("target_refs") or cmd.get("target_ref")):
+            chosen = _chosen(cmd, _full_items(user))  # pointed at by id, further down than the model's context carries
+        # "Mark the second one done" / "pehla wala ho gaya": the card on screen, or the list answered a moment ago.
+        chosen = _pointed(user, on_screen, full_text, chosen, _last_items(ctx))
         matches = chosen or _match_items(draft["title"] or full_text, open_items)
         if chosen or len(matches) == 1:
             draft["targets"] = matches
@@ -2551,7 +2639,7 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             # Pointed at by id, but further down the list than the model's context carries: found in full.
             chosen = _chosen(cmd, _full_items(user))
         # "Delete it" / "ye hata do" with a card on screen: the card's items are what "it" means.
-        chosen = _pointed(user, on_screen, full_text, chosen)
+        chosen = _pointed(user, on_screen, full_text, chosen, _last_items(ctx))
         matches = chosen or _match_items(full_text, open_items)
         if intent == "delete_task" and (chosen or len(matches) == 1) and not draft.get("needs_clarification"):
             # Deleting is done at once (a cancel, never an erase): "undo" brings it back. No "shall I?".
@@ -2622,8 +2710,10 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 names = _named(matches, 5)
                 _say(draft, f"{address}, delete these {len(matches)}: {names}?", f"{address_hi}, ये {len(matches)} हटा दूँ: {names}?")
         else:
-            shown = _full_items(user) if isinstance(on_screen, dict) and on_screen.get("items") else {}
-            on_card = [shown[i["id"]] for i in (on_screen or {}).get("items", []) if isinstance(i, dict) and i.get("id") in shown]
+            listed = list(on_screen.get("items") or []) if isinstance(on_screen, dict) else []
+            listed = listed or _last_items(ctx)  # no card: the list JARVIS answered with a moment ago
+            shown = _full_items(user) if listed else {}
+            on_card = [shown[i["id"]] for i in listed if isinstance(i, dict) and i.get("id") in shown]
             if not matches and on_card:
                 matches = on_card  # nothing named: the choice is among what is on the screen
             draft["target_candidates"] = matches[:5]
@@ -2837,9 +2927,18 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             # The items he pointed at ("that meeting", "the second one"): only ids JARVIS itself has shown or listed.
             known = {i["id"] for i in ctx["open_items"]["overdue"] + ctx["open_items"]["today"] + ctx["open_items"]["upcoming"]}
             known |= {i["id"] for i in (on_screen or {}).get("items", [])}
+            listed = _last_items(ctx)  # the list answered a moment ago, when the phone sent no card
+            remembered = {i["id"] for i in listed} - known
+            known |= remembered
             ids = [r for r in (cmd.get("target_refs") or []) if isinstance(r, str) and r in known]
             if not ids and cmd.get("target_ref") in known:
                 ids = [cmd["target_ref"]]
+            if not ids and listed and not (on_screen or {}).get("items") and _ordinal_index(full_text) is not None:
+                # "Doosra wala kab hai?": that place in the list answered a moment ago.
+                ids = [i["id"] for i in _pointed(user, None, full_text, [], listed)]
+            if any(r in remembered for r in ids):
+                full = _full_items(user)  # a remembered id must still be an item this person may act on
+                ids = [r for r in ids if r not in remembered or r in full]
             # A task is not a meeting. Asked for "tasks" (and not meetings or calls as well), the list is tasks only;
             # asked for "kaam", "plan" or "schedule", it is everything. And "mere tasks" is everything on the
             # speaker's list, whoever gave it: only "mere APNE" narrows it to what they added themselves.
@@ -2858,7 +2957,11 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             if not minutes and kind in ("alerts", "approvals") and not cmd.get("view_from") and isinstance(prev, dict) \
                     and prev.get("kind") == kind and prev.get("minutes") and _AMONG_WORD.search(full_text):
                 minutes = int(prev["minutes"])
-            request = {"who": cmd.get("view_who"), "from": cmd.get("view_from"), "to": cmd.get("view_to"),
+            who = cmd.get("view_who")
+            about = str((ctx.get("last_list") or {}).get("about") or "")
+            if not who and about and _PRONOUN.search(full_text):
+                who = about  # "what tasks does she have?" right after an answer about Nikki
+            request = {"who": who, "from": cmd.get("view_from"), "to": cmd.get("view_to"),
                        "by": cmd.get("view_by"), "filter": cmd.get("view_filter"), "group": cmd.get("view_group"),
                        "types": types, "from_whom": from_whom,
                        "priority": cmd.get("view_priority"), "words": cmd.get("view_words"), "ids": ids,
@@ -2875,7 +2978,9 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             if view:
                 names_private = any(r.get("private") for r in (view.get("rows") or [])) or any(
                     t.get("private") for t in (view.get("timeline") or []))
-                services.remember_last_view(user, view.get("request") or {"kind": kind}, view.get("summary", ""), names_private)
+                focus_items, about = datacards.focus_of(user, view)
+                services.remember_last_view(user, view.get("request") or {"kind": kind}, view.get("summary", ""), names_private,
+                                            items=focus_items, about=about)
                 services.learn_view(user, view.get("kind") or kind)  # the lists he asks for most come first on the home screen
             draft["view"] = view
         if not draft["spoken_reply"]:

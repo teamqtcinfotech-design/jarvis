@@ -2682,26 +2682,34 @@ def task_history(task: SharedTask) -> list[dict]:
 
 
 LAST_VIEW_TTL = timedelta(minutes=15)
+FOCUS_ITEMS = 15  # how many of the last list's items are remembered for "the second one" / "doosra wala"
 
 
-def remember_last_view(user: User, request: dict, summary: str, has_private: bool = False) -> None:
+def remember_last_view(user: User, request: dict, summary: str, has_private: bool = False,
+                       items: list | None = None, about: str = "") -> None:
     """Keep the list JARVIS just answered with (its filters and what was said), so the next question can narrow
     or widen the SAME list ("sirf meetings", "aur Sir ke diye hue", "sab dikhao") even when the phone did not
     send the card back. Stored beside the voice conversation's short memory, with the same encryption.
-    has_private: the sentence names one of Sir's personal items, so it is only ever repeated to an unlocked phone."""
+    has_private: the sentence names one of Sir's personal items, so it is only ever repeated to an unlocked phone.
+    items: the list's items in the order they were shown (id + title), so "the second one" / "doosra wala" /
+    "usko kal kar do" can point at them with no card on the screen (Nov 2026). about: the one person the list was
+    about ("Nikki"), so "she" / "uska" in the next sentence means that person."""
     row = ConversationState.objects.filter(user=user).first()
     try:
         data = json.loads(row.state_json or "{}") if row else {}
     except ValueError:
         data = {}
+    kept = [{"id": str(i["id"])[:64], "title": str(i["title"])[:120]}
+            for i in (items or [])[:FOCUS_ITEMS] if isinstance(i, dict) and i.get("id") and i.get("title")]
     data["last_view"] = {"request": request, "summary": (summary or "")[:200], "private": bool(has_private),
-                         "at": timezone.now().isoformat()}
+                         "items": kept, "about": str(about or "")[:80], "at": timezone.now().isoformat()}
     ConversationState.objects.update_or_create(user=user, defaults={"state_json": json.dumps(data, ensure_ascii=False, default=str)})
 
 
 def last_view(user: User, include_private: bool = True) -> dict | None:
     """The list answered last (within a quarter of an hour), or None. On a locked phone (include_private=False)
-    a sentence that named a personal item is left out; the filters alone are kept."""
+    a sentence that named a personal item is left out, and so are the items; the filters alone are kept.
+    With items: "items" (id + title, in the order shown) and "about" (the person the list was about, or "")."""
     row = ConversationState.objects.filter(user=user).first()
     if not row:
         return None
@@ -2716,8 +2724,14 @@ def last_view(user: User, include_private: bool = True) -> dict | None:
             return None
     except (TypeError, ValueError):
         return None
-    said = "" if (last.get("private") and not include_private) else (last.get("summary") or "")
-    return {"filters": last.get("request") or {}, "jarvis_said": said}
+    hidden = bool(last.get("private") and not include_private)
+    out = {"filters": last.get("request") or {}, "jarvis_said": "" if hidden else (last.get("summary") or "")}
+    items = [i for i in (last.get("items") or []) if isinstance(i, dict) and i.get("id") and i.get("title")]
+    if items and not hidden:
+        out["items"] = items
+    if last.get("about"):
+        out["about"] = str(last["about"])
+    return out
 
 
 def ai_context(user: User, include_private: bool = True) -> dict:
