@@ -1,8 +1,8 @@
 /**
- * Phone: the home is the day. Greeting and date; four round counts (today's tasks, today's meetings, messages,
- * alerts), each carrying what is waiting of its kind and opening it on a tap; up to three blue information banners
- * (a meeting about to start, overdue work in free time, the next timed item); then, below the fold, the reports and
- * the latest answer. Staff and the company panel live in the side menu.
+ * Phone: the home is the day. Greeting and date; four round counts of what is waiting for him (new tasks, meeting
+ * alerts, messages, other alerts), each opening its pile on a tap; three blue information banners (free time turned
+ * into the work that fits now, the next meeting, what is waiting one item at a time); then, below the fold, the
+ * reports and the latest answer. Staff and the company panel live in the side menu.
  * The orb floats in the bottom-right corner and opens the talk layer.
  */
 import * as Haptics from 'expo-haptics';
@@ -120,10 +120,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   })();
   // Today means today: late items from earlier days are a banner, not rows that crowd out the day.
   const isMeeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
-  const todayOpen = data ? data.today.filter((t) => t.status !== 'COMPLETED') : [];
-  const todayMeetings = todayOpen.filter(isMeeting);
   const lateCount = data?.overdue.length ?? 0;
-  const unread = data?.messages_unseen ?? 0;
   // What is waiting, by chip: task alerts under Tasks, meeting alerts under Meetings, messages under Messages, the
   // rest (approvals, requests, updates, reminders) under Alerts. The held items count too: the sheet shows them.
   const pile = pileOf(engine.waiting, engine.held);
@@ -257,33 +254,33 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <Txt variant="display">{address}</Txt>
         <Txt variant="caption" style={{ marginTop: 2 }}>{data?.date_label ?? ''}</Txt>
 
-        {/* Four counts at a glance (his layout, 24 Nov 2026): today's tasks and meetings, unread messages, alerts
-            waiting. A red badge = that many alerts of that kind waiting (the same rows the sheet then shows); a tap
-            opens them (or the day's list). */}
+        {/* Four counts at a glance (his layout, 24 Nov 2026), one meaning for all four: how many things of that kind
+            are waiting for him (new tasks, meeting alerts, messages, the rest), the same rows the sheet then shows.
+            A tap opens them; with nothing waiting it opens the day's list. The day's own counts ("aaj kitne task?")
+            are a question away. */}
         <View style={s.chips}>
           {([
-            { key: 'task', label: 'Tasks', n: todayOpen.filter((t) => !isMeeting(t)).length, badge: waitingBy('task'), tone: colors.accent, list: 'today_tasks' },
-            { key: 'meeting', label: 'Meetings', n: todayMeetings.length, badge: waitingBy('meeting'), tone: colors.gold, list: 'today_meetings' },
-            { key: 'message', label: 'Messages', n: Math.max(unread, waitingBy('message')), badge: 0, tone: colors.info, list: 'messages' },
-            { key: 'other', label: 'Alerts', n: waitingBy('other'), badge: 0, tone: waitingBy('other') ? colors.warn : colors.muted, list: 'updates' },
-          ] as { key: AlertGroup | 'other'; label: string; n: number; badge: number; tone: string; list: string }[]).map((c) => (
-            <Pressable
-              key={c.key}
-              onPress={() => { tick(); if (waitingBy(c.key)) openPile(c.key); else select(c.list); }}
-              style={s.chip}
-              accessibilityLabel={`${c.label}: ${c.n}${c.badge ? `, ${c.badge} waiting` : ''}`}
-            >
-              <View style={[s.chipRing, { borderColor: c.tone }]}>
-                <Txt style={[s.chipN, { color: c.tone }]}>{c.n}</Txt>
-                {c.badge ? (
-                  <View style={s.chipBadge}>
-                    <Txt style={s.chipBadgeN}>{c.badge}</Txt>
-                  </View>
-                ) : null}
-              </View>
-              <Txt variant="caption" style={{ marginTop: 4 }}>{c.label}</Txt>
-            </Pressable>
-          ))}
+            { key: 'task', label: 'Tasks', tone: colors.accent, list: 'today_tasks' },
+            { key: 'meeting', label: 'Meetings', tone: colors.gold, list: 'today_meetings' },
+            { key: 'message', label: 'Messages', tone: colors.info, list: 'messages' },
+            { key: 'other', label: 'Alerts', tone: colors.warn, list: 'updates' },
+          ] as { key: AlertGroup | 'other'; label: string; tone: string; list: string }[]).map((c) => {
+            const n = waitingBy(c.key);
+            const tone = n ? c.tone : colors.muted;
+            return (
+              <Pressable
+                key={c.key}
+                onPress={() => { tick(); if (n) openPile(c.key); else select(c.list); }}
+                style={s.chip}
+                accessibilityLabel={`${c.label}: ${n} waiting`}
+              >
+                <View style={[s.chipRing, { borderColor: tone }]}>
+                  <Txt style={[s.chipN, { color: tone }]}>{n}</Txt>
+                </View>
+                <Txt variant="caption" style={{ marginTop: 4 }}>{c.label}</Txt>
+              </Pressable>
+            );
+          })}
         </View>
 
         {/* Three information banners, three fixed slots (his layout): the free time analysed into the task or two
@@ -441,8 +438,6 @@ const s = StyleSheet.create({
   chip: { alignItems: 'center', width: 72 },
   chipRing: { width: 56, height: 56, borderRadius: 28, borderWidth: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   chipN: { fontSize: 20, fontFamily: fonts.semibold, lineHeight: 24 },
-  chipBadge: { position: 'absolute', top: -5, right: -6, minWidth: 20, height: 20, borderRadius: 10, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
-  chipBadgeN: { color: colors.white, fontSize: 11, fontFamily: fonts.semibold, lineHeight: 14 },
   heroWrap: { marginTop: 18, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },
