@@ -213,6 +213,9 @@ interface EngineValue {
   /** Which chip opened the sheet: task / meeting / message alerts, 'other' (approvals, requests, updates), or everything. */
   allGroup: AlertGroup | 'other' | null;
   setAllGroup: (g: AlertGroup | 'other' | null) => void;
+  /** The item the home screen's rotating banner shows right now: his "isko" / "this one" means it (null elsewhere). */
+  spotlight: EngineItem | null;
+  setSpotlight: (item: EngineItem | null) => void;
 }
 
 const EngineContext = createContext<EngineValue | null>(null);
@@ -307,6 +310,19 @@ export function groupOf(item: EngineItem): AlertGroup {
   if (item.source === 'reminder') return item.kind === 'MEETING' || item.kind === 'CALL' ? 'meeting' : 'task';
   if (item.alertKind === 'TASK_ASSIGNED') return /^meeting with|^call with|meeting/i.test(item.title) ? 'meeting' : 'task';
   return 'update';
+}
+
+/** The home chip a waiting item sits under: task, meeting, message, or 'other' (approvals, requests, updates). */
+export function chipOf(item: EngineItem): AlertGroup | 'other' {
+  const g = groupOf(item);
+  return g === 'task' || g === 'meeting' || g === 'message' ? g : 'other';
+}
+
+/** Everything waiting for him, the held items included, one row each, the latest first: the rows the chips count,
+ *  the sheet shows and the home banner turns through, so no two of them ever disagree. */
+export function pileOf(waiting: EngineItem[], held: EngineItem[]): EngineItem[] {
+  const seen = new Set<string>();
+  return [...waiting, ...held].filter((i) => !seen.has(i.key) && !!seen.add(i.key)).sort((a, b) => b.fireAt - a.fireAt);
 }
 
 /** "Sir, waiting for you: 2 tasks, Sign the lease and Pay the vendor; 1 approval, Vendor Advance; 1 message." */
@@ -613,6 +629,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   }, [deliver, focus, setCurrent, setQueued]);
   const [allVisible, setAllVisible] = useState(false);
   const [allGroup, setAllGroup] = useState<AlertGroup | 'other' | null>(null);
+  const [spotlight, setSpotlight] = useState<EngineItem | null>(null);
   const presentNextRef = useRef(presentNext);
   useEffect(() => {
     presentNextRef.current = presentNext;
@@ -1472,6 +1489,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     setAllVisible,
     allGroup,
     setAllGroup,
+    spotlight,
+    setSpotlight,
     meetingMode,
     setMeetingMode,
     offer,

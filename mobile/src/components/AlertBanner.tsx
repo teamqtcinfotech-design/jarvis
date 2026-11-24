@@ -84,6 +84,12 @@ export function AlertActions({ item }: { item: EngineItem }) {
           <Button title="Decline" kind="danger" compact onPress={() => engine.answerQuestion(item, item.question!, false).catch(() => undefined)} style={{ marginLeft: 6 }} />
           <Button title="Approve" icon="checkmark" compact onPress={() => engine.answerQuestion(item, item.question!, true).catch(() => undefined)} style={{ marginLeft: 6 }} />
         </>
+      ) : item.question?.kind === 'place' ? (
+        // "You're free till 5, these could be done now, shall I put them in?": one tap gives them their slots.
+        <>
+          <Button title="Not now" kind="ghost" compact onPress={() => engine.answerQuestion(item, item.question!, false).catch(() => undefined)} />
+          <Button title="Put them in" icon="calendar-outline" compact onPress={() => engine.answerQuestion(item, item.question!, true).catch(() => undefined)} style={{ marginLeft: 6 }} />
+        </>
       ) : item.question?.kind === 'signout' ? (
         // "Signed in on another phone — not you?": the sign-out of that phone is one tap away.
         <>

@@ -208,7 +208,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
     setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
-    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems } = useAlertEngine();
+    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems, spotlight } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
@@ -439,7 +439,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   /** His words on the batch or the banner (see ALL_WORDS … above): true when done here, nothing goes to the brain. */
   const handleBatch = (text: string): boolean => {
     const items = batchItems();
-    const cur = currentAlert;
+    // "Isko": the item in front of him. On the home screen that is the one the turning banner shows (the spotlight);
+    // with the sheet open, or elsewhere, the one JARVIS is on.
+    const cur = (!allVisible && spotlight) || currentAlert;
     if (!items.length && !cur) return false;
     if (text.trim().split(/\s+/).length > 10 || NOT_BATCH.test(text)) return false;
     const groups = GROUP_TESTS.filter(([, re]) => re.test(text)).map(([g]) => g);

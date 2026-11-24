@@ -12,17 +12,18 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { type AlertGroup, groupOf, useAlertEngine } from '@/lib/alertEngine';
+import { type AlertGroup, chipOf, type EngineItem, pileOf, useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
-import { greeting, timeOf } from '@/lib/format';
+import { greeting, relativeAgo, timeOf } from '@/lib/format';
 import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
 import { colors, fonts, gradients, kindIcon, radius, shadow } from '@/lib/theme';
-import type { SessionUser, TaskItem } from '@/lib/types';
+import type { Kind, Priority, SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { useWalkie } from '@/lib/walkie';
 
+import { alertLabel } from './AlertBanner';
 import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
 import { Drawer } from './Drawer';
@@ -50,8 +51,15 @@ const inWords = (ms: number) => {
   return `in ${h} h${m % 60 ? ` ${m % 60} min` : ''}`;
 };
 
-/** One information banner (his home screen, 24 Nov 2026): what it is, when, one line, one tap. */
-type Banner = { key: string; icon: string; label: string; when: string; title: string; sub: string; go: () => void };
+/** One information banner (his home screen, 24 Nov 2026): what it is, when, one or two lines, one tap. */
+type Banner = { key: string; icon: string; label: string; when: string; lines: string[]; sub: string; go: () => void };
+/** Work that can be fitted into free time (never a meeting or a call) and its usual minutes when none is estimated. */
+const USUAL: Partial<Record<Kind, number>> = { TASK: 30, PAYMENT: 10, FOLLOW_UP: 15 };
+const RANK: Record<Priority, number> = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
+const CHIP_ICON: Record<AlertGroup | 'other', string> = {
+  task: 'checkbox-outline', meeting: 'people-outline', message: 'chatbubble-ellipses-outline', other: 'notifications-outline',
+  approval: 'notifications-outline', request: 'notifications-outline', update: 'notifications-outline',
+};
 
 export function PhoneHome({ user }: { user: SessionUser }) {
   const router = useRouter();
@@ -117,13 +125,57 @@ export function PhoneHome({ user }: { user: SessionUser }) {
   const lateCount = data?.overdue.length ?? 0;
   const unread = data?.messages_unseen ?? 0;
   // What is waiting, by chip: task alerts under Tasks, meeting alerts under Meetings, messages under Messages, the
-  // rest (approvals, requests, updates, reminders) under Alerts.
-  const waitingBy = (g: AlertGroup | 'other') =>
-    engine.waiting.filter((w) => (g === 'other' ? !['task', 'meeting', 'message'].includes(groupOf(w)) : groupOf(w) === g)).length;
-  const openPile = (g: AlertGroup | 'other') => {
+  // rest (approvals, requests, updates, reminders) under Alerts. The held items count too: the sheet shows them.
+  const pile = pileOf(engine.waiting, engine.held);
+  const waitingBy = (g: AlertGroup | 'other') => pile.filter((w) => chipOf(w) === g).length;
+  const openPile = (g: AlertGroup | 'other', item?: EngineItem) => {
+    if (item && engine.waiting.some((w) => w.key === item.key)) engine.focus(item);
     engine.setAllGroup(g);
     engine.setAllVisible(true);
   };
+  // The third banner turns every 10 seconds through what is waiting, the latest first. The item on show is the
+  // engine's spotlight, so "isko hata do" / "this one, later" by voice means it.
+  const [turn, setTurn] = useState(0);
+  useEffect(() => {
+    if (pile.length < 2) return undefined;
+    const t = setInterval(() => setTurn((n) => n + 1), 10_000);
+    return () => clearInterval(t);
+  }, [pile.length]);
+  const shown = pile.length ? pile[turn % pile.length] : null;
+  const setSpotlight = engine.setSpotlight;
+  useEffect(() => {
+    setSpotlight(shown);
+  }, [setSpotlight, shown]);
+  useEffect(() => () => setSpotlight(null), [setSpotlight]);
+  // Free time analysed into named work (his ask): the server's suggestion when it is waiting (a yes places it), else
+  // the same fit done here: late first, then due today without a time, then undated; urgent first; each takes its
+  // estimated minutes (the kind's usual when none, two hours at most) until the stretch is used.
+  const served = pile.find((i) => i.question?.kind === 'place') ?? null;
+  const plan: { title: string; minutes: number }[] = (() => {
+    if (!data) return [];
+    if (served?.question?.plan?.length) return served.question.plan.map((p) => ({ title: p.title, minutes: p.minutes }));
+    if (!freeTill) return [];
+    const end = freeTill.until ? Date.parse(freeTill.until) : now + 4 * 60 * 60_000;
+    const cands = [...data.overdue, ...data.today.filter((t) => !t.due_at || Date.parse(t.due_at) <= now), ...data.anytime]
+      .filter((t) => USUAL[t.kind] !== undefined && t.status !== 'COMPLETED' && t.status !== 'CANCELLED' && !(t.scheduled_start && Date.parse(t.scheduled_start) >= now))
+      .map((t, i) => ({ t, i, group: t.overdue ? 0 : t.due_date ? 1 : 2 }))
+      .sort((a, b) => a.group - b.group || RANK[a.t.priority] - RANK[b.t.priority] || a.i - b.i);
+    const out: { title: string; minutes: number }[] = [];
+    let cursor = now;
+    for (const { t } of cands) {
+      const minutes = Math.min(t.estimated_minutes || USUAL[t.kind] || 30, 120);
+      if (cursor + minutes * 60_000 > end) continue;
+      out.push({ title: t.title, minutes });
+      cursor += minutes * 60_000;
+    }
+    return out;
+  })();
+  const freeUntil = freeTill?.until ?? served?.question?.until ?? null;
+  // The next meeting or call ahead (another day), for when nothing timed is left today.
+  const ahead = data
+    ? data.upcoming.filter((t) => isMeeting(t) && t.status !== 'COMPLETED' && t.status !== 'CANCELLED')
+        .sort((a, b) => (a.due_at ?? a.due_date ?? '').localeCompare(b.due_at ?? b.due_date ?? ''))[0] ?? null
+    : null;
   // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
   const voiceItem = conv.itemToOpen && data
     ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.team_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
@@ -206,7 +258,8 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <Txt variant="caption" style={{ marginTop: 2 }}>{data?.date_label ?? ''}</Txt>
 
         {/* Four counts at a glance (his layout, 24 Nov 2026): today's tasks and meetings, unread messages, alerts
-            waiting. A red badge = that many alerts of that kind waiting; a tap opens them (or the day's list). */}
+            waiting. A red badge = that many alerts of that kind waiting (the same rows the sheet then shows); a tap
+            opens them (or the day's list). */}
         <View style={s.chips}>
           {([
             { key: 'task', label: 'Tasks', n: todayOpen.filter((t) => !isMeeting(t)).length, badge: waitingBy('task'), tone: colors.accent, list: 'today_tasks' },
@@ -233,46 +286,63 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           ))}
         </View>
 
-        {/* Up to three information banners, by priority: a meeting about to start; overdue work in free time (the
-            standing reminder, else the plain overdue count); the next timed item. What is waiting is on the chips
-            above, so no banner repeats it. */}
+        {/* Three information banners, three fixed slots (his layout): the free time analysed into the task or two
+            that fit now (else the most urgent late item by name); the next meeting (today's next timed item, else
+            the next meeting ahead; a meeting about to start jumps to the top); and what is waiting, one item at a
+            time, turning every 10 seconds. Nothing here repeats a chip's number. */}
         {(() => {
           const soon = !!next && next.start - now <= 5 * 60_000;
-          const banners: Banner[] = [];
-          if (next && soon) {
-            banners.push({ key: 'soon', icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Starting now', when: timeOf(next.item.scheduled_start ?? next.item.due_at),
-              title: next.item.title, sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}`, go: () => setOpenTask(next.item) });
-          }
-          if (lateCount && freeTill) {
-            banners.push({ key: 'free', icon: 'alert-circle-outline', label: 'Free time', when: freeTill.until ? `till ${timeOf(freeTill.until)}` : 'rest of the day',
-              title: `${lateCount} overdue ${lateCount === 1 ? 'item' : 'items'} could be done now`, sub: 'Tap for the list, or say “rakh do”', go: () => select('late') });
+          let work: Banner | null = null;
+          if (plan.length) {
+            const two = plan.slice(0, 2);
+            work = { key: 'free', icon: 'sparkles-outline', label: 'Free time', when: freeUntil ? `till ${timeOf(freeUntil)}` : 'rest of the day',
+              lines: two.map((p) => p.title),
+              sub: `${two.map((p) => p.minutes).join(' + ')} min · ${two.length === 1 ? 'fits now' : 'both fit now'}${plan.length > 2 ? `, ${plan.length - 2} more after` : ''} · tap to open`,
+              go: () => (served ? openPile(chipOf(served), served) : select('late')) };
           } else if (lateCount) {
-            banners.push({ key: 'late', icon: 'alert-circle-outline', label: 'Overdue', when: '', title: `${lateCount} ${lateCount === 1 ? 'item is' : 'items are'} late`,
-              sub: 'Tap for the list; I will suggest a time when you are free', go: () => select('late') });
+            const top = [...(data?.overdue ?? [])].sort((a, b) => RANK[a.priority] - RANK[b.priority])[0];
+            if (top) {
+              work = { key: 'late', icon: 'alert-circle-outline', label: 'Overdue', when: `${lateCount} late`, lines: [top.title],
+                sub: `Due ${top.due_label}${lateCount > 1 ? ` · ${lateCount - 1} more` : ''} · I'll suggest a time when you're free`, go: () => setOpenTask(top) };
+            }
           }
-          if (next && !soon) {
-            banners.push({ key: 'next', icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Next up', when: timeOf(next.item.scheduled_start ?? next.item.due_at),
-              title: next.item.title, sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}${next.item.priority === 'URGENT' ? ' · urgent' : ''}`,
-              go: () => setOpenTask(next.item) });
+          let meet: Banner | null = null;
+          if (next) {
+            meet = { key: 'next', icon: kindIcon[next.item.kind] ?? 'time-outline', label: soon ? 'Starting now' : 'Next up', when: timeOf(next.item.scheduled_start ?? next.item.due_at),
+              lines: [next.item.title], sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}${next.item.priority === 'URGENT' ? ' · urgent' : ''}`,
+              go: () => setOpenTask(next.item) };
+          } else if (ahead) {
+            meet = { key: 'ahead', icon: kindIcon[ahead.kind] ?? 'people-outline', label: 'Next meeting', when: ahead.due_label, lines: [ahead.title],
+              sub: `${ahead.kind === 'CALL' ? 'Call' : 'Meeting'}${ahead.assignee.type !== 'MD' && ahead.assignee.staff_name ? ` with ${ahead.assignee.staff_name}` : ''} · nothing timed left today`, go: () => setOpenTask(ahead) };
           }
+          let spot: Banner | null = null;
+          if (shown) {
+            const at = pile.findIndex((p) => p.key === shown.key) + 1;
+            spot = { key: `spot-${shown.key}`, icon: CHIP_ICON[chipOf(shown)], label: `${alertLabel(shown)}${shown.from ? ` · ${shown.from}` : ''}`, when: relativeAgo(shown.fireAt),
+              lines: [shown.concealed ? 'Private reminder' : shown.title],
+              sub: `${at} of ${pile.length} waiting${pile.length > 1 ? ' · the next in 10 s' : ''} · tap to open, or say “isko …”`, go: () => openPile(chipOf(shown), shown) };
+          }
+          const banners = (soon ? [meet, work, spot] : [work, meet, spot]).filter((b): b is Banner => !!b);
           if (!banners.length) {
             banners.push({ key: 'now', icon: 'sparkles-outline', label: 'Right now', when: '',
-              title: data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…',
+              lines: [data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…'],
               sub: !data && loadError ? `${loadError} Check the internet connection, then tap here to try again.` : 'Say “Hey JARVIS” and ask for the plan, or give a task.',
               go: () => (!data && loadError ? reload(true) : talk()) });
           }
-          return banners.slice(0, 3).map((b) => (
+          return banners.map((b) => (
             <Pressable key={b.key} onPress={b.go} style={s.heroWrap}>
               <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
                 <View style={s.heroTop}>
                   <View style={s.heroIcon}>
                     <Icon name={b.icon} size={16} color={colors.white} />
                   </View>
-                  <Txt variant="label" style={{ color: 'rgba(255,255,255,0.85)' }}>{b.label}</Txt>
+                  <Txt variant="label" numberOfLines={1} style={{ color: 'rgba(255,255,255,0.85)', flexShrink: 1 }}>{b.label}</Txt>
                   {b.when ? <Txt variant="caption" style={s.heroWhen}>{b.when}</Txt> : null}
                 </View>
-                <Txt variant="title" numberOfLines={2} style={{ color: colors.white, marginTop: 8 }}>{b.title}</Txt>
-                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{b.sub}</Txt>
+                {b.lines.map((l, i) => (
+                  <Txt key={i} variant="title" numberOfLines={1} style={{ color: colors.white, marginTop: i ? 2 : 8 }}>{l}</Txt>
+                ))}
+                <Txt variant="small" numberOfLines={2} style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{b.sub}</Txt>
               </LinearGradient>
             </Pressable>
           ));
@@ -377,7 +447,7 @@ const s = StyleSheet.create({
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },
   heroIcon: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
-  heroWhen: { marginLeft: 'auto', color: colors.white, fontFamily: fonts.semibold, fontSize: 13 },
+  heroWhen: { marginLeft: 'auto', paddingLeft: 8, color: colors.white, fontFamily: fonts.semibold, fontSize: 13 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 24, marginBottom: 10 },
   lateChip: { flexDirection: 'row', alignItems: 'center', marginLeft: 10, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: colors.dangerSoft },
   report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 16 },

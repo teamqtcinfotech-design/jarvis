@@ -8,7 +8,7 @@ import React from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { type AlertGroup, GROUP_ORDER, GROUP_WORDS, groupOf, useAlertEngine } from '@/lib/alertEngine';
+import { type AlertGroup, chipOf, GROUP_ORDER, GROUP_WORDS, groupOf, pileOf, useAlertEngine } from '@/lib/alertEngine';
 import { useConversation } from '@/lib/conversation';
 import { relativeAgo } from '@/lib/format';
 import { colors, priorityColor, radius } from '@/lib/theme';
@@ -21,10 +21,10 @@ export function AlertsSheet() {
   const engine = useAlertEngine();
   const conv = useConversation();
   const insets = useSafeAreaInsets();
-  const all = [...engine.waiting, ...engine.held.filter((h) => !engine.waiting.some((w) => w.key === h.key))];
   // Opened from a chip: only that chip's pile (tasks, meetings, messages, or the rest); from elsewhere: everything.
+  // The same rows the chips count (pileOf), so the badge and the sheet never disagree.
   const g = engine.allGroup;
-  const items = all.filter((it) => !g || (g === 'other' ? !['task', 'meeting', 'message'].includes(groupOf(it)) : groupOf(it) === g));
+  const items = pileOf(engine.waiting, engine.held).filter((it) => !g || chipOf(it) === g);
   const piles = new Map<AlertGroup, typeof items>();
   for (const it of items) piles.set(groupOf(it), [...(piles.get(groupOf(it)) ?? []), it]);
   const heading = g && g !== 'other' ? `${items.length} ${items.length === 1 ? GROUP_WORDS[g].en[0] : GROUP_WORDS[g].en[1]} waiting` : g === 'other' ? `${items.length} alert${items.length === 1 ? '' : 's'} waiting` : `${items.length} waiting for you`;
