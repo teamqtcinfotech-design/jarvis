@@ -1,7 +1,8 @@
 /**
- * Phone: the home is a dashboard. Greeting, "next up", stat tiles, reports he can open and download, today's
- * tasks and meetings, what is coming up (tasks and meetings, however far), the alerts tree, the latest messages, the
- * latest updates, the latest answer.
+ * Phone: the home is the day. Greeting and date; four round counts (today's tasks, today's meetings, messages,
+ * alerts), each carrying what is waiting of its kind and opening it on a tap; up to three blue information banners
+ * (a meeting about to start, overdue work in free time, the next timed item); then, below the fold, the reports and
+ * the latest answer. Staff and the company panel live in the side menu.
  * The orb floats in the bottom-right corner and opens the talk layer.
  */
 import * as Haptics from 'expo-haptics';
@@ -11,13 +12,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useAlertEngine } from '@/lib/alertEngine';
+import { type AlertGroup, groupOf, useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
 import { greeting, timeOf } from '@/lib/format';
 import { addressOf, mdWord } from '@/lib/names';
 import { presenceLabel } from '@/lib/presence';
-import { colors, fonts, gradients, kindIcon, radius, shadow, tone } from '@/lib/theme';
+import { colors, fonts, gradients, kindIcon, radius, shadow } from '@/lib/theme';
 import type { SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { useWalkie } from '@/lib/walkie';
@@ -26,7 +27,6 @@ import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
 import { Drawer } from './Drawer';
 import { navItems } from './nav';
-import { WaitingCard } from './AlertBanner';
 import { Orb } from './Orb';
 import { TaskSheet } from './TaskSheet';
 import { Icon, IconButton, Txt } from './ui';
@@ -50,29 +50,8 @@ const inWords = (ms: number) => {
   return `in ${h} h${m % 60 ? ` ${m % 60} min` : ''}`;
 };
 
-/** One card of the home grid: what it is, how many, the first few lines; a tap opens the full list. */
-function GridCard({ icon, label, count, toneKey, lines, empty, note, onPress }: {
-  icon: string; label: string; count: number; toneKey: string; lines: string[]; empty: string; note?: string; onPress: () => void;
-}) {
-  const c = tone[toneKey] ?? tone.muted;
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [s.card, pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] }]}>
-      <View style={s.cardTop}>
-        <View style={[s.cardIcon, { backgroundColor: c.bg }]}>
-          <Icon name={icon} size={15} color={c.fg} />
-        </View>
-        <Txt style={[s.cardCount, count ? null : { color: colors.faint }]}>{String(count)}</Txt>
-      </View>
-      <Txt variant="small" numberOfLines={1} style={s.cardLabel}>{label}</Txt>
-      {lines.length ? lines.slice(0, 3).map((l, i) => (
-        <Txt key={i} variant="caption" numberOfLines={1} style={s.cardLine}>{l}</Txt>
-      )) : (
-        <Txt variant="caption" numberOfLines={1} style={[s.cardLine, { color: colors.faint }]}>{empty}</Txt>
-      )}
-      {note ? <Txt variant="caption" numberOfLines={1} style={{ color: colors.success, marginTop: 2 }}>{note}</Txt> : null}
-    </Pressable>
-  );
-}
+/** One information banner (his home screen, 24 Nov 2026): what it is, when, one line, one tap. */
+type Banner = { key: string; icon: string; label: string; when: string; title: string; sub: string; go: () => void };
 
 export function PhoneHome({ user }: { user: SessionUser }) {
   const router = useRouter();
@@ -131,25 +110,20 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     if (coming && coming.start - now < 30 * 60_000) return null;
     return { until: coming ? new Date(coming.start).toISOString() : null };
   })();
-  // Today means today: late items from earlier days are a separate chip, not rows that crowd out the day. Tasks and
-  // meetings are two cards, today and ahead (everything dated, however far: a meeting next December is "coming up").
+  // Today means today: late items from earlier days are a banner, not rows that crowd out the day.
   const isMeeting = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
   const todayOpen = data ? data.today.filter((t) => t.status !== 'COMPLETED') : [];
-  const todayTasks = todayOpen.filter((t) => !isMeeting(t)).slice(0, 3);
-  const todayMeetings = todayOpen.filter(isMeeting).slice(0, 3);
+  const todayMeetings = todayOpen.filter(isMeeting);
   const lateCount = data?.overdue.length ?? 0;
-  // Ahead, the latest messages (received and sent) and the latest updates, each a short strip with "See all"; the
-  // full lists are one tap away.
-  const ahead = data ? data.upcoming.filter((t) => t.status !== 'COMPLETED') : [];
-  const comingTasks = ahead.filter((t) => !isMeeting(t)).slice(0, 3);
-  const comingMeetings = ahead.filter(isMeeting).slice(0, 3);
   const unread = data?.messages_unseen ?? 0;
-  // One line per item on a card: the clock time today, the day ahead.
-  const whenLine = (t: TaskItem) => {
-    const at = t.scheduled_start ?? t.due_at;
-    return at ? `${timeOf(at)} · ${t.title}` : t.title;
+  // What is waiting, by chip: task alerts under Tasks, meeting alerts under Meetings, messages under Messages, the
+  // rest (approvals, requests, updates, reminders) under Alerts.
+  const waitingBy = (g: AlertGroup | 'other') =>
+    engine.waiting.filter((w) => (g === 'other' ? !['task', 'meeting', 'message'].includes(groupOf(w)) : groupOf(w) === g)).length;
+  const openPile = (g: AlertGroup | 'other') => {
+    engine.setAllGroup(g);
+    engine.setAllVisible(true);
   };
-  const dayLine = (t: TaskItem) => (t.due_label ? `${t.due_label} · ${t.title}` : t.title);
   // A task he asked to open by voice ("pehla wala kholo"): its sheet comes up just as if he had tapped it.
   const voiceItem = conv.itemToOpen && data
     ? [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime, ...(data.pa_tasks ?? []), ...(data.mg_tasks ?? []), ...(data.given_tasks ?? []), ...(data.team_tasks ?? []), ...(data.md_tasks ?? []), ...data.delegated]
@@ -231,62 +205,77 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <Txt variant="display">{address}</Txt>
         <Txt variant="caption" style={{ marginTop: 2 }}>{data?.date_label ?? ''}</Txt>
 
-        {/* Four counts at a glance (his layout, 24 Nov 2026): tap one and its list comes up. */}
+        {/* Four counts at a glance (his layout, 24 Nov 2026): today's tasks and meetings, unread messages, alerts
+            waiting. A red badge = that many alerts of that kind waiting; a tap opens them (or the day's list). */}
         <View style={s.chips}>
-          {[
-            { key: 'tasks', label: 'Tasks', n: todayOpen.filter((t) => !isMeeting(t)).length, icon: 'checkbox-outline', tone: colors.accent, go: () => select('today_tasks') },
-            { key: 'meetings', label: 'Meetings', n: todayMeetings.length, icon: 'people-outline', tone: colors.gold, go: () => select('today_meetings') },
-            { key: 'messages', label: 'Messages', n: unread, icon: 'chatbubble-ellipses-outline', tone: colors.info, go: () => select('messages') },
-            { key: 'alerts', label: 'Alerts', n: engine.waiting.length, icon: 'notifications-outline', tone: engine.waiting.length ? colors.warn : colors.muted, go: () => engine.setAllVisible(true) },
-          ].map((c) => (
-            <Pressable key={c.key} onPress={() => { tick(); c.go(); }} style={s.chip} accessibilityLabel={`${c.label}: ${c.n}`}>
+          {([
+            { key: 'task', label: 'Tasks', n: todayOpen.filter((t) => !isMeeting(t)).length, badge: waitingBy('task'), tone: colors.accent, list: 'today_tasks' },
+            { key: 'meeting', label: 'Meetings', n: todayMeetings.length, badge: waitingBy('meeting'), tone: colors.gold, list: 'today_meetings' },
+            { key: 'message', label: 'Messages', n: Math.max(unread, waitingBy('message')), badge: 0, tone: colors.info, list: 'messages' },
+            { key: 'other', label: 'Alerts', n: waitingBy('other'), badge: 0, tone: waitingBy('other') ? colors.warn : colors.muted, list: 'updates' },
+          ] as { key: AlertGroup | 'other'; label: string; n: number; badge: number; tone: string; list: string }[]).map((c) => (
+            <Pressable
+              key={c.key}
+              onPress={() => { tick(); if (waitingBy(c.key)) openPile(c.key); else select(c.list); }}
+              style={s.chip}
+              accessibilityLabel={`${c.label}: ${c.n}${c.badge ? `, ${c.badge} waiting` : ''}`}
+            >
               <View style={[s.chipRing, { borderColor: c.tone }]}>
                 <Txt style={[s.chipN, { color: c.tone }]}>{c.n}</Txt>
+                {c.badge ? (
+                  <View style={s.chipBadge}>
+                    <Txt style={s.chipBadgeN}>{c.badge}</Txt>
+                  </View>
+                ) : null}
               </View>
               <Txt variant="caption" style={{ marginTop: 4 }}>{c.label}</Txt>
             </Pressable>
           ))}
         </View>
 
-        {/* What is waiting for him right now: in the page, hiding nothing (see AlertBanner.tsx) */}
-        <WaitingCard />
-
-        {/* The information banner, by priority: a meeting about to start; overdue work in free time (the standing
-            reminder); updates waiting; the next timed item; else the day's state. The name shows here; when JARVIS
-            speaks about it, it says only what it is. */}
+        {/* Up to three information banners, by priority: a meeting about to start; overdue work in free time (the
+            standing reminder, else the plain overdue count); the next timed item. What is waiting is on the chips
+            above, so no banner repeats it. */}
         {(() => {
-          const soon = next && next.start - now <= 5 * 60_000;
-          const hero = soon && next
-            ? { icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Starting now', when: timeOf(next.item.scheduled_start ?? next.item.due_at), title: next.item.title,
-                sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}`, go: () => setOpenTask(next.item) }
-            : lateCount && freeTill
-              ? { icon: 'alert-circle-outline', label: 'Free time', when: freeTill.until ? `till ${timeOf(freeTill.until)}` : 'rest of the day',
-                  title: `${lateCount} overdue ${lateCount === 1 ? 'item' : 'items'} could be done now`, sub: 'Tap for the list, or say “rakh do”', go: () => select('late') }
-              : engine.waiting.length
-                ? { icon: 'notifications-outline', label: 'Waiting for you', when: '', title: `${engine.waiting.length} update${engine.waiting.length === 1 ? '' : 's'}`,
-                    sub: 'Tap to go through them, or say “padho”', go: () => engine.setAllVisible(true) }
-                : next
-                  ? { icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Next up', when: timeOf(next.item.scheduled_start ?? next.item.due_at), title: next.item.title,
-                      sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}${next.item.priority === 'URGENT' ? ' · urgent' : ''}`, go: () => setOpenTask(next.item) }
-                  : { icon: 'sparkles-outline', label: 'Right now', when: '',
-                      title: data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…',
-                      sub: !data && loadError ? `${loadError} Check the internet connection, then tap here to try again.` : 'Say “Hey JARVIS” and ask for the plan, or give a task.',
-                      go: () => (!data && loadError ? reload(true) : talk()) };
-          return (
-            <Pressable onPress={hero.go} style={s.heroWrap}>
+          const soon = !!next && next.start - now <= 5 * 60_000;
+          const banners: Banner[] = [];
+          if (next && soon) {
+            banners.push({ key: 'soon', icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Starting now', when: timeOf(next.item.scheduled_start ?? next.item.due_at),
+              title: next.item.title, sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}`, go: () => setOpenTask(next.item) });
+          }
+          if (lateCount && freeTill) {
+            banners.push({ key: 'free', icon: 'alert-circle-outline', label: 'Free time', when: freeTill.until ? `till ${timeOf(freeTill.until)}` : 'rest of the day',
+              title: `${lateCount} overdue ${lateCount === 1 ? 'item' : 'items'} could be done now`, sub: 'Tap for the list, or say “rakh do”', go: () => select('late') });
+          } else if (lateCount) {
+            banners.push({ key: 'late', icon: 'alert-circle-outline', label: 'Overdue', when: '', title: `${lateCount} ${lateCount === 1 ? 'item is' : 'items are'} late`,
+              sub: 'Tap for the list; I will suggest a time when you are free', go: () => select('late') });
+          }
+          if (next && !soon) {
+            banners.push({ key: 'next', icon: kindIcon[next.item.kind] ?? 'time-outline', label: 'Next up', when: timeOf(next.item.scheduled_start ?? next.item.due_at),
+              title: next.item.title, sub: `${inWords(next.start - now)}${next.item.scope === 'private' ? ' · private' : ''}${next.item.priority === 'URGENT' ? ' · urgent' : ''}`,
+              go: () => setOpenTask(next.item) });
+          }
+          if (!banners.length) {
+            banners.push({ key: 'now', icon: 'sparkles-outline', label: 'Right now', when: '',
+              title: data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…',
+              sub: !data && loadError ? `${loadError} Check the internet connection, then tap here to try again.` : 'Say “Hey JARVIS” and ask for the plan, or give a task.',
+              go: () => (!data && loadError ? reload(true) : talk()) });
+          }
+          return banners.slice(0, 3).map((b) => (
+            <Pressable key={b.key} onPress={b.go} style={s.heroWrap}>
               <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
                 <View style={s.heroTop}>
                   <View style={s.heroIcon}>
-                    <Icon name={hero.icon} size={16} color={colors.white} />
+                    <Icon name={b.icon} size={16} color={colors.white} />
                   </View>
-                  <Txt variant="label" style={{ color: 'rgba(255,255,255,0.85)' }}>{hero.label}</Txt>
-                  {hero.when ? <Txt variant="caption" style={s.heroWhen}>{hero.when}</Txt> : null}
+                  <Txt variant="label" style={{ color: 'rgba(255,255,255,0.85)' }}>{b.label}</Txt>
+                  {b.when ? <Txt variant="caption" style={s.heroWhen}>{b.when}</Txt> : null}
                 </View>
-                <Txt variant="title" numberOfLines={2} style={{ color: colors.white, marginTop: 10 }}>{hero.title}</Txt>
-                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{hero.sub}</Txt>
+                <Txt variant="title" numberOfLines={2} style={{ color: colors.white, marginTop: 8 }}>{b.title}</Txt>
+                <Txt variant="small" style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{b.sub}</Txt>
               </LinearGradient>
             </Pressable>
-          );
+          ));
         })()}
 
         {data && loadError ? (
@@ -295,30 +284,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           </Pressable>
         ) : null}
 
-        {/* One screen, card by card: tasks and meetings today and ahead, the alerts, the late ones. Each card shows
-            its count and the first few, and opens the full list. */}
-        <View style={s.grid}>
-          <GridCard icon="checkbox-outline" label="Today’s tasks" count={todayOpen.filter((t) => !isMeeting(t)).length} toneKey="accent"
-            lines={todayTasks.map(whenLine)} empty={data ? 'No tasks today' : 'Loading…'}
-            note={data?.completed_today ? `${data.completed_today} done` : ''} onPress={() => select('today_tasks')} />
-          <GridCard icon="people-outline" label="Today’s meetings" count={todayMeetings.length} toneKey="gold"
-            lines={todayMeetings.map(whenLine)} empty={data ? 'No meetings today' : 'Loading…'} onPress={() => select('today_meetings')} />
-          <GridCard icon="calendar-outline" label="Upcoming tasks" count={ahead.filter((t) => !isMeeting(t)).length} toneKey="info"
-            lines={comingTasks.map(dayLine)} empty={data ? 'Nothing ahead' : 'Loading…'} onPress={() => select('upcoming_tasks')} />
-          <GridCard icon="calendar-outline" label="Upcoming meetings" count={ahead.filter(isMeeting).length} toneKey="info"
-            lines={comingMeetings.map(dayLine)} empty={data ? 'No meetings ahead' : 'Loading…'} onPress={() => select('upcoming_meetings')} />
-          <GridCard icon="notifications-outline" label="Alerts" count={unread + pending + engine.news.length + engine.held.length} toneKey={unread + pending ? 'warn' : 'muted'}
-            lines={[
-              `${unread} unread message${unread === 1 ? '' : 's'}`,
-              `${pending} ${isMD ? 'need your OK' : `waiting for ${md}`}`,
-              `${engine.news.length} update${engine.news.length === 1 ? '' : 's'}${engine.held.length ? ` · ${engine.held.length} held` : ''}`,
-            ]} empty="" onPress={() => select(unread ? 'messages' : pending ? 'requests' : 'updates')} />
-          <GridCard icon="alert-circle-outline" label="Late" count={lateCount} toneKey={lateCount ? 'danger' : 'muted'}
-            lines={(data?.overdue ?? []).slice(0, 3).map(dayLine)} empty={data ? 'Nothing is late' : 'Loading…'} onPress={() => select('late')} />
-          {/* Staff and the company panel live in the side menu (his choice, 24 Nov 2026): the home page is the day. */}
-        </View>
-
-        {/* Reports */}
+        {/* Reports (below the fold; the day itself is the chips and the banners above) */}
         <View style={s.sectionHead}>
           <Txt variant="label">Reports</Txt>
           <Txt variant="caption">Tap to open</Txt>
@@ -405,18 +371,13 @@ const s = StyleSheet.create({
   chip: { alignItems: 'center', width: 72 },
   chipRing: { width: 56, height: 56, borderRadius: 28, borderWidth: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   chipN: { fontSize: 20, fontFamily: fonts.semibold, lineHeight: 24 },
+  chipBadge: { position: 'absolute', top: -5, right: -6, minWidth: 20, height: 20, borderRadius: 10, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
+  chipBadgeN: { color: colors.white, fontSize: 11, fontFamily: fonts.semibold, lineHeight: 14 },
   heroWrap: { marginTop: 18, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },
   heroIcon: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },
   heroWhen: { marginLeft: 'auto', color: colors.white, fontFamily: fonts.semibold, fontSize: 13 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 14, gap: 10 },
-  card: { width: '48%', flexGrow: 1, backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, padding: 12, minHeight: 118 },
-  cardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  cardIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  cardCount: { fontSize: 22, fontWeight: '700', color: colors.ink, lineHeight: 28 },
-  cardLabel: { color: colors.ink, fontWeight: '600', marginTop: 6, marginBottom: 3 },
-  cardLine: { color: colors.inkSoft, marginTop: 1 },
   sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 24, marginBottom: 10 },
   lateChip: { flexDirection: 'row', alignItems: 'center', marginLeft: 10, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: colors.dangerSoft },
   report: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingVertical: 11, paddingHorizontal: 16 },

@@ -210,6 +210,9 @@ interface EngineValue {
   /** "Sab dikhao": every alert waiting, as cards with their buttons and the microphone (AlertsSheet). */
   allVisible: boolean;
   setAllVisible: (v: boolean) => void;
+  /** Which chip opened the sheet: task / meeting / message alerts, 'other' (approvals, requests, updates), or everything. */
+  allGroup: AlertGroup | 'other' | null;
+  setAllGroup: (g: AlertGroup | 'other' | null) => void;
 }
 
 const EngineContext = createContext<EngineValue | null>(null);
@@ -609,6 +612,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     deliver(next, 'loud');
   }, [deliver, focus, setCurrent, setQueued]);
   const [allVisible, setAllVisible] = useState(false);
+  const [allGroup, setAllGroup] = useState<AlertGroup | 'other' | null>(null);
   const presentNextRef = useRef(presentNext);
   useEffect(() => {
     presentNextRef.current = presentNext;
@@ -1466,6 +1470,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     skip,
     allVisible,
     setAllVisible,
+    allGroup,
+    setAllGroup,
     meetingMode,
     setMeetingMode,
     offer,

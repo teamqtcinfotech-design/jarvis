@@ -1,14 +1,14 @@
 /**
  * What is waiting for him right now, without hiding anything:
  *
- *  - On the home screen it is a card IN the page (WaitingCard, under the greeting): who it is from, how long ago,
- *    what it says, and its one or two buttons (Seen / Later for work and messages that ring until seen; Approve /
- *    Decline for an approval; Accept / Decline for a request; Done / Got it for a reminder). Below it one line:
- *    "+N more waiting · Next · Show all". Nothing floats over the page.
+ *  - On the home screen it sits inside the four round chips (PhoneHome): task alerts under Tasks, meeting alerts
+ *    under Meetings, messages under Messages, the rest under Alerts; a tap opens that pile (AlertsSheet), where each
+ *    card has its one or two buttons (Seen / Later for work and messages that ring until seen; Approve / Decline for
+ *    an approval; Accept / Decline for a request; Done / Got it for a reminder). Nothing floats over the page.
  *  - On every other screen it is a slim pill at the BOTTOM (above the phone's own bar): who, what, +N; a tap opens
  *    the full list (AlertsSheet), the eye is a quick Seen.
- *  - A ringing item shows a pulsing dot; an urgent one a soft red glow. Nothing here is a plain "Got it" for work or
- *    a message from the team: those stay until Seen.
+ *  - A ringing item shows a pulsing dot. Nothing here is a plain "Got it" for work or a message from the team: those
+ *    stay until Seen.
  */
 import { usePathname } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -16,9 +16,8 @@ import { Animated, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { type EngineItem, useAlertEngine } from '@/lib/alertEngine';
-import { relativeAgo } from '@/lib/format';
 import { usePrefs } from '@/lib/prefs';
-import { colors, kindIcon, priorityColor, priorityLabel, radius, shadow } from '@/lib/theme';
+import { colors, kindIcon, priorityColor, priorityLabel, shadow } from '@/lib/theme';
 
 import { Button, Icon, Txt } from './ui';
 
@@ -117,97 +116,6 @@ export function AlertActions({ item }: { item: EngineItem }) {
   );
 }
 
-/** The card for the item JARVIS is on, in the page (the home screen puts it under the greeting). */
-export function WaitingCard() {
-  const engine = useAlertEngine();
-  const item = engine.current;
-  const [glow] = useState(() => new Animated.Value(0));
-  const urgent = item?.priority === 'URGENT';
-  const others = engine.waiting.filter((w) => w.key !== item?.key).length;
-
-  // An urgent item breathes a soft glow until it is dealt with.
-  useEffect(() => {
-    if (!urgent) {
-      glow.setValue(0);
-      return undefined;
-    }
-    const loop = Animated.loop(Animated.sequence([
-      Animated.timing(glow, { toValue: 1, duration: 900, useNativeDriver: true }),
-      Animated.timing(glow, { toValue: 0.15, duration: 900, useNativeDriver: true }),
-    ]));
-    loop.start();
-    return () => loop.stop();
-  }, [urgent, glow]);
-
-  if (!item) return null;
-  const color = priorityColor[item.priority];
-  const title = item.concealed ? (item.priority === 'URGENT' ? 'Urgent private reminder' : 'Private reminder') : item.title;
-  return (
-    <View style={[s.card, { borderLeftColor: color }]}>
-      {urgent ? <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, s.glow, { borderColor: color, opacity: glow }]} /> : null}
-      <View style={s.head}>
-        <AlertAvatar item={item} />
-        <View style={{ flex: 1, marginLeft: 12 }}>
-          <View style={s.metaRow}>
-            {item.ring ? <RingDot color={color} /> : null}
-            <Txt variant="label" style={{ color }} numberOfLines={1}>{alertLabel(item)}{item.from ? ` · ${item.from}` : ''}</Txt>
-          </View>
-          <Txt variant="caption" numberOfLines={1}>
-            {relativeAgo(item.fireAt)}
-            {item.priority === 'URGENT' || item.priority === 'HIGH' ? ` · ${priorityLabel[item.priority]}` : ''}
-            {item.ring ? ' · rings until seen' : ''}
-          </Txt>
-        </View>
-        {others ? (
-          <View style={[s.countPill, { backgroundColor: color }]}>
-            <Txt variant="caption" style={{ color: colors.white, fontWeight: '700' }}>+{others}</Txt>
-          </View>
-        ) : null}
-      </View>
-      <Txt variant="heading" numberOfLines={3} style={{ marginTop: 10 }}>{title}</Txt>
-      {!item.concealed && item.body && item.body !== item.title ? <Txt variant="small" numberOfLines={4} style={{ marginTop: 4 }}>{item.body}</Txt> : null}
-      {item.concealed ? (
-        <Pressable onPress={engine.reveal} style={s.reveal}>
-          <Icon name="eye-outline" size={16} color={colors.inkSoft} />
-          <Txt variant="small" style={{ marginLeft: 6, color: colors.inkSoft }}>Tap to reveal</Txt>
-        </Pressable>
-      ) : null}
-      <AlertActions item={item} />
-      {others ? (
-        <View style={s.more}>
-          <Txt variant="caption" style={{ flex: 1 }}>+{others} more waiting</Txt>
-          <Pressable onPress={engine.skip} hitSlop={8} style={s.moreBtn} accessibilityLabel="Next">
-            <Icon name="play-skip-forward-outline" size={14} color={colors.accent} />
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Next</Txt>
-          </Pressable>
-          <Pressable onPress={() => engine.setAllVisible(true)} hitSlop={8} style={[s.moreBtn, { marginLeft: 10 }]} accessibilityLabel="Show all">
-            <Icon name="list-outline" size={14} color={colors.accent} />
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Show all</Txt>
-          </Pressable>
-        </View>
-      ) : null}
-      {others ? (
-        // The whole batch at once, the same as his words "sab seen", "sab baad mein", "sab hata do".
-        <View style={[s.more, { marginTop: 6 }]}>
-          <Txt variant="caption" style={{ flex: 1 }}>All {others + 1}:</Txt>
-          <Pressable onPress={() => { engine.seenAll(engine.batchItems()).catch(() => undefined); }} hitSlop={8} style={s.moreBtn} accessibilityLabel="Mark all seen">
-            <Icon name="eye-outline" size={14} color={colors.accent} />
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Seen</Txt>
-          </Pressable>
-          <Pressable onPress={() => { engine.snoozeAll().catch(() => undefined); }} hitSlop={8} style={[s.moreBtn, { marginLeft: 10 }]} accessibilityLabel="All later">
-            <Icon name="time-outline" size={14} color={colors.accent} />
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Later</Txt>
-          </Pressable>
-          <Pressable onPress={() => { engine.dismissAll(engine.batchItems()).catch(() => undefined); }} hitSlop={8} style={[s.moreBtn, { marginLeft: 10 }]} accessibilityLabel="Clear all from the screen">
-            <Icon name="close-circle-outline" size={14} color={colors.accent} />
-            <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Clear</Txt>
-          </Pressable>
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
 /** Away from the home screen: a slim pill at the bottom; it never covers the page. */
 export function AlertBanner() {
   const engine = useAlertEngine();
@@ -241,19 +149,6 @@ export function AlertBanner() {
 
 const s = StyleSheet.create({
   wrap: { position: 'absolute', left: 12, right: 12, zIndex: 50 },
-  card: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderLeftWidth: 4,
-    padding: 14,
-    marginTop: 14,
-    ...shadow,
-    shadowOpacity: 0.12,
-    elevation: 4,
-  },
-  glow: { borderRadius: radius.lg, borderWidth: 3 },
-  head: { flexDirection: 'row', alignItems: 'center' },
-  metaRow: { flexDirection: 'row', alignItems: 'center' },
   avatar: { alignItems: 'center', justifyContent: 'center' },
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   countPill: { minWidth: 30, height: 22, borderRadius: 11, paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
@@ -273,8 +168,5 @@ const s = StyleSheet.create({
     elevation: 10,
   },
   pillAct: { width: 30, height: 30, borderRadius: 15, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
-  reveal: { flexDirection: 'row', alignItems: 'center', marginTop: 10, marginLeft: 46 },
   actions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
-  more: { flexDirection: 'row', alignItems: 'center', marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  moreBtn: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 999, backgroundColor: colors.accentSoft },
 });
