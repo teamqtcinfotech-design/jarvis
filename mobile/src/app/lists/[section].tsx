@@ -47,6 +47,27 @@ const SECTIONS: Record<string, Section> = {
   staff: { title: 'Given to staff', empty: 'Say “Ramesh ko bolo…” to give work to someone in the team.', staff: true, items: (d) => d.delegated },
 };
 
+/** His own lists come in parts (his rule, 24 Nov 2026): personal items, work others gave him, his own official
+ *  work, and then what he gave others that falls in the same window. */
+const GROUPED = new Set(['today', 'today_tasks', 'today_meetings', 'late', 'upcoming', 'upcoming_tasks', 'upcoming_meetings', 'nodate']);
+const localIso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function groupsOf(section: string, items: TaskItem[], d: Dashboard): { title: string; items: TaskItem[]; staff?: boolean }[] {
+  const today = localIso(new Date());
+  const inWindow = (t: TaskItem) =>
+    section.startsWith('today') ? t.due_date === today && !t.overdue
+      : section === 'late' ? t.overdue
+        : section.startsWith('upcoming') ? !!t.due_date && t.due_date > today
+          : !t.due_date && !t.due_at;
+  const ofKind = (t: TaskItem) => (section.endsWith('_tasks') ? !isMeeting(t) : section.endsWith('_meetings') ? isMeeting(t) : true);
+  const fromOthers = (t: TaskItem) => t.scope !== 'private' && (t.origin ?? 'SELF') !== 'SELF';
+  return [
+    { title: 'Personal', items: items.filter((t) => t.scope === 'private') },
+    { title: 'For you', items: items.filter(fromOthers) },
+    { title: 'Your own work', items: items.filter((t) => t.scope !== 'private' && !fromOthers(t)) },
+    { title: 'Given by you', items: (d.given_tasks ?? []).filter((t) => t.status !== 'COMPLETED' && t.status !== 'CANCELLED' && inWindow(t) && ofKind(t)), staff: true },
+  ].filter((g) => g.items.length);
+}
+
 /** Signed out (by hand, or the login expired) while a list is open: go to the login page before the screen below
  *  runs, because the dashboard it depends on is gone the moment the user is. */
 export default function ListScreen() {
@@ -192,9 +213,20 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
     const items = sec.items(data);
     // The PA's real name in the hint, not a typed-in one.
     const empty = section === 'pa' && data.pa_name ? `Say “${data.pa_name} ko bolo…” to give ${data.pa_name} a task.` : sec.empty;
-    body = items.length
-      ? items.map((t) => <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} showStaffStatus={sec.staff} />)
-      : <Empty text={empty} />;
+    const groups = GROUPED.has(section) ? groupsOf(section, items, data) : [];
+    body = groups.length
+      ? groups.map((g) => (
+          <View key={g.title}>
+            <View style={s.groupHead}>
+              <Txt variant="label">{g.title.toUpperCase()}</Txt>
+              <Txt variant="caption" style={{ marginLeft: 8 }}>{g.items.length}</Txt>
+            </View>
+            {g.items.map((t) => <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} showStaffStatus={g.staff} />)}
+          </View>
+        ))
+      : items.length
+        ? items.map((t) => <TaskRow key={`${t.scope}-${t.id}`} item={t} onPress={() => setOpenTask(t)} showStaffStatus={sec.staff} />)
+        : <Empty text={empty} />;
   }
 
   return (
@@ -217,6 +249,7 @@ function ListBody({ user }: { user: NonNullable<ReturnType<typeof useSession>['u
 
 const s = StyleSheet.create({
   top: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingTop: 6 },
+  groupHead: { flexDirection: 'row', alignItems: 'baseline', marginTop: 14, marginBottom: 6 },
   busyCard: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 6, backgroundColor: colors.surface, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: colors.line },
   update: { marginBottom: 10, borderRadius: radius.md },
 });
