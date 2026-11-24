@@ -2116,6 +2116,11 @@ def _auto_save_ok(draft: dict) -> bool:
     items = [draft] + [b for b in (draft.get("batch") or []) if isinstance(b, dict)]
     if draft.get("needs_clarification") or draft.get("card_done") or draft.get("booked"):
         return False
+    if len(items) > 1:
+        # Several things in one breath are shown as a list first and sent on his yes ("sab bhej do"), never done
+        # unseen: he checks the names and times, fixes one by voice or with its Edit button, then sends all (his
+        # rule, 24 Nov 2026). One thing alone is still done at once.
+        return False
     for it in items:
         if it.get("action") not in AUTO_ACTIONS or it.get("needs_clarification"):
             return False

@@ -2567,8 +2567,11 @@ class TwoThingsInOneBreathTests(BaseCase):
         r = self.turn(self.md_client, "4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath", self.two_meetings())
         self.assertEqual(r["action"], "private_task")
         r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
-        self.assertEqual((r["action"], r["show"]), ("saved", "All 2 saved."), r)
-        self.assertEqual(r["say"], "सभी 2 सेव हो गए।")
+        # Each one said as it was done, never a bare "all saved" (his rule, 24 Nov 2026).
+        self.assertEqual(r["action"], "saved", r)
+        self.assertTrue(r["show"].startswith("Saved: Meeting with Aman."), r["show"])
+        self.assertIn("Saved: Meeting with Sharma ji.", r["show"])
+        self.assertIn("सेव हो गया: Meeting with Aman।", r["say"])
         self.assertEqual(PrivateTask.objects.filter(owner=self.md).count(), before + 2)
         titles = set(t.title for t in PrivateTask.objects.filter(owner=self.md))
         self.assertTrue({"Meeting with Aman", "Meeting with Sharma ji"} <= titles)
@@ -2599,7 +2602,9 @@ class TwoThingsInOneBreathTests(BaseCase):
         r = self.turn(self.md_client, "3 baje Mehta ji ko call aur Priya ko bolo Pune hotel book kare", cmd)
         self.assertEqual(r["action"], "private_task", r)   # a rough (offline) reading still waits for the yes
         r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
-        self.assertEqual((r["action"], r["show"]), ("saved", "All 2 saved."), r)
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("Saved: Call Mehta ji.", r["show"])
+        self.assertIn("Priya has it for tomorrow: Book the Pune hotel.", r["show"])
         self.assertIn("Call Mehta ji", list(PrivateTask.objects.filter(owner=self.md).values_list("title", flat=True)))  # (encrypted title: read, not filtered)
         self.assertTrue(SharedTask.objects.filter(title="Book the Pune hotel", assignee_type="USER", assignee_user=self.pa).exists())
 
@@ -2618,8 +2623,18 @@ class TwoThingsInOneBreathTests(BaseCase):
                         "notes": "Client 5 baje aayenge, conference room ready rakhna. Chai paani ka intezaam bhi kar dena."},
                        {**item, "intent": "assign_to_person", "title": "Monthly Report", "staff_name": "", "recipients": ["Sunil", "Mansi"]},
                    ])
-        d = self.interpret(self.md_client, "Sunil ko bolo bank statement, Mansi ko GST file, Priya ko message, aur dono report", cmd)
-        self.assertEqual((d["action"], d["booked"], d["saved_count"]), ("answer", True, 4), d["spoken_reply"])
+        text = "Sunil ko bolo bank statement, Mansi ko GST file, Priya ko message, aur dono report"
+        d = self.interpret(self.md_client, text, cmd)
+        # Several things in one breath are shown as a list first, never sent unseen (his rule, 24 Nov 2026): the yes sends them all.
+        self.assertFalse(d.get("booked"), d["spoken_reply"])
+        self.assertIn("4 things", d["spoken_reply"])
+        self.assertTrue(d["spoken_reply"].endswith("Shall I save all 4?"), d["spoken_reply"])
+        self.assertFalse(SharedTask.objects.filter(title="Bank Statement for October").exists())
+        self.turn(self.md_client, text, cmd)
+        r = self.turn(self.md_client, "haan, sab bhej do", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("Sunil has it for tomorrow: Bank Statement for October.", r["show"])
+        self.assertIn("The message has gone to Priya.", r["show"])
         self.assertTrue(SharedTask.objects.filter(title="Bank Statement for October", assignee_user=sunil, created_by=self.md).exists())
         self.assertTrue(SharedTask.objects.filter(title="Send the GST File", assignee_user=mg).exists())
         self.assertEqual(SharedTask.objects.filter(title="Monthly Report").count(), 2)          # one each for Sunil and Mansi
@@ -3211,9 +3226,17 @@ class WhoseMeetingTests(BaseCase):
                    people=["Neha"], more_items=[{"intent": "needs_destination", "title": "Meeting with Kavita", "kind": "MEETING",
                                                  "due_date": day, "due_time": "18:00", "due_in_minutes": 0, "staff_name": "",
                                                  "people": ["Kavita"]}])
-        d = self.interpret(self.pa_client, "kal 4 baje Neha ke saath meeting aur 6 baje Kavita ke saath", cmd)
+        text = "kal 4 baje Neha ke saath meeting aur 6 baje Kavita ke saath"
+        d = self.interpret(self.pa_client, text, cmd)
         self.assertFalse(d["needs_clarification"], d["spoken_reply"])
-        self.assertEqual((d["booked"], d["saved_count"]), (True, 2), d["spoken_reply"])
+        # Two things in one breath are shown as a list first (his rule, 24 Nov 2026); the yes saves both together.
+        self.assertFalse(d.get("booked"), d["spoken_reply"])
+        self.assertIn("2 things", d["spoken_reply"])
+        with mock.patch("core.ai_brain.interpret", return_value=cmd):
+            self.pa_client.post("/api/v1/assistant/turn/", {"text": text}, format="json")
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")):
+            r = self.pa_client.post("/api/v1/assistant/turn/", {"text": "haan"}, format="json").json()
+        self.assertEqual(r["action"], "saved", r)
         self.assertEqual(set(SharedTask.objects.filter(origin=SharedTask.Origin.SELF, assignee_user=self.pa)
                              .values_list("title", flat=True)), {"Meeting with Neha", "Meeting with Kavita"})
 

@@ -105,7 +105,7 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
   ];
   const staffOptions = allStaff ?? draft.staff_candidates ?? [];
   const when = draft.due_date ? `${dayLabel(draft.due_date)}${draft.due_time ? ` · ${timeLabel(draft.due_time)}` : ''}` : 'No date';
-  const saveLabel = draft.batch?.length ? `Save all ${draft.batch.length + 1}`
+  const saveLabel = draft.batch?.length ? `Send all ${draft.batch.length + 1}`
     : draft.action === 'team_delegation' ? `Assign to ${draft.team?.members.length ?? 0}`
     : draft.action === 'md_request' ? `Give to ${md}` : SAVE_LABEL[draft.action] ?? 'Confirm';
   const isMessage = draft.action === 'message';
@@ -211,10 +211,17 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
           {draft.kind === 'PAYMENT' ? <Txt variant="caption" style={{ marginTop: 8 }}>Reminder only. JARVIS never makes payments.</Txt> : null}
           {draft.batch?.length ? (
             <View style={s.batch}>
-              <Txt variant="label" style={{ color: colors.inkSoft, marginBottom: 6 }}>Also, in the same breath</Txt>
+              <Txt variant="label" style={{ color: colors.inkSoft, marginBottom: 6 }}>Also, in the same breath · nothing is sent until you say so</Txt>
               {draft.batch.map((b, i) => {
                 const h = draftHeading(b, md, mdHim(dash));
                 const w = b.due_date ? `${dayLabel(b.due_date)}${b.due_time ? ` · ${timeLabel(b.due_time)}` : ''}` : 'No date';
+                // Edit: this one comes up into the fields above (the one there goes down into the list), so its
+                // time, name or words can be fixed by tap or by voice; "Send all" then sends every one.
+                const edit = () => {
+                  const { batch, ...main } = draft;
+                  const others = (batch ?? []).filter((_x, j) => j !== i);
+                  onChange({ ...b, batch: [main as Draft, ...others] });
+                };
                 return (
                   <View key={`${b.title}-${i}`} style={s.batchRow}>
                     <View style={s.batchIcon}>
@@ -224,10 +231,13 @@ function DraftCardInner({ draft, saving, listening, error, onChange, onSave, onC
                       <Txt variant="heading" numberOfLines={2} style={{ fontSize: 15 }}>{b.title || 'Untitled'}</Txt>
                       <Txt variant="caption" numberOfLines={1}>{h.title} · {w}{b.action === 'delegation' && b.staff ? ` · ${b.staff.name}` : ''}</Txt>
                     </View>
+                    <Pressable onPress={edit} hitSlop={8} style={s.batchEdit} accessibilityLabel={`Edit ${b.title || 'this one'}`}>
+                      <Icon name="create-outline" size={15} color={colors.accent} />
+                      <Txt variant="caption" style={{ color: colors.accent, fontWeight: '600', marginLeft: 4 }}>Edit</Txt>
+                    </Pressable>
                   </View>
                 );
               })}
-              <Txt variant="caption" style={{ marginTop: 6 }}>To change one of them, just say it: “second one 9 baje kar do”.</Txt>
             </View>
           ) : null}
         </>
@@ -424,6 +434,7 @@ const s = StyleSheet.create({
   batch: { marginTop: 14, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   batchRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
   batchIcon: { width: 30, height: 30, borderRadius: 10, backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  batchEdit: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 999, backgroundColor: colors.accentSoft, marginLeft: 8 },
   offer: { flexDirection: 'row', alignItems: 'center', marginTop: 10, paddingVertical: 10, paddingHorizontal: 12, borderRadius: radius.md, backgroundColor: colors.accentSoft },
   offerText: { flex: 1, marginLeft: 8, color: colors.accentDeep, fontWeight: '500' },
   error: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 12, padding: 10, borderRadius: radius.md, backgroundColor: colors.dangerSoft },

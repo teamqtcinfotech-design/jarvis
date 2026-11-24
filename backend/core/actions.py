@@ -239,7 +239,8 @@ def run_card(user: User, card: dict) -> dict:
     if len(items) == 1 and lines:
         en, hi = lines[0]["en"], lines[0]["hi"]
     elif not failed:
-        en, hi = f"All {saved} saved.", f"सभी {saved} सेव हो गए।"
+        # Each one said as it was done ("Sunil has it: bank work. The message has gone to Himanshu."), never a bare "all saved".
+        en, hi = " ".join(r["en"] for r in lines), " ".join(r["hi"] for r in lines)
     else:
         names = "; ".join(f"{t} ({m.rstrip('.')})" for t, m in failed)
         en = f"Saved {saved} of {len(items)}. Could not save: {names}."
