@@ -12,7 +12,7 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
-from . import ai_brain, datacards, hinglish_parser, recurrence, scheduling, services
+from . import ai_brain, ask, datacards, hinglish_parser, recurrence, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
 from .models import CLOSED_STATUSES, Alert, Kind, Priority, PrivateTask, SharedTask, Status, User
@@ -3022,7 +3022,19 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                  f"ठीक है {address_hi}। जब भी ज़रूरत हो, बस हेलो जार्विस बोलिए।")
     else:
         draft["action"] = "answer"
-        if intent == "query":
+        # The answer path (core/ask.py, 24 Nov 2026): a question is answered in one exact sentence from the facts by
+        # the strongest model with read-only lookups; the items it spoke about become the cursor for "isko" /
+        # "iske baad". "Dikhao" / "list" keep the card path below, and so does any failure to reach the model.
+        asked = ask.try_answer(user, full_text, ctx, include_private, on_screen, address, address_hi) if intent == "query" else None
+        if asked is not None:
+            _say(draft, asked["en"], asked["hi"])
+            if asked.get("view"):
+                draft["view"] = asked["view"]
+            services.remember_last_view(user, {"kind": "ask", "question": full_text[:120]}, asked["en"],
+                                        has_private=any(a.get("scope") == "private" for a in asked["about"]),
+                                        items=asked["about"], about=asked.get("person") or "",
+                                        cursor=0 if asked["about"] else None)
+        elif intent == "query":
             # The spoken answer is short; the screen gets the data (timeline, chart or table) that fits the question.
             # The model only fills in a request form (which template, whose, which period); the server fills the
             # template from the database, so the same chart serves every person and every day.

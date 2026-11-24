@@ -178,6 +178,11 @@ JARVIS_AI_BRIEFING_MODEL = os.environ.get("JARVIS_AI_BRIEFING_MODEL", "claude-so
 JARVIS_AI_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_TIMEOUT_SECONDS", "20"))
 # General questions ("aaj ka temperature?", "flight price?") use Sonnet with web search.
 JARVIS_AI_ANSWER_MODEL = os.environ.get("JARVIS_AI_ANSWER_MODEL", "claude-sonnet-5-5")
+# The answer path (core/ask.py, 24 Nov 2026): questions about the app's own data answered in one exact sentence by the
+# strongest model with read-only lookups. Off = the fixed templates answer as before.
+JARVIS_AI_ASK_ENABLED = env_bool("JARVIS_AI_ASK_ENABLED", True)
+JARVIS_AI_ASK_MODEL = os.environ.get("JARVIS_AI_ASK_MODEL", "claude-opus-5-5")
+JARVIS_AI_ASK_EFFORT = os.environ.get("JARVIS_AI_ASK_EFFORT", "medium")
 JARVIS_AI_ANSWER_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_ANSWER_TIMEOUT_SECONDS", "50"))
 JARVIS_AI_MAX_SEARCHES = int(os.environ.get("JARVIS_AI_MAX_SEARCHES", "3"))  # web searches per question
 JARVIS_AI_DAILY_ANSWER_LIMIT = int(os.environ.get("JARVIS_AI_DAILY_ANSWER_LIMIT", "150"))  # per user per day

@@ -2681,12 +2681,12 @@ def task_history(task: SharedTask) -> list[dict]:
     return out
 
 
-LAST_VIEW_TTL = timedelta(minutes=15)
+LAST_VIEW_TTL = timedelta(hours=24)  # held until the subject changes, at most the day (his decision, 24 Nov 2026)
 FOCUS_ITEMS = 15  # how many of the last list's items are remembered for "the second one" / "doosra wala"
 
 
 def remember_last_view(user: User, request: dict, summary: str, has_private: bool = False,
-                       items: list | None = None, about: str = "") -> None:
+                       items: list | None = None, about: str = "", cursor: int | None = None) -> None:
     """Keep the list JARVIS just answered with (its filters and what was said), so the next question can narrow
     or widen the SAME list ("sirf meetings", "aur Sir ke diye hue", "sab dikhao") even when the phone did not
     send the card back. Stored beside the voice conversation's short memory, with the same encryption.
@@ -2702,7 +2702,9 @@ def remember_last_view(user: User, request: dict, summary: str, has_private: boo
     kept = [{"id": str(i["id"])[:64], "title": str(i["title"])[:120]}
             for i in (items or [])[:FOCUS_ITEMS] if isinstance(i, dict) and i.get("id") and i.get("title")]
     data["last_view"] = {"request": request, "summary": (summary or "")[:200], "private": bool(has_private),
-                         "items": kept, "about": str(about or "")[:80], "at": timezone.now().isoformat()}
+                         "items": kept, "about": str(about or "")[:80], "at": timezone.now().isoformat(),
+                         # The place in the list JARVIS spoke about (the answer path): "iske baad" / "isse pehle" count from it.
+                         "cursor": cursor if isinstance(cursor, int) and 0 <= cursor < len(kept) else None}
     ConversationState.objects.update_or_create(user=user, defaults={"state_json": json.dumps(data, ensure_ascii=False, default=str)})
 
 
@@ -2729,6 +2731,8 @@ def last_view(user: User, include_private: bool = True) -> dict | None:
     items = [i for i in (last.get("items") or []) if isinstance(i, dict) and i.get("id") and i.get("title")]
     if items and not hidden:
         out["items"] = items
+        if isinstance(last.get("cursor"), int):
+            out["cursor"] = last["cursor"]
     if last.get("about"):
         out["about"] = str(last["about"])
     return out
