@@ -450,11 +450,14 @@ class TaskPanelRulesTests(BaseCase):
         self.assertIn("Priya's task", md_rem[-1]["spoken"])
 
     def test_time_already_passed_asks_instead_of_moving(self):
-        past = (tu.now_local() - timedelta(hours=1)).strftime("%H:%M")
-        draft = self._interpret(self.md_client, f"Suresh Patel ko bolo aaj {past} tak stock report bheje")
+        # Pinned at 8 in the evening (a day ahead, so the session stays valid): 19:00 is gone both ways. A bare
+        # morning hour would mean tonight instead (tests_replies.TonightTests).
+        fixed = (tu.now_local() + timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+        with mock.patch("django.utils.timezone.now", return_value=fixed):
+            draft = self._interpret(self.md_client, "Suresh Patel ko bolo aaj 19:00 tak stock report bheje")
         self.assertTrue(draft["needs_clarification"])
         self.assertIn("already passed", draft["question"])
-        self.assertEqual(draft["due_date"], tu.today_local().isoformat())
+        self.assertEqual(draft["due_date"], fixed.date().isoformat())
 
     def test_unlinked_account_cannot_delegate(self):
         TaskPanelLink.objects.filter(user=self.pa).update(active=False)

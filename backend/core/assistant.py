@@ -3052,7 +3052,17 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
     if draft["action"] in TASK_ACTIONS and draft["due_date"] and draft["due_time"] and not draft.get("repeat") and not said_now:
         # (A repeating item whose first moment has passed simply starts from its next date; "abhi" is never "passed".)
         when = tu.combine_local(date.fromisoformat(draft["due_date"]), time.fromisoformat(draft["due_time"]))
-        if when <= tu.now_local() and not draft["needs_clarification"]:
+        now_local = tu.now_local()
+        if when <= now_local and when.date() == now_local.date() and 1 <= when.hour <= 11 and not draft["needs_clarification"]:
+            # "10 baje" once 10 in the morning has gone means tonight (his rule, 24 Nov 2026: he meets at night and on
+            # video calls too): the same hour in the evening, when that is still ahead. The confirmation then says
+            # the evening time ("raat 10 baje"); nothing is ever "already passed" that can still happen today.
+            evening = when + timedelta(hours=12)
+            if evening > now_local:
+                when = evening
+                draft["due_time"] = evening.strftime("%H:%M")
+                draft["due_label"] = _due_label(draft["due_date"], draft["due_time"])
+        if when <= now_local and not draft["needs_clarification"]:
             label, label_hi = tu.fmt_time(when), tu.fmt_time_hi(when)
             _ask(draft, f"{address}, {label} {tu.fmt_day(when.date())} has already passed. Tomorrow at {label}, or a different time?",
                  f"{address_hi}, {tu.fmt_day_hi(when.date())} {label_hi} निकल चुका है। कल {label_hi}, या कोई और समय?")

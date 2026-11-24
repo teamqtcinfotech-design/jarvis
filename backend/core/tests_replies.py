@@ -140,3 +140,36 @@ class ReplyTests(BaseCase):
         self.assertIn("Never repeat what the previous turn already said", prompt)
         for filler in ("Theek hai Sir, 2 minute", "Ji Sir, PDF", "Done Sir, switching", "Ho gaya Sir, kal", "Done, Sir. Ramesh"):
             self.assertNotIn(filler, prompt, filler)
+
+
+class TonightTests(BaseCase):
+    """"10 baje" once 10 in the morning has gone means tonight (his rule, 24 Nov 2026: he meets at night and on video
+    calls too). Only a time that is gone both ways is asked about."""
+
+    def _meeting_at(self, clock_hour: int, due_time: str):
+        # The clock is pinned a day ahead, so the session made now stays valid under it; "aaj" is that day.
+        fixed = (tu.now_local() + timedelta(days=1)).replace(hour=clock_hour, minute=0, second=0, microsecond=0)
+        with mock.patch("django.utils.timezone.now", return_value=fixed):
+            cmd = _cmd(intent="create_task", kind="MEETING", title="Meeting with Sharma ji", people=["Sharma ji"],
+                       due_date=fixed.date().isoformat(), due_time=due_time, spoken_reply="Booked.", done_reply="Booked.")
+            with mock.patch("core.ai_brain.interpret", return_value=cmd):
+                r = self.md_client.post("/api/v1/assistant/interpret/", {"text": "Sharma ji ke saath aaj 10 baje meeting"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_a_bare_hour_after_the_morning_means_tonight(self):
+        d = self._meeting_at(15, "10:00")
+        self.assertFalse(d["needs_clarification"], d)
+        self.assertEqual(d["due_time"], "22:00")
+        self.assertNotIn("already passed", d.get("question") or "")
+        self.assertNotIn("passed", d["spoken_reply"])
+        self.assertIn("10 PM", d["due_label"])
+
+    def test_a_time_gone_both_ways_is_still_asked_about(self):
+        d = self._meeting_at(23, "10:00")
+        self.assertTrue(d["needs_clarification"], d)
+        self.assertIn("already passed", d["question"])
+        self.assertEqual(d["due_time"], "10:00")
+
+    def test_the_brain_is_told_the_rule(self):
+        self.assertIn("means TONIGHT", ai_brain.COMMAND_SYSTEM_PROMPT)
