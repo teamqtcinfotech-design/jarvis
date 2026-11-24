@@ -119,7 +119,7 @@ export function Chip({
       ]}
     >
       {icon ? <Icon name={icon} size={14} color={selected ? colors.white : color} /> : null}
-      <Text style={[styles.chipText, { color: selected ? colors.white : colors.text, marginLeft: icon ? 6 : 0 }]}>{label}</Text>
+      <Text numberOfLines={1} style={[styles.chipText, { color: selected ? colors.white : colors.text, marginLeft: icon ? 6 : 0 }]}>{label}</Text>
     </Pressable>
   );
 }

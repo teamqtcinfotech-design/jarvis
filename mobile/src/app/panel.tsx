@@ -43,16 +43,17 @@ function PanelBody() {
   const [kind, setKind] = useState('partners');
   const [q, setQ] = useState('');
   const [asked, setAsked] = useState('');
+  const [page, setPage] = useState(1);
   const [view, setView] = useState<PanelView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [open, setOpen] = useState<string | null>(null);
 
-  const load = async (k = kind, words = asked) => {
+  const load = async (k = kind, words = asked, pg = page) => {
     setLoading(true);
     setError('');
     try {
-      const r = await api<PanelView>(`/views/panel/?group=${encodeURIComponent(k)}&words=${encodeURIComponent(words)}`);
+      const r = await api<PanelView>(`/views/panel/?group=${encodeURIComponent(k)}&words=${encodeURIComponent(words)}&page=${pg}`);
       setView(r.data);
     } catch (e) {
       setView(null);
@@ -62,10 +63,12 @@ function PanelBody() {
     }
   };
   useEffect(() => {
-    const kick = setTimeout(() => load(kind, asked), 0);
+    const kick = setTimeout(() => load(kind, asked, page), 0);
     return () => clearTimeout(kick);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- on each report or search
-  }, [kind, asked]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- on each report, search or page
+  }, [kind, asked, page]);
+  const pages = view?.panel?.pages ?? 1;
+  const shownPage = view?.panel?.page ?? page;
 
   const back = () => (router.canGoBack() ? router.back() : router.replace('/'));
   const label = KINDS.find((k) => k.key === kind)?.label ?? kind;
@@ -80,13 +83,13 @@ function PanelBody() {
         <Txt variant="title" style={{ flex: 1, textAlign: 'center' }}>Partners & franchise</Txt>
         <IconButton icon="refresh-outline" label="Refresh" onPress={() => load()} />
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, columnGap: 6, paddingVertical: 6 }} style={{ flexGrow: 0 }}>
-        {KINDS.map((k) => <Chip key={k.key} label={k.label} icon={k.icon} selected={kind === k.key} onPress={() => { setOpen(null); setKind(k.key); }} color={colors.accent} />)}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, columnGap: 6, alignItems: 'center' }} style={{ flexGrow: 0, height: 56 }}>
+        {KINDS.map((k) => <Chip key={k.key} label={k.label} icon={k.icon} selected={kind === k.key} onPress={() => { setOpen(null); setPage(1); setKind(k.key); }} color={colors.accent} />)}
       </ScrollView>
       <View style={s.search}>
         <Icon name="search-outline" size={16} color={colors.muted} />
-        <TextInput value={q} onChangeText={setQ} onSubmitEditing={() => setAsked(q.trim())} returnKeyType="search" placeholder={`Search ${label.toLowerCase()} by name or ID`} placeholderTextColor={colors.faint} style={s.searchInput} autoCorrect={false} autoCapitalize="none" />
-        {q || asked ? <Pressable onPress={() => { setQ(''); setAsked(''); }} hitSlop={8}><Icon name="close-circle" size={16} color={colors.faint} /></Pressable> : null}
+        <TextInput value={q} onChangeText={setQ} onSubmitEditing={() => { setPage(1); setAsked(q.trim()); }} returnKeyType="search" placeholder={`Search ${label.toLowerCase()} by name or ID`} placeholderTextColor={colors.faint} style={s.searchInput} autoCorrect={false} autoCapitalize="none" />
+        {q || asked ? <Pressable onPress={() => { setQ(''); setAsked(''); setPage(1); }} hitSlop={8}><Icon name="close-circle" size={16} color={colors.faint} /></Pressable> : null}
       </View>
       <ScrollView contentContainerStyle={{ padding: 20, paddingTop: 8, paddingBottom: 60 }} refreshControl={<RefreshControl refreshing={loading} onRefresh={() => load()} tintColor={colors.accent} />} keyboardShouldPersistTaps="handled">
         {error ? <Txt variant="small" style={{ color: colors.danger, marginBottom: 10 }}>{error}</Txt> : null}
@@ -123,6 +126,19 @@ function PanelBody() {
             </Pressable>
           );
         })}
+        {view && pages > 1 ? (
+          <View style={s.pager}>
+            <Pressable disabled={shownPage <= 1 || loading} onPress={() => { setOpen(null); setPage(Math.max(1, shownPage - 1)); }} style={[s.pageBtn, (shownPage <= 1 || loading) && { opacity: 0.4 }]}>
+              <Icon name="chevron-back" size={16} color={colors.ink} />
+              <Txt variant="small">Previous</Txt>
+            </Pressable>
+            <Txt variant="caption">Page {shownPage} of {pages}</Txt>
+            <Pressable disabled={shownPage >= pages || loading} onPress={() => { setOpen(null); setPage(shownPage + 1); }} style={[s.pageBtn, (shownPage >= pages || loading) && { opacity: 0.4 }]}>
+              <Txt variant="small">Next</Txt>
+              <Icon name="chevron-forward" size={16} color={colors.ink} />
+            </Pressable>
+          </View>
+        ) : null}
         {view ? <Txt variant="caption" style={{ textAlign: 'center', marginTop: 16 }}>View only · from the main software{view.panel?.as_of ? ` · as of ${new Date(view.panel.as_of).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })}` : ''}</Txt> : null}
       </ScrollView>
     </SafeAreaView>
@@ -139,4 +155,6 @@ const s = StyleSheet.create({
   totalValue: { fontSize: 18, fontFamily: fonts.semibold, color: colors.ink, lineHeight: 22 },
   row: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: colors.surface, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, padding: 12, marginBottom: 8 },
   line: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 4 },
+  pager: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 },
+  pageBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
 });

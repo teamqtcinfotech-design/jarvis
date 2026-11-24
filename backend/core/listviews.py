@@ -78,8 +78,13 @@ def clean_params(raw) -> dict:
         minutes = max(0, min(int(raw.get("minutes") or 0), 7 * 24 * 60))  # "last 10 minutes" for notifications
     except (TypeError, ValueError):
         minutes = 0
+    try:
+        page = max(1, min(int(raw.get("page") or 1), 500))  # the company panel's reports come a page at a time
+    except (TypeError, ValueError):
+        page = 1
     return {
         "minutes": minutes,
+        "page": page,
         "who": " ".join(str(raw.get("who") or "").split())[:80],
         "from": start, "to": end,
         "by": raw.get("by") if raw.get("by") in {"due", "given", "done"} else "",

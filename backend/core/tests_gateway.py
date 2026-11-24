@@ -141,8 +141,13 @@ class FakeApi:
                 cols = [{"key": "partner_id", "label": "ID"}, {"key": "name", "label": "Name"}, {"key": "city", "label": "City"}, {"key": "status", "label": "Status"}]
                 if query.get("result_mode") == "count":
                     return ok({"kind": kind, "title": "Partners", "columns": cols, "records": [], "total": len(recs), "shown": 0, "page": 1, "pages": 1})
-                return ok({"kind": kind, "title": "Partners", "columns": cols, "records": recs, "totals": [], "total": len(recs), "shown": len(recs),
-                           "page": 1, "pages": 1, "hidden_columns": 3, "as_of": timezone.now().isoformat()})
+                # A page at a time, like the real route (page_size is 50 unless a test makes the report long).
+                size = getattr(self, "page_size", 50)
+                page = max(1, int(query.get("page") or 1))
+                pages = max(1, -(-len(recs) // size))
+                shown = recs[(page - 1) * size:page * size]
+                return ok({"kind": kind, "title": "Partners", "columns": cols, "records": shown, "totals": [], "total": len(recs), "shown": len(shown),
+                           "page": page, "pages": pages, "hidden_columns": 3, "as_of": timezone.now().isoformat()})
             return FakeResponse(403, {"ok": False, "request_id": "r", "error": {"code": "kind_denied", "message": "Not for this account."}})
         if route == "task.create" and method == "POST":
             cid = body.get("command_id", "")
@@ -316,6 +321,18 @@ class GatewayTests(BaseCase):
         r = self.md_client.get("/api/v1/views/panel/?group=franchises")
         self.assertEqual(r.status_code, 200)
         self.assertIn("could not read franchises", r.json()["summary"].lower())  # the fake serves only partners: the refusal is said, not hidden
+
+    def test_the_panel_pages_through_a_long_report(self):
+        # 6,816 partners come 20 a page: the screen's Next asks for page 2 and gets the second page, not page 1 again.
+        self.api.page_size = 1
+        r = self.md_client.get("/api/v1/views/panel/?group=partners&page=2")
+        self.assertEqual(r.status_code, 200, r.content)
+        view = r.json()
+        self.assertEqual([row["title"] for row in view["rows"]], ["STTU001300"])
+        self.assertEqual((view["panel"]["page"], view["panel"]["pages"]), (2, 2))
+        self.assertIn("page 2 of 2", view["subtitle"])
+        r = self.md_client.get("/api/v1/views/panel/?group=partners")  # no page asked: the first
+        self.assertEqual([row["title"] for row in r.json()["rows"]], ["STTU001205"])
 
     def test_a_refusal_from_taskpanel_is_shown_and_nothing_is_saved(self):
         self.api.bad["task.create"] = (503, "writes_off")

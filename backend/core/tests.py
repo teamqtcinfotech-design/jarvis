@@ -22,8 +22,11 @@ from core.taskpanel.client import MockTaskPanel, TaskPanelError
 SECRET = "SECRET-Mehta-Divorce-Lawyer"
 
 
-@override_settings(JARVIS_AI_ENABLED=False, LARAVEL_MODE="mock", JARVIS_TASKPANEL_STAFF=True, JARVIS_DEFAULT_LANGUAGE="en")
+@override_settings(JARVIS_AI_ENABLED=False, LARAVEL_MODE="mock", TASKPANEL_MODE="mock", TASKPANEL_WRITES_ENABLED=True,
+                   TASKPANEL_DEFAULT_CATEGORY="general", JARVIS_TASKPANEL_STAFF=True, JARVIS_DEFAULT_LANGUAGE="en")
 class BaseCase(TestCase):
+    """Every test runs against the built-in TaskPanel double, whatever the developer's own .env says (a laptop pointed
+    at the live panel must never make the suite read, or write, real records)."""
     def setUp(self):
         self.md = User.objects.create_user("md", password="md-pass-12345", role=User.Role.MD, display_name="Sir")
         self.pa = User.objects.create_user("pa", password="pa-pass-12345", role=User.Role.PA, display_name="Priya")

@@ -1491,7 +1491,7 @@ def _panel_view(user, p: dict) -> dict:
     kind = panel_kind(p.get("group") or "") or panel_kind(p.get("who") or "") or panel_kind(p.get("words") or "")
     if not kind:
         return {"ask": f"{address}, which report: {_PANEL_EXAMPLES}?", "ask_hi": f"{address_hi}, कौन सी रिपोर्ट: {_PANEL_EXAMPLES}?"}
-    params: dict = {"page": 1}
+    params: dict = {"page": int(p.get("page") or 1)}
     words = p.get("words") or ""
     if words and panel_kind(words) != kind:
         params["query"] = words
@@ -1522,7 +1522,9 @@ def _panel_view(user, p: dict) -> dict:
     total = data.get("total") if isinstance(data.get("total"), int) else len(rows)
     title = f"{label}" + (f" · {params['query']}" if params.get("query") else "")
     shown = ", ".join(r["title"] for r in rows[:2])
-    view = _table("panel", title, rows, columns[:6], subtitle=f"{total} in all" + (f" · page 1 of {data.get('pages')}" if data.get("pages", 1) and data.get("pages", 1) > 1 else ""))
+    pages = data.get("pages") if isinstance(data.get("pages"), int) else 1
+    page = data.get("page") if isinstance(data.get("page"), int) else params["page"]
+    view = _table("panel", title, rows, columns[:6], subtitle=f"{total} in all" + (f" · page {page} of {pages}" if pages > 1 else ""))
     view["panel"] = {"kind": kind, "label": label, "total": total, "page": data.get("page"), "pages": data.get("pages"),
                      "hidden_columns": data.get("hidden_columns"), "totals": data.get("totals"), "as_of": data.get("as_of"),
                      "query": params.get("query", ""), "columns": columns}

@@ -183,6 +183,14 @@ interface EngineValue {
   markSeen: (item: EngineItem) => Promise<void>;
   /** Off the screen here only (the server has already settled it, e.g. an answer to "by when?"). */
   dismiss: (item: EngineItem) => void;
+  /** Everything waiting for him right now (banner, stack, held), the latest first: what his bulk words act on. */
+  batchItems: () => EngineItem[];
+  /** His words on the whole batch, or a filtered part of it, done at once and in silence: all seen, all done, all
+   *  off the screen (they stay on the lists), read these ones one at a time. Each resolves to how many it touched. */
+  seenAll: (items: EngineItem[]) => Promise<number>;
+  completeAll: (items: EngineItem[]) => Promise<number>;
+  dismissAll: (items: EngineItem[]) => Promise<number>;
+  readItems: (items: EngineItem[]) => void;
   /** Every unseen server message (news, decisions, nudges), newest first, for the Updates screen. */
   news: ServerAlert[];
   /** The Updates screen was opened: the small news on it counts as seen. */
@@ -1192,6 +1200,69 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [acknowledge, address, addressHi, md.en, md.hi],
   );
 
+  // ---- his words on the whole batch ("sab seen kar do", "sab baad mein", "sirf meetings padho") ----
+  const batchItems = useCallback((): EngineItem[] => {
+    const seen = new Set<string>();
+    return [currentRef.current, ...queueRef.current, ...heldRef.current]
+      .filter((i): i is EngineItem => !!i && !seen.has(i.key) && !!seen.add(i.key))
+      .sort((a, b) => b.fireAt - a.fireAt);
+  }, []);
+  const settleBatch = useCallback(() => {
+    setOffer(null);
+    newsRef.current = [];
+    toPresent.current = [];
+  }, []);
+  const seenAll = useCallback(
+    async (items: EngineItem[]) => {
+      settleBatch();
+      for (const item of items) {
+        if (item.alertId && item.ring) await api(`/alerts/${item.alertId}/seen/`, { method: 'POST', body: {} }).catch(() => undefined);
+        await acknowledge(item);
+      }
+      dataChanged.emit();
+      return items.length;
+    },
+    [acknowledge, settleBatch],
+  );
+  const completeAll = useCallback(
+    async (items: EngineItem[]) => {
+      settleBatch();
+      let n = 0;
+      for (const item of items) {
+        // A reminder carries its task; an alert about work carries the task's id, and its version is fetched first.
+        let ref = item.ref ? { scope: item.ref.scope, id: item.ref.id, version: item.ref.version } : null;
+        if (!ref && item.refType === 'shared_task' && item.refId) {
+          const t = await api<{ version?: number }>(`/shared-tasks/${item.refId}/`).catch(() => null);
+          if (t) ref = { scope: 'shared', id: item.refId, version: t.data.version ?? 1 };
+        }
+        if (ref) {
+          const path = ref.scope === 'private' ? `/private-tasks/${ref.id}/complete/` : `/shared-tasks/${ref.id}/complete/`;
+          const ok = await api(path, { method: 'POST', body: { expected_version: ref.version } }).then(() => true).catch(() => false);
+          if (ok) n += 1;
+        }
+        await acknowledge(item);
+      }
+      dataChanged.emit();
+      return n;
+    },
+    [acknowledge, settleBatch],
+  );
+  const dismissAll = useCallback(
+    async (items: EngineItem[]) => {
+      settleBatch();
+      for (const item of items) await acknowledge(item);
+      return items.length;
+    },
+    [acknowledge, settleBatch],
+  );
+  const readItems = useCallback(
+    (items: EngineItem[]) => {
+      settleBatch();
+      if (items.length) deliverTogether(items);
+    },
+    [deliverTogether, settleBatch],
+  );
+
   const decideRequest = useCallback(
     async (item: EngineItem, accept: boolean) => {
       if (!item.requestId) return acknowledge(item);
@@ -1378,6 +1449,11 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     acknowledgeAllHeld,
     snooze,
     snoozeAll,
+    batchItems,
+    seenAll,
+    completeAll,
+    dismissAll,
+    readItems,
     complete,
     decideRequest,
     reveal,

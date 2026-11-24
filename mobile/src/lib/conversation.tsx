@@ -15,7 +15,7 @@ import { router } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Animated, AppState, Platform } from 'react-native';
 
-import { type AlertQuestion, type EngineItem, type HeldOffer, describeWaiting, questionFor, useAlertEngine } from './alertEngine';
+import { type AlertGroup, type AlertQuestion, type EngineItem, type HeldOffer, GROUP_ORDER, GROUP_WORDS, describeWaiting, groupOf, questionFor, useAlertEngine } from './alertEngine';
 import { langOfText, replyLang, setReplyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { useDashboard } from './useDashboard';
@@ -139,6 +139,40 @@ const FREE_ANSWER_KINDS = new Set<AlertQuestion['kind']>(['promise', 'unseen', '
 const WHICH_ONES = /\b(kaun|kaunse|konse|which|dikhao|dikha|show|batao|bata)\b|कौन|दिखाओ|बताओ/i;
 /** "Baaki baad mein" / "others in 20 minutes": the whole batch waits, not just the one on the banner. */
 const THE_OTHERS = /\b(baaki|baki|others?|the rest|rest|sab|sabhi|all|sare|saare)\b|बाकी|सब|सारे/i;
+
+/* His words on the batch of alerts, or on the banner in front of him, done on the phone before anything reaches the
+ * brain (his rule, 24 Nov 2026): "sab seen kar do", "sabhi messages ok daal do", "sab done", "sab hata do", "sab 15
+ * minute baad", "sirf urgent wale", "only meetings", "approvals wale dikhao", "kitne tasks, kitni meetings?", and
+ * "isko hata do / isko baad mein / isko done / ok" for the one on the banner. Never a "kaun sa?" back. */
+const ALL_WORDS = /\b(sab|sabhi|saare|sare|saari|sari|all|everything|dono|teeno)\b|सब|सभी|सारे|सारी/i;
+const THIS_WORDS = /\b(isko|ise|is|iska|ye|yeh|this|that|it|isse)\b|इसको|इसे|इसका|ये|यह/i;
+const COUNT_WORDS = /\b(kitne|kitni|kitna|how many|count|break ?up)\b|कितने|कितनी|कितना/i;
+const LATER_WORDS = /\b(baad mein|baad me|baad|later|snooze|yaad dilana|yaad dila|batana|bata dena|remind)\b|बाद में|याद दिलाना|बताना/i;
+const SEEN_WORDS = /\b(seen|dekh liya|dekh li|dekha|padh liya|padh li|mark(?:ed)? (?:as )?read|ok|okay|theek hai|acknowledge|got it)\b|देख लिया|पढ़ लिया|ओके|ठीक है/i;
+const DONE_WORDS = /\b(done|ho gaya|ho gaye|hogaya|complete|completed|poora|poore|pura|pure|khatam|finished?)\b|हो गया|हो गए|पूरा|पूरे|ख़त्म/i;
+const REMOVE_WORDS = /\b(hata do|hatao|hata|htao|remove|dismiss|clear|band karo|band kar|delete)\b|हटा|हटाओ|बंद करो/i;
+const UNREAD_WORDS = /\b(unread|unseen|rehne do|rahne do|chhodo|chhod do|mat padho|nahi padhna)\b|रहने दो|छोड़ दो|अनरीड/i;
+const READ_WORDS = /\b(padho|padh do|padh ke|read|sunao|suna do|batao|bata do|dikhao|dikha do|show|list)\b|पढ़ो|सुनाओ|दिखाओ|बताओ/i;
+const ONLY_WORDS = /\b(sirf|only|just|wale|wali|vale|vali)\b|सिर्फ़|सिर्फ|वाले|वाली/i;
+const URGENT_WORDS = /\b(urgent|zaroori|jaroori|zaruri|important|high)\b|ज़रूरी|जरूरी|अर्जेंट/i;
+/** A sentence that gives work, sends a message or sets a time is never a word on the batch. */
+const NOT_BATCH = /\b(bhejo|bhej do|bhejna|send|bolo|kaho|kehna|ki|baje|bje|kal|parso|aaj|tomorrow|today|am|pm|o'?clock)\b|भेजो|बोलो|बजे|कल|आज|\d{1,2}:\d{2}/i;
+const GROUP_TESTS: [AlertGroup, RegExp][] = [
+  ['meeting', /\b(meeting|meetings|call|calls)\b|मीटिंग|कॉल/i],
+  ['approval', /\b(approval|approvals|manzoori|manjoori|manzuri)\b|मंज़ूरी|मंजूरी/i],
+  ['message', /\b(message|messages|msg|msgs|sandesh)\b|संदेश|मैसेज|मेसेज/i],
+  ['task', /\b(task|tasks|kaam)\b|टास्क|काम/i],
+  ['request', /\b(request|requests)\b|रिक्वेस्ट/i],
+];
+function minutesIn(text: string): number | undefined {
+  const m = text.match(/(\d+)\s*(?:min|mins|minute|minutes|मिनट)/i);
+  if (m) return Number(m[1]);
+  const h = text.match(/(\d+)\s*(?:ghante|ghanta|hour|hours|hr|hrs|घंटे|घंटा)/i);
+  if (h) return Number(h[1]) * 60;
+  if (/\b(aadhe ghante|aadha ghanta|half an hour)\b|आधे घंटे/i.test(text)) return 30;
+  if (/\b(ek ghante|ek ghanta|an hour|one hour)\b|एक घंटे/i.test(text)) return 60;
+  return undefined;
+}
 // Going through the alerts by voice: skip to the next one; lay them all out.
 const NEXT_WORDS = /^(?:ok(?:ay)?[,.]?\s*)?(?:next|agla|agli|aage|skip|chhodo|rehne do|next (?:one|wala|notification|alert)|agla (?:wala|notification|alert)|अगला|आगे|स्किप)[.!]?$/i;
 const SHOW_ALL_WORDS = /\b(?:show (?:me )?(?:all|the) (?:incoming |new |pending )?(?:notification|notifications|alerts?|banners?)|show (?:me )?all|sab(?:hi)? (?:notification|notifications|alerts?|banners?)|(?:notification|notifications|alerts?|banners?)(?: dikhao| dikha do| dikhaao| batao|\?)|saare (?:notification|notifications|alerts?)|kya (?:aaya|aya) hai|what(?:'s| is| has) (?:waiting|new|come|pending for me)|सब (?:नोटिफ़िकेशन|नोटिफिकेशन|अलर्ट)|क्या आया है)/i;
@@ -152,7 +186,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
     setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
-    allVisible, waiting } = useAlertEngine();
+    allVisible, waiting, batchItems, seenAll, completeAll, dismissAll, readItems } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
   const paName = dash?.pa_name ?? '';
@@ -379,6 +413,99 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     langRef.current === 'hi' ? { show: roman, speak: devanagari, lang: 'hi' as SpeakLang } : null;
 
   // ---------------------------------------------------------------- what the user said
+  /** His words on the batch or the banner (see ALL_WORDS … above): true when done here, nothing goes to the brain. */
+  const handleBatch = (text: string): boolean => {
+    const items = batchItems();
+    const cur = currentAlert;
+    if (!items.length && !cur) return false;
+    if (text.trim().split(/\s+/).length > 10 || NOT_BATCH.test(text)) return false;
+    const groups = GROUP_TESTS.filter(([, re]) => re.test(text)).map(([g]) => g);
+    const urgent = URGENT_WORDS.test(text);
+    const named = groups.length > 0 || urgent;
+    const subset = items.filter((i) => (!groups.length || groups.includes(groupOf(i))) && (!urgent || i.priority === 'URGENT' || i.priority === 'HIGH'));
+    const bulk = ALL_WORDS.test(text) || named;
+    const thisOne = !bulk && THIS_WORDS.test(text) && !!cur;
+    const targets = thisOne && cur ? [cur] : subset;
+    const n = targets.length;
+    const settle = (en: string, hi: string, listenAfter = false) => {
+      offerRef.current = null;
+      questionRef.current = null;
+      expectingRef.current = listenAfter;
+      silenceRef.current = 0;
+      push('jarvis', en);
+      const t = twin(en, hi);
+      say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: listenAfter ? listen : undefined });
+    };
+    const none = () => settle('None of those among them.', 'उनमें से कोई नहीं है।', true);
+    // "Kitne tasks, kitni meetings?" while the count is on the table: the split by kind; "padhun?" still stands.
+    if (COUNT_WORDS.test(text) && (offerRef.current || questionRef.current || named)) {
+      const piles = new Map<AlertGroup, number>();
+      for (const i of items) piles.set(groupOf(i), (piles.get(groupOf(i)) ?? 0) + 1);
+      const en = GROUP_ORDER.filter((g) => piles.get(g)).map((g) => `${piles.get(g)} ${GROUP_WORDS[g].en[piles.get(g) === 1 ? 0 : 1]}`).join(', ');
+      const hi = GROUP_ORDER.filter((g) => piles.get(g)).map((g) => `${piles.get(g)} ${GROUP_WORDS[g].hi}`).join(', ');
+      const keep = offerRef.current;
+      settle(`${en || 'Nothing is waiting'}.`, `${hi || 'कुछ इंतज़ार में नहीं'}।`, !!keep);
+      offerRef.current = keep;
+      return true;
+    }
+    if (!bulk && !thisOne) return false;
+    const them = thisOne ? 'it' : `all ${n}`;
+    if (LATER_WORDS.test(text)) {
+      if (!n) { none(); return true; }
+      const mins = minutesIn(text);
+      void (async () => {
+        let back: { label: string; labelHi: string } | null = null;
+        if (!named && !thisOne) back = await snoozeAll(mins);
+        else {
+          for (const item of targets) {
+            const r = await snooze(item, mins);
+            if (r) back = { label: r.label, labelHi: r.labelHi };
+          }
+          if (!named) declineOffer();
+        }
+        if (back) settle(`I'll bring ${them} back ${back.label}.`, `${back.labelHi || back.label} फिर बताऊँगा।`);
+        else settle(`Okay, ${them} later.`, 'ठीक है, बाद में।');
+      })();
+      return true;
+    }
+    if (SEEN_WORDS.test(text)) {
+      if (!n) { none(); return true; }
+      void seenAll(targets).then((k) => settle(thisOne ? 'Seen.' : `Done, ${k} marked seen.`, thisOne ? 'देख लिया।' : `हो गया, ${k} देख लिए।`));
+      return true;
+    }
+    if (DONE_WORDS.test(text)) {
+      if (!n) { none(); return true; }
+      void completeAll(targets).then((k) => settle(
+        thisOne ? (k ? 'Marked done.' : 'Okay, cleared.') : `Done: ${k} marked done, the rest cleared.`,
+        thisOne ? (k ? 'पूरा मार्क कर दिया।' : 'ठीक है, हटा दिया।') : `हो गया: ${k} पूरे मार्क किए, बाकी हटा दिए।`,
+      ));
+      return true;
+    }
+    if (REMOVE_WORDS.test(text)) {
+      if (!n) { none(); return true; }
+      void dismissAll(targets).then(() => settle(
+        thisOne ? "Removed; it's still on your list." : `Cleared ${n} from the screen; they're still on your lists.`,
+        thisOne ? 'हटा दिया; लिस्ट में है।' : `${n} स्क्रीन से हटा दिए; लिस्ट में हैं।`,
+      ));
+      return true;
+    }
+    if (UNREAD_WORDS.test(text)) {
+      declineOffer();
+      settle(thisOne ? 'Okay, it stays.' : 'Okay, they stay unread on your list.', 'ठीक है, वैसे ही रहेंगे।');
+      return true;
+    }
+    if (!thisOne && (READ_WORDS.test(text) || ONLY_WORDS.test(text) || (named && text.trim().split(/\s+/).length <= 3))) {
+      // "Sirf urgent wale", "only meetings", "approvals wale padho", "sab padho": those, one at a time, each with its question.
+      if (!subset.length) { none(); return true; }
+      offerRef.current = null;
+      questionRef.current = null;
+      silenceRef.current = 0;
+      readItems(subset);
+      return true;
+    }
+    return false;
+  };
+
   const heard = (said: string) => {
     Haptics.selectionAsync().catch(() => undefined); // instant "got it" tick
     setHeldVisible(false); // he is talking: nothing should sit on top of the conversation
@@ -422,6 +549,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
     push('user', text);
     lastQuestion.current = text;
+    if (handleBatch(text)) return; // a word on the batch or the banner: done here, never a "which one?"
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
       interpret(text, '', `JARVIS asked: "${pendingOffer.text}" (${pendingOffer.count} alerts kept while away)`);
@@ -734,6 +862,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const liveTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
     const said = String(args.said ?? '').trim();
     const pq = questionRef.current;
+    if (said && handleBatch(said)) {
+      // A word on the batch or the banner, done on the phone: the line it says is the voice's answer.
+      const until = nowMs() + 8000;
+      while (!hasCollected() && nowMs() < until) await new Promise((r) => setTimeout(r, 60));
+      return JSON.stringify({ say: takeCollected() || 'Ji.' });
+    }
     if (pq && FREE_ANSWER_KINDS.has(pq.q.kind) && said) {
       // "Kal shaam tak" / "Sunil ko de do": free words for a question about work between people: the server reads
       // them as before, and what it answers is what the voice says.
