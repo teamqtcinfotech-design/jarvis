@@ -353,3 +353,67 @@ def routine_summary(prefs: dict) -> dict:
     return {"office_hours": f"{prefs.get('officeStart', '10:00')}-{prefs.get('officeEnd', '19:00')}",
             "weekly_off": off or ["none"], "fixed_blocks": blocks,
             "morning_briefing": prefs.get("briefingTime", "09:00") if prefs.get("briefingEnabled", True) else "off"}
+
+
+# ------------------------------------------------------------------ free time, used (Nov 2026)
+MIN_FREE_MINUTES = 30        # a shorter gap is not worth a suggestion
+MAX_PLACE_MINUTES = 120      # one item never takes more than this of a free stretch
+SOON = timedelta(minutes=15)  # "free now" also means free within this long
+PLACE_RANK = {Priority.URGENT: 0, Priority.HIGH: 1, Priority.NORMAL: 2, Priority.LOW: 3}
+
+
+def free_now(user: User, prefs: dict, now: datetime) -> tuple[datetime, datetime] | None:
+    """The free stretch the person is in (or about to be in, within SOON) today, inside their office hours and at
+    least MIN_FREE_MINUTES long; None when they are busy, off today, or the day is over."""
+    local = tu.to_local(now)
+    day = local.date()
+    if is_off_day(prefs, day):
+        return None
+    o_start, o_end = office_hours(prefs, day)
+    if local >= o_end:
+        return None
+    floor = max(local, o_start)
+    for start, end in free_slots(user, day, MIN_FREE_MINUTES, prefs, not_before=floor):
+        return (start, end) if start <= floor + SOON else None
+    return None
+
+
+def fit_into_free_time(items: list[dict], start: datetime, end: datetime, now: datetime) -> dict:
+    """Lay late and pending work into a free stretch. Candidates are open, movable items (tasks, payments,
+    follow-ups: never meetings or calls) that are overdue, due today with no time, or undated, and not already given
+    a slot ahead. Order: overdue first, then due today, then undated; within each, urgent before low, then the
+    oldest. Each takes its estimated minutes (the kind's usual when none), capped; what does not fit is named in
+    "left". Nothing is written here: the plan is proposed, and placed only on a yes (services.place_items)."""
+    local_now = tu.to_local(now)
+    today = local_now.date().isoformat()
+
+    def group(it: dict) -> int:
+        if it.get("overdue"):
+            return 0
+        return 1 if it.get("due_date") == today else 2
+
+    def key(it: dict):
+        return (group(it), PLACE_RANK.get(it.get("priority"), 2), str(it.get("due_at") or it.get("due_date") or "9999"))
+
+    cands = []
+    for it in items:
+        if it.get("kind") not in MOVABLE_KINDS or it.get("status") not in OPEN:
+            continue
+        placed = it.get("scheduled_start")
+        if placed and datetime.fromisoformat(placed) >= now:
+            continue  # already has its slot ahead
+        if it.get("due_at") and datetime.fromisoformat(it["due_at"]) > now:
+            continue  # a timed item later today keeps its time
+        cands.append(it)
+    cands.sort(key=key)
+    cursor = _ceil(max(start, local_now), timedelta(minutes=5))
+    placed, left = [], []
+    for it in cands:
+        minutes = min(minutes_for(it.get("kind"), it.get("estimated_minutes")), MAX_PLACE_MINUTES)
+        if cursor + timedelta(minutes=minutes) <= end:
+            placed.append({"id": it["id"], "scope": it.get("scope", "shared"), "version": it.get("version", 1), "title": it["title"],
+                           "start": cursor.isoformat(), "minutes": minutes, "overdue": bool(it.get("overdue"))})
+            cursor += timedelta(minutes=minutes)
+        else:
+            left.append(it["title"])
+    return {"start": start, "end": end, "placed": placed, "left": left}

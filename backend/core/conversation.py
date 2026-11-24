@@ -383,6 +383,9 @@ def _answer_asked(user: User, asked: dict, yes: bool, address: str, address_hi: 
             told = services.mark_seen(user, alert, tell=True)
             to, to_hi = services.giver_words(told.recipient) if told else (sir, sir_hi)
             line = (f"Told {to}.", f"{to_hi} को बता दिया।")
+        elif q.get("kind") == "place":
+            # "You're free till 4; shall I put these in?": yes lays the planned items into the stretch, no leaves the day.
+            line = services.answer_place(user, alert, yes, ack=False)
         else:
             line = ("Okay.", "ठीक है।")
         if alert.ring and alert.seen_at is None:

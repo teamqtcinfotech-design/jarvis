@@ -1250,6 +1250,21 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         }
         return;
       }
+      if (question.kind === 'place') {
+        // "You're free till 4; shall I put these in?": the server lays the planned items into the free stretch (or, on
+        // a no, leaves the day alone) and says what it did.
+        clearKey(item);
+        if (!item.alertId) return;
+        try {
+          const r = await api<{ show: string; say_hi: string }>(`/alerts/${item.alertId}/place/`, { method: 'POST', body: { yes } });
+          dataChanged.emit();
+          sayTwin(r.data.show, r.data.say_hi || r.data.show, { interrupt: true });
+        } catch (e) {
+          const msg = e instanceof ApiError ? e.message : "I couldn't reach the server.";
+          sayTwin(`Sorry ${address}, ${msg}`, `माफ़ कीजिए ${addressHi}, ${msg}`, { interrupt: true });
+        }
+        return;
+      }
       if (question.kind === 'approve') {
         // An approval asked of him: yes approves, no declines; whoever asked is told by the server. Deciding counts
         // as seen, so the ringing stops too.

@@ -1274,6 +1274,18 @@ class AlertAnswerView(APIView):
         return Response(promises.answer(request.user, alert, text))
 
 
+class AlertPlaceView(APIView):
+    """His yes or no to "you're free till 4; shall I put these in?" (followups.free_time): yes lays the planned items
+    into that free stretch, no leaves the day as it is. Returns the line JARVIS says (English, and Hindi)."""
+    permission_classes = [IsMDOrPA]
+
+    def post(self, request, alert_id):
+        alert = Alert.objects.get(id=alert_id, recipient=request.user)
+        yes = bool(request.data.get("yes", True)) if isinstance(request.data, dict) else True
+        en, hi = services.answer_place(request.user, alert, yes)
+        return Response({"show": en, "say_hi": hi})
+
+
 class TaskHistoryView(APIView):
     """A work item's history: who gave it, when it was seen, the time promised, moves, who else got it, done."""
     permission_classes = [IsMDOrPA]

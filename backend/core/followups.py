@@ -147,6 +147,48 @@ def piled_up(now=None) -> int:
     return raised
 
 
+def free_time(now=None) -> int:
+    """"You're free till 4. Two late items could be done now: X, Y. Shall I put them in?" Said once per free stretch,
+    to each person inside their own office hours, when late or pending work exists and fits (scheduling.free_now,
+    scheduling.fit_into_free_time). A yes lays the items into the stretch (services.answer_place), a no leaves the
+    day alone; neither is asked again for the same stretch."""
+    now = now or timezone.now()
+    raised = 0
+    for user in services.team():
+        prefs = get_prefs(user)
+        slot = scheduling.free_now(user, prefs, now)
+        if not slot:
+            continue
+        start, end = slot
+        key = f"free:{tu.to_local(now).date().isoformat()}:{tu.to_local(end):%H%M}"
+        if _already(key + f"@{user.id}"):
+            continue
+        dash = services.dashboard(user)
+        pool = list(dash.get("overdue") or []) + list(dash.get("today") or []) + list(dash.get("anytime") or [])
+        plan = scheduling.fit_into_free_time(pool, start, end, now)
+        if not plan["placed"]:
+            continue
+        names = [p["title"] for p in plan["placed"]]
+        n = len(names)
+        late = sum(1 for p in plan["placed"] if p["overdue"])
+        what, what_hi = ("late", "लेट") if late == n else ("pending", "बाकी")
+        listed = ", ".join(names[:3]) + (f" and {n - 3} more" if n > 3 else "")
+        listed_hi = ", ".join(names[:3]) + (f" और {n - 3} और" if n > 3 else "")
+        till, till_hi = tu.fmt_time(end), tu.fmt_time_hi(end)
+        address, address_hi = services.address_of(user), services.address_hi_of(user)
+        if n == 1:
+            spoken = f"{address}, you're free till {till}. One {what} item could be done now: {listed}. Shall I put it in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। एक {what_hi} काम अभी हो सकता है: {listed_hi}। रख दूँ?"
+        else:
+            spoken = f"{address}, you're free till {till}. {n} {what} items could be done now: {listed}. Shall I put them in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {n} {what_hi} काम अभी हो सकते हैं: {listed_hi}। रख दूँ?"
+        question = {"kind": "place", "en": "Shall I put it in?" if n == 1 else "Shall I put them in?", "hi": "रख दूँ?",
+                    "plan": plan["placed"], "until": end.isoformat()}
+        raised += _raise(user, key, f"Free till {till}: {n} {what} item{'s' if n > 1 else ''} could be done", listed, spoken,
+                         spoken_hi=spoken_hi, question=question)
+    return raised
+
+
 def run(now=None) -> int:
     """One pass. Safe to call every few minutes; it only raises what is due and not yet raised."""
     now = now or timezone.now()
@@ -162,6 +204,10 @@ def run(now=None) -> int:
         log.exception("morning briefing failed")
     if local.hour not in ACTIVE_HOURS:
         return raised
+    try:
+        raised += free_time(now)  # free now, with late work: offer to use the time
+    except Exception:  # noqa: BLE001 — the other nudges must still run
+        log.exception("free-time suggestion failed")
     md, pa = get_md(), get_pa()
     if not md:
         return raised

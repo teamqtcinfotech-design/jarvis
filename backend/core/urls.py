@@ -98,4 +98,5 @@ urlpatterns = [
     path("alerts/<uuid:alert_id>/ack/", views.AlertAckView.as_view()),
     path("alerts/<uuid:alert_id>/seen/", views.AlertSeenView.as_view()),
     path("alerts/<uuid:alert_id>/answer/", views.AlertAnswerView.as_view()),
+    path("alerts/<uuid:alert_id>/place/", views.AlertPlaceView.as_view()),
 ]

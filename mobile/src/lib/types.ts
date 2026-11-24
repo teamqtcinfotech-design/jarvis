@@ -284,7 +284,10 @@ export interface Reminder {
 export interface AlertQuestion {
   /** promise / unseen / reassign take free words ("kal shaam tak", "Sunil ko de do"): the server reads the answer
    *  (POST /alerts/<id>/answer/). The others are a yes or a no, carried out by the app. */
-  kind: 'accept' | 'done' | 'seen' | 'move' | 'promise' | 'unseen' | 'reassign' | 'signout' | 'approve';
+  kind: 'accept' | 'done' | 'seen' | 'move' | 'promise' | 'unseen' | 'reassign' | 'signout' | 'approve' | 'place';
+  /** place ("you're free till 4; shall I put these in?"): the items and the slots a yes gives them (the server does it). */
+  plan?: { id: string; scope: 'private' | 'shared'; title: string; start: string; minutes: number }[];
+  until?: string;
   /** signout: the sign-in (session) on another phone that "Sign it out" ends. */
   session?: string;
   /** Appended to the spoken line; empty when the line itself already asks (a check-in). */

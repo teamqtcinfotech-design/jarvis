@@ -2734,6 +2734,65 @@ def last_view(user: User, include_private: bool = True) -> dict | None:
     return out
 
 
+# ------------------------------------------------------------------ free time, used (Nov 2026)
+def answer_place(user: User, alert: Alert, yes: bool, ack: bool = True) -> tuple[str, str]:
+    """His yes or no to "you're free till 4; shall I put these in?" (followups.free_time). Yes lays the planned items
+    into that free stretch (their deadlines untouched, undo for a minute); no leaves the day as it is. Returns the
+    line JARVIS says (English, Hindi)."""
+    q = alert.question if isinstance(alert.question, dict) else {}
+    plan = [p for p in (q.get("plan") or []) if isinstance(p, dict)]
+    if ack and not alert.acknowledged_at:
+        alert.acknowledged_at = timezone.now()
+        alert.save(update_fields=["acknowledged_at"])
+    if not yes:
+        return "Okay, leaving it.", "ठीक है, रहने देता हूँ।"
+    done = place_items(user, plan)
+    if not done["placed"]:
+        return "Nothing to put in any more: those items have changed.", "अब कुछ नहीं रखा: वो काम बदल गए हैं।"
+    said = ", ".join(f"{t} at {tu.fmt_time(at)}" for t, at in done["placed"])
+    said_hi = ", ".join(f"{t} {tu.fmt_time_hi(at)}" for t, at in done["placed"])
+    en, hi = f"Done: {said}.", f"हो गया: {said_hi}।"
+    if done["skipped"]:
+        n = len(done["skipped"])
+        en += f" {n} had changed and stayed as {'it was' if n == 1 else 'they were'}."
+        hi += f" {n} बदल गया था, वैसा ही रहा।"
+    return en, hi
+
+
+def place_items(user: User, plan: list[dict]) -> dict:
+    """Give each planned item its slot today (scheduled_start / scheduled_end): the deadline stays, the reminder
+    follows the slot, the day's timeline shows it there. An item that changed since the plan was made (version), or
+    that is no longer open, is skipped. What was placed is remembered for undo."""
+    from . import actions  # noqa: PLC0415 — actions imports this module
+
+    placed, skipped, refs = [], [], []
+    for p in plan:
+        try:
+            start = datetime.fromisoformat(str(p.get("start")))
+            minutes = int(p.get("minutes") or 30)
+        except (TypeError, ValueError):
+            continue
+        scope = "private" if p.get("scope") == "private" else "shared"
+        task = (PrivateTask.objects.filter(id=p.get("id"), owner=user).first() if scope == "private"
+                else diary_qs(user).filter(id=p.get("id")).first())
+        if task is None or task.status in (Status.COMPLETED, Status.CANCELLED) or task.version != int(p.get("version") or task.version):
+            skipped.append(str(p.get("title") or ""))
+            continue
+        refs.append({"type": "placed", "scope": scope, "id": str(task.id),
+                     "before": {"scheduled_start": task.scheduled_start.isoformat() if task.scheduled_start else None,
+                                "scheduled_end": task.scheduled_end.isoformat() if task.scheduled_end else None}})
+        task.scheduled_start, task.scheduled_end = start, start + timedelta(minutes=minutes)
+        if not task.estimated_minutes:
+            task.estimated_minutes = minutes
+        task.version += 1
+        task.save(update_fields=["scheduled_start", "scheduled_end", "estimated_minutes", "version", "updated_at"])
+        audit(user, f"{scope}_task.place", f"{scope}_task", task.id, f"slot {start.isoformat()} +{minutes}m")
+        placed.append((task.title, start))
+    if refs:
+        actions.remember_done(user, refs, "the free-time plan")
+    return {"placed": placed, "skipped": skipped, "undo": refs}
+
+
 def ai_context(user: User, include_private: bool = True) -> dict:
     """Facts the AI may use. Strictly scoped: a context holds only the speaker's own personal items (never anyone
     else's) and only the work the speaker may see.

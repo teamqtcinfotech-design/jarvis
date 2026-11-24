@@ -344,6 +344,18 @@ def _undo_one(user: User, ref: dict) -> int:
             task.save(update_fields=["status", "completed_at", "version", "updated_at"])
             return 1
         return 0
+    if kind == "placed":
+        # A free-time plan he said yes to: the item goes back to having no slot (or the slot it had before).
+        model = PrivateTask if ref.get("scope") == "private" else SharedTask
+        task = model.objects.filter(id=ref["id"]).first()
+        if task is None:
+            return 0
+        before = ref.get("before") or {}
+        task.scheduled_start = datetime.fromisoformat(before["scheduled_start"]) if before.get("scheduled_start") else None
+        task.scheduled_end = datetime.fromisoformat(before["scheduled_end"]) if before.get("scheduled_end") else None
+        task.version += 1
+        task.save(update_fields=["scheduled_start", "scheduled_end", "version", "updated_at"])
+        return 1
     if kind == "cancelled":
         # "Delete it" done at once: undo puts the item back as it was.
         model = PrivateTask if ref.get("scope") == "private" else SharedTask
