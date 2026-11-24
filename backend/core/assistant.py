@@ -356,6 +356,11 @@ _PERSONAL = re.compile(
 _TASK_WORD = re.compile(r"\b(tasks?|to-?dos?)\b|टास्क|टास्क्स", re.IGNORECASE)
 _MEETING_WORD = re.compile(r"\b(meetings?|calls?|appointments?|schedule|plan|agenda|baithak)\b|मीटिंग|मीटिंग्स|कॉल|बैठक|प्लान|शेड्यूल", re.IGNORECASE)
 _OWN_WORD = re.compile(r"\b(apna|apne|apni|khud|own|personal|niji)\b|अपना|अपने|अपनी|खुद|पर्सनल|निजी", re.IGNORECASE)
+# "Staff list dikhao", "meri team ke naam", "kaun kaun hai": the PEOPLE are asked for, not the work given to them.
+_PEOPLE_LIST = re.compile(r"\b(staff|team|employees?|log|logon|members?)\b[^.?!]{0,30}\b(list|naam|names?|kaun kaun|kaun hai|kaun kaun hai|members?|directory)\b"
+                          r"|\b(list|names?|directory) of (?:my |the |our )?(staff|team|employees|people)\b|\b(staff|team) (?:ki |ka )?list\b"
+                          r"|स्टाफ़ (?:की |का )?लिस्ट|स्टाफ (?:की |का )?लिस्ट|टीम (?:की |का )?लिस्ट|कौन कौन", re.IGNORECASE)
+_WORK_WORDS = re.compile(r"\b(tasks?|kaam|work|diya|diye|di|pending|late|overdue|assign\w*|progress|performance|busy|free|load)\b|टास्क|काम|पेंडिंग", re.IGNORECASE)
 # "Dono", "both", "sab", "all of them": the answer to "which one?" is every one offered.
 _ALL_OF_THEM = re.compile(r"\b(dono|donon|dono ko|dono hi|both|both of them|sab|sabhi|sab ko|saare|sare|all|all of them|teeno|teenon|charo|charon)\b"
                           r"|दोनों|सब|सभी|सारे|तीनों|चारों", re.IGNORECASE)
@@ -2932,6 +2937,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             # The model only fills in a request form (which template, whose, which period); the server fills the
             # template from the database, so the same chart serves every person and every day.
             kind = cmd.get("view_kind") if cmd.get("view_kind") in datacards.VIEW_KINDS else datacards.guess_kind(full_text)
+            if kind in ("staff", "tasks", "stats", "performance", "pending") and _PEOPLE_LIST.search(full_text) and not _WORK_WORDS.search(full_text):
+                kind = "people"  # "staff list dikhao" asks for the PEOPLE, whatever the model filed it under; work needs a work word
             if kind == "busy" and str(cmd.get("view_who") or "").strip().lower() not in {"", "me", "self", "mine", "md", "sir"}:
                 # "Is Suraj free?": the busy view is the speaker's own diary; another person's day is their list.
                 kind = "today"

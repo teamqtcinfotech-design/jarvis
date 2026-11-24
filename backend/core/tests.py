@@ -1821,7 +1821,7 @@ class PersonAndScreenTests(BaseCase):
                                            "designation": "Franchise Coordinator", "on_leave": False, "leave": ""})
         self.assertEqual([r["title"] for r in view["rows"]], ["Call the Pune franchise owner"])
         self.assertEqual([s["label"] for s in view["stats"]], ["Open", "Done", "Late", "On time"])
-        self.assertEqual(d["spoken_reply"], "Sir, Kavita Singh is Franchise Coordinator in Franchise. 1 open; 0 done.")
+        self.assertEqual(d["spoken_reply"], "Sir, Kavita Singh is Franchise Coordinator in Franchise.")  # who she is; her work only when asked
         # The microphone heard the name a little wrong: still her, and the reply says whose card it is.
         for heard in ("Avitha Singh", "kavitha sinngh", "Kavitha"):
             d, _ = self.ask(self.md_client, f"give me detail of {heard}", view_kind="person", view_who=heard)

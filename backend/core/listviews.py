@@ -920,10 +920,10 @@ def tasks_view(user, p: dict, include_private: bool = True, mode: str = "", miss
         if profile["leave"]:
             intro += f", {profile['leave'][:1].lower()}{profile['leave'][1:]}"
             intro_hi += ", अभी छुट्टी पर"
-        work = f"{still} open" + (f", {late} late" if late else "") + f"; {done} done" + (f", {on_time_pct}% on time" if done else "")
-        work_hi = f"{still} काम बाकी" + (f", {late} लेट" if late else "") + f"; {done} पूरे" + (f", {on_time_pct}% समय पर" if done else "")
-        en = f"{intro}. " + _join(f"{period_en[:1].upper()}{period_en[1:]}:" if period_en else "", work) + "."
-        hi = f"{intro_hi}। " + _join(f"{period_hi}:" if period_hi else "", work_hi) + "।"
+        # "Tell me about Nikki" asked who she is: that alone is spoken. Her work is on the card, and is said when asked
+        # ("uske tasks?", "kitna pending hai?"), not before.
+        en = f"{intro}."
+        hi = f"{intro_hi}।"
     if missing:
         en += f" I don't have {missing} in my data."
         hi += f" {missing} की जानकारी मेरे पास नहीं है।"

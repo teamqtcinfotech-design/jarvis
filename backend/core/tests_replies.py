@@ -91,6 +91,27 @@ class ReplyTests(BaseCase):
         self.assertEqual((d["action"], d["show"]), ("saved", "Marked as done."), d)
         self.assertEqual(SharedTask.objects.get(id=task.id).status, Status.COMPLETED)
 
+    def test_staff_list_means_the_people_whatever_the_model_filed_it_under(self):
+        for text in ("mujhe staff list dikhao", "meri staff ki list do", "team ke naam batao", "staff mein kaun kaun hai"):
+            d = self.interpret(text, _cmd(intent="query", view_kind="staff"))  # the model's wrong pick
+            self.assertEqual(d["view"]["kind"], "people", (text, d["spoken_reply"]))
+            self.assertNotIn("no tasks", d["spoken_reply"].lower())
+        # Work words keep the work view: "staff ko kya diya" is the work given to staff.
+        d = self.interpret("staff ko kya kaam diya hai", _cmd(intent="query", view_kind="staff"))
+        self.assertNotEqual(d["view"]["kind"], "people")
+
+    def test_tell_me_about_nikki_says_who_she_is_not_her_counts(self):
+        services.create_person_task(self.md, self.nikki, {"title": "File the GST return", "due_date": _workday(2)})
+        d = self.interpret("Nikki ke baare mein batao", _cmd(intent="query", view_kind="person", view_who="Nikki"))
+        self.assertEqual(d["view"]["kind"], "person")
+        self.assertIn("Nikki", d["spoken_reply"])
+        self.assertIn("Accountant", d["spoken_reply"])
+        for word in ("open", "late", "done", "pending", "0", "1"):
+            self.assertNotIn(word, d["spoken_reply"], d["spoken_reply"])
+        # Asked about her work, the work is said.
+        d = self.interpret("uske tasks?", _cmd(intent="query", view_kind="tasks"))
+        self.assertIn("GST", d["spoken_reply"])
+
     def test_the_live_voice_line_says_nothing_of_its_own(self):
         text = livevoice.instructions_for(self.md, services.ai_context(self.md))
         self.assertIn("Before a tool call say NOTHING", text)
