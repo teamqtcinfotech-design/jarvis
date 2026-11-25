@@ -26,7 +26,7 @@ log = logging.getLogger("jarvis.live")
 RATE = 24000
 TOKEN_SECONDS = 15 * 60         # one line lives at most this long (the phone opens a fresh one after)
 IDLE_SECONDS = 45               # nothing said for this long: the phone closes the line (it is billed per minute)
-MAX_ITEMS = 20  # items of one breath, as core.assistant.MAX_ITEMS
+MAX_ITEMS = 200  # a safety bound on one breath, never a rule (as core.assistant.MAX_ITEMS)
 
 # Words in Devanagari that name a day or a time, as the live transcription writes them, in the Latin letters the
 # server's date rules read. Digits in Devanagari go to plain digits too.

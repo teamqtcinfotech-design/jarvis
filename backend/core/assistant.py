@@ -2511,7 +2511,7 @@ def _beside_waiting_card(draft: dict, card: dict, names: list[str]) -> dict:
     return out
 
 
-MAX_ITEMS = 20  # instructions in one go ("Sunil ko ye bolo, Mansi ko ye, aur Himanshu ko ye ..."); his test: 20 at once (25 Nov 2026)
+MAX_ITEMS = 200  # a safety bound on one breath, never a rule: he says as many things as he likes at once (25 Nov 2026)
 
 
 def _auto_save_ok(draft: dict) -> bool:
