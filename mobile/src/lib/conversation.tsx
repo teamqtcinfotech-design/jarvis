@@ -816,8 +816,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         }
         return;
       }
-      // Is JARVIS waiting on him (a card, a question, a "which one?", an offer)?
-      const waiting = !!draftRef.current || !!offerRef.current || !!choicesRef.current || !!previousRef.current;
+      // Is JARVIS waiting on him (a card, a question, a "which one?", an offer, an alert's own question)?
+      const waiting = !!draftRef.current || !!offerRef.current || !!choicesRef.current || !!previousRef.current || !!questionRef.current;
       if (!waiting) {
         // He got his answer and said nothing more: stop here so "Hey JARVIS" is listening again straight away.
         silenceRef.current = 0;
@@ -827,9 +827,18 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       if (silenceRef.current < NUDGE_AFTER_ROUNDS) {
         listen(); // he may be thinking: keep listening quietly
       } else if (silenceRef.current === NUDGE_AFTER_ROUNDS) {
-        const hi = hiLine(`${address}?`, `${addressHi}?`);
-        if (hi) say(hi.speak, { interrupt: true, lang: 'hi', fallback: hi.show, onDone: listen });
-        else say(`${address}?`, { interrupt: true, onDone: listen });
+        // (Read afresh: the check above narrowed the ref for TypeScript, but it may have been set since.)
+        const pq = questionRef.current as { item: EngineItem; q: AlertQuestion; spoken: string } | null;
+        if (pq) {
+          // The alert's own question once more ("Rakh dun?"), not a bare "Sir?": the conversation stays open until
+          // he answers or it rests (his rule, 25 Nov 2026).
+          const hindi = langRef.current === 'hi' && !!pq.q.hi;
+          say(hindi ? pq.q.hi : pq.q.en, { interrupt: true, lang: hindi ? 'hi' : 'en', fallback: pq.q.en, onDone: listen });
+        } else {
+          const hi = hiLine(`${address}?`, `${addressHi}?`);
+          if (hi) say(hi.speak, { interrupt: true, lang: 'hi', fallback: hi.show, onDone: listen });
+          else say(`${address}?`, { interrupt: true, onDone: listen });
+        }
       } else if (silenceRef.current < REST_AFTER_ROUNDS) {
         listen();
       } else {

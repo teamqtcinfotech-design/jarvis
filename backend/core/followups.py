@@ -13,7 +13,7 @@ Nudges are worded so the natural reply is a command ("move both to tomorrow", "r
 dangling yes/no. Each one is raised at most once per two days. Nothing is raised at night.
 """
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.utils import timezone
 
@@ -97,8 +97,40 @@ def morning_briefings(now=None) -> int:
                         "hi": f"{move['title']} कल पर ले जाऊँ?",
                         "target": {"id": move["id"], "scope": move["scope"], "title": move["title"], "version": move["version"]},
                         "to": (local.date() + timedelta(days=1)).isoformat()}
+        # The morning plan (his rule, 25 Nov 2026): where today's late and pending work fits between the meetings,
+        # said once with the day, "rakh dun?"; the yes lays it all in (services.answer_place).
+        plan = day_plan(user, prefs, now)
+        if plan:
+            named = ", ".join(f"{p['title']} at {tu.fmt_time(datetime.fromisoformat(p['start']))}" for p in plan[:3])
+            more = f", and {len(plan) - 3} more" if len(plan) > 3 else ""
+            text = f"{text.rstrip()} Late or pending work fits today: {named}{more}. Shall I put them in?"
+            question = {"kind": "place", "en": "Shall I put them in?", "hi": "रख दूँ?", "plan": plan,
+                        "until": max(p["start"] for p in plan)}
         raised += _raise(user, key, "Good morning, here is your day", text, text, question=question)
     return raised
+
+
+def day_plan(user: User, prefs: dict, now) -> list[dict]:
+    """Today's late and pending work laid into the day's free stretches ahead, in order (urgent first, then the
+    oldest), each with its start and minutes: the morning plan, and "arrange my late work" by voice."""
+    local = tu.to_local(now)
+    day = local.date()
+    if scheduling.is_off_day(prefs, day):
+        return []
+    o_start, o_end = scheduling.office_hours(prefs, day)
+    if local >= o_end:
+        return []
+    dash = services.dashboard(user)
+    pool = list(dash.get("overdue") or []) + list(dash.get("today") or []) + list(dash.get("anytime") or [])
+    placed: list[dict] = []
+    for start, end in scheduling.free_slots(user, day, scheduling.MIN_FREE_MINUTES, prefs, not_before=max(local, o_start))[:4]:
+        if not pool:
+            break
+        plan = scheduling.fit_into_free_time(pool, start, end, now)
+        placed += plan["placed"]
+        taken = {p["id"] for p in plan["placed"]}
+        pool = [i for i in pool if i["id"] not in taken]
+    return placed
 
 
 PILE_AT_LEAST = 3                      # fewer than this is not worth an "in which order?"
@@ -183,19 +215,21 @@ def free_time(now=None) -> int:
         what, what_hi = ("late", "लेट") if late == n else ("pending", "बाकी")
         listed = ", ".join(names[:3]) + (f" and {n - 3} more" if n > 3 else "")  # the banner's body, never spoken
         till, till_hi = tu.fmt_time(end), tu.fmt_time_hi(end)
+        length = max(0, int((end - max(start, now)).total_seconds() // 60))
+        length_en, length_hi = tu.minutes_phrase(length), tu.minutes_phrase_hi(length)
         address, address_hi = services.address_of(user), services.address_hi_of(user)
         # Spoken WITH the names (his rule of 24 Nov evening: "aap ye kar sakte hain, ye kar sakte hain", a human
-        # assistant names the work): the first two with their minutes, the rest as a count.
+        # assistant names the work) and how long he has: the first two with their minutes, the rest as a count.
         mins = [p["minutes"] for p in plan["placed"]]
         if n == 1:
-            spoken = f"{address}, you're free till {till}. {names[0]} could be done now, {mins[0]} minutes. Shall I put it in?"
-            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {names[0]} अभी हो सकता है, {mins[0]} मिनट का। रख दूँ?"
+            spoken = f"{address}, you're free till {till}, {length_en}. {names[0]} could be done now, {mins[0]} minutes. Shall I put it in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं, {length_hi}। {names[0]} अभी हो सकता है, {mins[0]} मिनट का। रख दूँ?"
         else:
             two = f"{names[0]} ({mins[0]} min) and {names[1]} ({mins[1]} min)"
             two_hi = f"{names[0]} ({mins[0]} मिनट) और {names[1]} ({mins[1]} मिनट)"
             more, more_hi = (f", and {n - 2} more", f", और {n - 2} और") if n > 2 else ("", "")
-            spoken = f"{address}, you're free till {till}. {two}{more} could be done now. Shall I put them in?"
-            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं। {two_hi}{more_hi} अभी हो सकते हैं। रख दूँ?"
+            spoken = f"{address}, you're free till {till}, {length_en}. {two}{more} could be done now. Shall I put them in?"
+            spoken_hi = f"{address_hi}, आप {till_hi} तक फ्री हैं, {length_hi}। {two_hi}{more_hi} अभी हो सकते हैं। रख दूँ?"
         question = {"kind": "place", "en": "Shall I put it in?" if n == 1 else "Shall I put them in?", "hi": "रख दूँ?",
                     "plan": plan["placed"], "until": end.isoformat()}
         raised += _raise(user, key, f"Free till {till}: {n} {what} item{'s' if n > 1 else ''} could be done", listed, spoken,

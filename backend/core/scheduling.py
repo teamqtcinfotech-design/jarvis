@@ -356,7 +356,7 @@ def routine_summary(prefs: dict) -> dict:
 
 
 # ------------------------------------------------------------------ free time, used (Nov 2026)
-MIN_FREE_MINUTES = 30        # a shorter gap is not worth a suggestion
+MIN_FREE_MINUTES = 20        # a shorter gap is not worth a suggestion (20 minutes fits one small task or a call; his rule, 25 Nov 2026)
 MAX_PLACE_MINUTES = 120      # one item never takes more than this of a free stretch
 SOON = timedelta(minutes=15)  # "free now" also means free within this long
 PLACE_RANK = {Priority.URGENT: 0, Priority.HIGH: 1, Priority.NORMAL: 2, Priority.LOW: 3}

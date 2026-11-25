@@ -22,6 +22,7 @@ from core.taskpanel import dispatcher, sync
 
 log = logging.getLogger("jarvis.taskpanel")
 FOLLOWUP_EVERY_SECONDS = 10 * 60
+FREE_EVERY_SECONDS = 60  # the free-time suggestion comes within a minute of his becoming free (a meeting ends, is cancelled)
 
 
 class Command(BaseCommand):
@@ -44,6 +45,7 @@ class Command(BaseCommand):
             log.exception("settling the waiting requests failed")
         last_pull = last_dir = 0.0
         last_follow = -1e9  # first cycle runs the follow-up check straight away
+        last_free = -1e9
         cleaned_on = None   # the local date the alert cleanup last ran (once a day, in the small hours)
         while not stop["flag"]:
             close_old_connections()
@@ -74,6 +76,13 @@ class Command(BaseCommand):
                     last_follow = now
                     if raised:
                         self.stdout.write(f"{tu.now_local():%H:%M:%S}  raised {raised} follow-up(s)")
+                elif now - last_free >= FREE_EVERY_SECONDS and tu.now_local().hour in followups.ACTIVE_HOURS:
+                    # Between the 10-minute passes: the moment a free stretch begins (a meeting ended, was cancelled),
+                    # the suggestion for it; the same stretch is never raised twice.
+                    free = followups.free_time()
+                    last_free = now
+                    if free:
+                        self.stdout.write(f"{tu.now_local():%H:%M:%S}  free-time suggestion(s): {free}")
                 sent = dispatcher.dispatch_due()
                 if sent:
                     self.stdout.write(f"{tu.now_local():%H:%M:%S}  delivered {sent} command(s)")

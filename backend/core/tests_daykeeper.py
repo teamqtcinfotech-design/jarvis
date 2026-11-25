@@ -57,6 +57,24 @@ class DayKeeperTests(BaseCase):
         # The same stretch is not asked about again.
         self.assertEqual(self.keeper(), 0)
 
+    def test_the_suggestion_says_how_long_he_has(self):
+        self.keeper()
+        self.assertIn("free till 2 PM, 3 hours", self.suggestion().spoken_text)
+
+    def test_the_morning_plan_lays_the_late_work_between_the_meetings(self):
+        # At his briefing time: the day's briefing ends with where the late work fits, and "rakh dun?" places it.
+        prefs = dict(ALL_DAY, briefingTime="11:00", briefingEnabled=True)
+        with mock.patch("core.followups.get_prefs", return_value=prefs):
+            self.assertGreaterEqual(followups.morning_briefings(now=self.now), 1)  # everyone's briefing; the MD's is checked
+        alert = Alert.objects.get(recipient=self.md, ref_type="followup", ref_id__startswith="morning:")
+        self.assertIn("Late or pending work fits today:", alert.spoken_text)
+        self.assertIn("Send the bank statement at 11 AM", alert.spoken_text)
+        self.assertTrue(alert.spoken_text.endswith("Shall I put them in?"), alert.spoken_text)
+        q = alert.question
+        self.assertEqual(q["kind"], "place")
+        self.assertEqual([p["title"] for p in q["plan"]][:2], ["Send the bank statement", "Renew the trade licence"])
+        self.assertTrue(all(p["start"][11:16] < "14:00" for p in q["plan"]), q["plan"])  # before the 2 PM meeting
+
     def test_yes_lays_the_work_into_the_free_time_and_undo_takes_it_out(self):
         self.keeper()
         alert = self.suggestion()
