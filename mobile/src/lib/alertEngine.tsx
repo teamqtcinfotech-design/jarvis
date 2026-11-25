@@ -100,9 +100,27 @@ export interface HeldOffer {
 }
 
 /** "3 updates have come. Shall I read them?" — the count only, never a title (his rule); the banner lists them. */
-function countOffer(n: number, address: string, addressHi: string, when: { en: string; hi: string } | null): { text: string; textHi: string } {
+function countOffer(what: number | EngineItem[], address: string, addressHi: string, when: { en: string; hi: string } | null): { text: string; textHi: string } {
   const lead = when ? `${address}, ${when.en}: ` : `${address}, `;
   const leadHi = when ? `${addressHi}, ${when.hi}: ` : `${addressHi}, `;
+  if (typeof what !== 'number') {
+    // By kind ("2 reminders and 1 message came"), counts only: he reads them one at a time when he says so.
+    const piles = new Map<AlertGroup, number>();
+    for (const it of what) piles.set(groupOf(it), (piles.get(groupOf(it)) ?? 0) + 1);
+    const en: string[] = [];
+    const hi: string[] = [];
+    for (const g of GROUP_ORDER) {
+      const n = piles.get(g);
+      if (!n) continue;
+      const w = g === 'update' ? { en: ['reminder', 'reminders'] as [string, string], hi: 'रिमाइंडर' } : GROUP_WORDS[g];
+      en.push(`${n} ${n === 1 ? w.en[0] : w.en[1]}`);
+      hi.push(`${n} ${w.hi}`);
+    }
+    const one = what.length === 1;
+    const list = en.length > 1 ? `${en.slice(0, -1).join(', ')} and ${en[en.length - 1]}` : en[0] ?? '';
+    return { text: `${lead}${list} ${one ? 'has' : 'have'} come. Shall I read ${one ? 'it' : 'them'}?`, textHi: `${leadHi}${hi.join(', ')} आए हैं। पढ़ूँ?` };
+  }
+  const n = what;
   if (n === 1) return { text: `${lead}one update has come. Shall I read it?`, textHi: `${leadHi}एक अपडेट आया है। पढ़ूँ?` };
   return { text: `${lead}${n} updates have come. Shall I read them?`, textHi: `${leadHi}${n} अपडेट आए हैं। पढ़ूँ?` };
 }
@@ -751,7 +769,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         if (!fresh.length) return;
         offerSeq.current += 1;
         offerKind.current = 'news';
-        setOffer({ id: offerSeq.current, count: fresh.length, kind: 'news', ...countOffer(fresh.length, address, addressHi, null) });
+        setOffer({ id: offerSeq.current, count: fresh.length, kind: 'news', ...countOffer(fresh, address, addressHi, null) });
       }, 1500);
     },
     [show, tell, address, addressHi],
@@ -890,15 +908,12 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     sayAfterTalk.current = (items) => {
-      // News that came while he was talking is COUNTED, never read out (his rule): "2 updates came, shall I read
-      // them?"; a reminder that fell due meanwhile is said as it is.
-      const news = items.filter((i) => i.source === 'server');
-      const due = items.filter((i) => i.source !== 'server');
-      if (news.length) offerNews(news);
-      if (due.length === 1) deliver(due[0], 'loud');
-      else if (due.length) deliverTogether(due);
+      // Everything that came while he was talking, reminders included, is COUNTED once the conversation ends ("2
+      // reminders and 1 message have come, shall I read them?") and read only when he says so (his rule, 25 Nov 2026:
+      // nothing comes in between a conversation).
+      offerNews(items);
     };
-  }, [deliver, deliverTogether, offerNews]);
+  }, [offerNews]);
 
   const tick = useCallback(() => {
     // While JARVIS is not on screen, the phone's always-on part (ReminderWatcher) delivers reminders and news and

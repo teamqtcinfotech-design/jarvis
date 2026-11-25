@@ -1892,10 +1892,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     return undefined;
   }, [listening, busy, prefs.wakeWordEnabled]);
 
-  // Alerts that arrive mid-conversation show quietly instead of talking over him.
+  // A conversation is open while the talk sheet is up or the live line is on, not only while a sentence is being
+  // said: nothing new is said or shown over it, and it is counted once the conversation ends (his rule, 25 Nov 2026).
   useEffect(() => {
-    setTalking(listening || speakingAny || busy !== '');
-  }, [listening, speakingAny, busy, setTalking]);
+    setTalking(listening || speakingAny || busy !== '' || talkOpen || live !== 'off');
+  }, [listening, speakingAny, busy, talkOpen, live, setTalking]);
 
   // The background service runs whenever someone is signed in: it is what brings reminders and messages to a
   // closed app. After a reboot, a reinstall, or Xiaomi stopping it, the app switches it back on whenever it comes

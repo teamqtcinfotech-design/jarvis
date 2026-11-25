@@ -1,18 +1,18 @@
 /**
- * Phone: the home is the day. Greeting and date; four round counts of what is waiting for him (new tasks, meeting
- * alerts, messages, other alerts), each opening its pile on a tap; three blue information banners (free time turned
- * into the work that fits now, the next meeting, what is waiting one item at a time); then, below the fold, the
- * reports and the latest answer. Staff and the company panel live in the side menu.
- * The orb floats in the bottom-right corner and opens the talk layer.
+ * Phone: the home is the day (his layout, 25 Nov 2026). Greeting and date; one line of today's real numbers
+ * (meetings, tasks, late), each opening its list; the Now card (a meeting about to start, else the free time with the
+ * work that fits it, else what is next by the clock); the Waiting card (what is waiting for him, counted by kind,
+ * with the latest one); then, below the fold, the reports and the latest answer. Staff and the company panel live in
+ * the side menu. The orb floats in the bottom-right corner and opens the talk layer.
  */
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { type GestureResponderEvent, PanResponder, type PanResponderGestureState, type PanResponderInstance, Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { type AlertGroup, chipOf, type EngineItem, pileOf, useAlertEngine } from '@/lib/alertEngine';
+import { type AlertGroup, describeWaiting, type EngineItem, GROUP_ORDER, GROUP_WORDS, groupOf, pileOf, useAlertEngine } from '@/lib/alertEngine';
 import { unlock } from '@/lib/appLock';
 import { useConversation } from '@/lib/conversation';
 import { greeting, relativeAgo, timeOf } from '@/lib/format';
@@ -25,7 +25,6 @@ import type { Kind, Priority, SessionUser, TaskItem } from '@/lib/types';
 import { useDashboard } from '@/lib/useDashboard';
 import { useWalkie } from '@/lib/walkie';
 
-import { alertLabel } from './AlertBanner';
 import { AssistantStage, CAN_BLUR } from './AssistantStage';
 import { DataCard } from './DataCard';
 import { Drawer } from './Drawer';
@@ -76,20 +75,15 @@ const inWordsHi = (ms: number) => {
   const h = Math.floor(m / 60);
   return `${h} घंटे${m % 60 ? ` ${m % 60} मिनट` : ''} में`;
 };
-const nowMs = () => Date.now();
 const localIso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const SWIPE_PAUSE = 30_000; // after he swipes the turning banner it holds still this long
 
-/** One information banner (his home screen, 24 Nov 2026): what it is, when, one or two lines; a tap opens it, the
- *  speaker icon makes JARVIS say it. The text is information only, never "say this" or "tap that". */
-type Banner = { key: string; icon: string; label: string; when: string; lines: string[]; sub: string; go: () => void; speak: () => void; swipe?: PanResponderInstance };
+/** The Now card (his home screen, 25 Nov 2026): what it is, when, one or two lines; a tap opens it, the speaker icon
+ *  makes JARVIS say it; a button when there is one thing to do about it. Information only, never "say this". */
+type Banner = { key: string; icon: string; label: string; when: string; lines: string[]; sub: string; go: () => void; speak: () => void;
+  swipe?: PanResponderInstance; action?: { label: string; icon: string; onPress: () => void } };
 /** Work that can be fitted into free time (never a meeting or a call) and its usual minutes when none is estimated. */
 const USUAL: Partial<Record<Kind, number>> = { TASK: 30, PAYMENT: 10, FOLLOW_UP: 15 };
 const RANK: Record<Priority, number> = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
-const CHIP_ICON: Record<AlertGroup | 'other', string> = {
-  task: 'checkbox-outline', meeting: 'people-outline', message: 'chatbubble-ellipses-outline', other: 'notifications-outline',
-  approval: 'notifications-outline', request: 'notifications-outline', update: 'notifications-outline',
-};
 
 export function PhoneHome({ user }: { user: SessionUser }) {
   const router = useRouter();
@@ -165,40 +159,27 @@ export function PhoneHome({ user }: { user: SessionUser }) {
     if (coming && coming.start - now < 30 * 60_000) return null;
     return { until: coming ? new Date(coming.start).toISOString() : null };
   })();
-  // Today means today: late items from earlier days are a banner, not rows that crowd out the day.
+  // Today's real numbers: meetings and tasks due today, and what is late from before (a number means what the word
+  // says; what is waiting for him is the Waiting card, not these).
+  const closed = (t: TaskItem) => t.status === 'COMPLETED' || t.status === 'CANCELLED';
+  const isMeet = (t: TaskItem) => t.kind === 'MEETING' || t.kind === 'CALL';
   const lateCount = data?.overdue.length ?? 0;
-  // What is waiting, by chip: task alerts under Tasks, meeting alerts under Meetings, messages under Messages, the
-  // rest (approvals, requests, updates, reminders) under Alerts. The held items count too: the sheet shows them.
+  const todayMeetings = data ? data.today.filter((t) => !closed(t) && isMeet(t)).length : 0;
+  const todayTasks = data ? data.today.filter((t) => !closed(t) && !isMeet(t)).length : 0;
+  // What is waiting for him: one pile, the latest first (the same rows the sheet shows). The held items count too.
   const pile = pileOf(engine.waiting, engine.held);
-  const waitingBy = (g: AlertGroup | 'other') => pile.filter((w) => chipOf(w) === g).length;
-  const openPile = (g: AlertGroup | 'other', item?: EngineItem) => {
+  const openPile = (g: AlertGroup | 'other' | null, item?: EngineItem) => {
     if (item && engine.waiting.some((w) => w.key === item.key)) engine.focus(item);
     engine.setAllGroup(g);
     engine.setAllVisible(true);
   };
-  // The third banner turns every 10 seconds through what is waiting, the latest first; a swipe moves it by hand and
-  // holds it still for a while. The item on show is the engine's spotlight, so "isko hata do" / "this one, later"
-  // by voice means it.
-  const [turn, setTurn] = useState(0);
-  const [pausedUntil, setPausedUntil] = useState(0);
-  useEffect(() => {
-    if (pile.length < 2) return undefined;
-    const t = setInterval(() => {
-      if (nowMs() < pausedUntil) return;
-      setTurn((n) => n + 1);
-    }, 10_000);
-    return () => clearInterval(t);
-  }, [pile.length, pausedUntil]);
-  const onSwipe = useCallback((dir: 1 | -1) => {
-    setPausedUntil(nowMs() + SWIPE_PAUSE);
-    setTurn((n) => n + dir);
-  }, []);
-  const spotSwipe = useMemo(() => makeSwipe(onSwipe), [onSwipe]);
-  const shown = pile.length ? pile[((turn % pile.length) + pile.length) % pile.length] : null;
+  // The latest waiting item is the one on the Waiting card: the engine's spotlight, so "isko hata do" / "this one,
+  // later" by voice means it.
+  const latest = pile[0] ?? null;
   const setSpotlight = engine.setSpotlight;
   useEffect(() => {
-    setSpotlight(shown);
-  }, [setSpotlight, shown]);
+    setSpotlight(latest);
+  }, [setSpotlight, latest]);
   useEffect(() => () => setSpotlight(null), [setSpotlight]);
   // Free time analysed into named work (his ask): the server's suggestion when it is waiting (a yes places it), else
   // the same fit done here: late first, then due today without a time, then undated; urgent first; each takes its
@@ -305,66 +286,32 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         <Txt variant="display">{address}</Txt>
         <Txt variant="caption" style={{ marginTop: 2 }}>{data?.date_label ?? ''}</Txt>
 
-        {/* Four counts at a glance (his layout, 24 Nov 2026), one meaning for all four: how many things of that kind
-            are waiting for him (new tasks, meeting alerts, messages, the rest), the same rows the sheet then shows.
-            A tap opens them; with nothing waiting it opens the day's list. The day's own counts ("aaj kitne task?")
-            are a question away. */}
-        <View style={s.chips}>
-          {([
-            { key: 'task', label: 'Tasks', tone: colors.accent, list: 'today_tasks' },
-            { key: 'meeting', label: 'Meetings', tone: colors.gold, list: 'today_meetings' },
-            { key: 'message', label: 'Messages', tone: colors.info, list: 'messages' },
-            { key: 'other', label: 'Alerts', tone: colors.warn, list: 'updates' },
-          ] as { key: AlertGroup | 'other'; label: string; tone: string; list: string }[]).map((c) => {
-            const n = waitingBy(c.key);
-            const tone = n ? c.tone : colors.muted;
-            return (
-              <Pressable
-                key={c.key}
-                onPress={() => { tick(); if (n) openPile(c.key); else select(c.list); }}
-                style={s.chip}
-                accessibilityLabel={`${c.label}: ${n} waiting`}
-              >
-                <View style={[s.chipRing, { borderColor: tone }]}>
-                  <Txt style={[s.chipN, { color: tone }]}>{n}</Txt>
-                </View>
-                <Txt variant="caption" style={{ marginTop: 4 }}>{c.label}</Txt>
+        {/* Today's real numbers (his ask, 25 Nov 2026: a number means what its word says): meetings and tasks due
+            today, and what is late from before. A tap opens that list. */}
+        <View style={s.today}>
+          {[
+            { n: todayMeetings, word: todayMeetings === 1 ? 'meeting' : 'meetings', list: 'today_meetings', tone: colors.ink },
+            { n: todayTasks, word: todayTasks === 1 ? 'task' : 'tasks', list: 'today_tasks', tone: colors.ink },
+            { n: lateCount, word: 'late', list: 'late', tone: lateCount ? colors.danger : colors.muted },
+          ].map((c, i) => (
+            <React.Fragment key={c.list}>
+              {i ? <Txt style={s.todayDot}>·</Txt> : null}
+              <Pressable onPress={() => { tick(); select(c.list); }} style={s.todayItem} accessibilityLabel={`${c.n} ${c.word} today`}>
+                <Txt style={[s.todayN, { color: c.tone }]}>{c.n}</Txt>
+                <Txt variant="small" style={{ color: c.tone === colors.muted ? colors.muted : colors.inkSoft, marginLeft: 5 }}>{c.word}</Txt>
               </Pressable>
-            );
-          })}
+            </React.Fragment>
+          ))}
         </View>
 
-        {/* Three information banners, three fixed slots (his layout): the free time analysed into the task or two
-            that fit now (else the most urgent late item by name); the next meeting (today's next timed item, else
-            the next meeting ahead; a meeting about to start jumps to the top); and what is waiting, one item at a
-            time, turning every 10 seconds. Nothing here repeats a chip's number. */}
+        {/* The Now card, one card that changes with the moment: a meeting about to start; else the free time with
+            the work that fits it (a button puts it in when the server has planned it); else what is next by the
+            clock (a swipe shows what follows); else the day is done. */}
         {(() => {
           const soon = !!next && next.start - now <= 5 * 60_000;
-          let work: Banner | null = null;
-          if (plan.length) {
-            const two = plan.slice(0, 2);
-            const till = freeUntil ? `till ${timeOf(freeUntil)}` : 'till midnight';
-            const tillHi = freeUntil ? `${timeOf(freeUntil)} तक` : 'रात 12 बजे तक';
-            work = { key: 'free', icon: 'sparkles-outline', label: 'Free time', when: freeUntil ? `till ${timeOf(freeUntil)}` : 'till midnight',
-              lines: two.map((p) => p.title),
-              sub: `${two.map((p) => p.minutes).join(' + ')} min${plan.length > 2 ? ` · ${plan.length - 2} more after` : ''}`,
-              go: () => (served ? openPile(chipOf(served), served) : select('late')),
-              speak: () => (served ? engine.readItems([served]) : speakTwin(
-                `${address}, you're free ${till}. ${two.length === 1 ? 'One task fits now' : 'Two tasks fit now'}: ${two.map((p) => p.title).join(' and ')}.`,
-                `${addressHi}, आप ${tillHi} फ़्री हैं। ${two.length === 1 ? 'एक काम' : 'दो काम'} अभी हो सकते हैं: ${two.map((p) => p.title).join(' और ')}।`)) };
-          } else if (lateCount) {
-            const top = [...(data?.overdue ?? [])].sort((a, b) => RANK[a.priority] - RANK[b.priority])[0];
-            if (top) {
-              const more = lateCount - 1;
-              work = { key: 'late', icon: 'alert-circle-outline', label: 'Overdue', when: `${lateCount} late`, lines: [top.title],
-                sub: `Due ${top.due_label}${more ? ` · ${more} more late` : ''}`, go: () => setOpenTask(top),
-                speak: () => speakTwin(`${address}, ${top.title} is late, it was due ${top.due_label}${more ? `, and ${more} more ${more === 1 ? 'is' : 'are'} late` : ''}.`,
-                  `${addressHi}, ${top.title} लेट है, ${top.due_label} तक होना था${more ? `, और ${more} और लेट हैं` : ''}।`) };
-            }
-          }
           let meet: Banner | null = null;
           if (shownMeet) {
-            // Today's item by the clock; another day's by its day. The first is "Next up"; a swipe shows what follows.
+            // Today's item by the clock; another day's by its day. The first is "Next"; a swipe shows what follows.
             const m = shownMeet.item;
             const isToday = m.due_date ? m.due_date === localIso(new Date(now)) : shownMeet.start < midnight;
             const at = isToday && (m.scheduled_start ?? m.due_at) ? timeOf(m.scheduled_start ?? m.due_at) : m.due_label;
@@ -373,7 +320,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
             const kindWord = m.kind === 'CALL' ? 'Call' : m.kind === 'MEETING' ? 'Meeting' : 'Task';
             const kindHi = m.kind === 'CALL' ? 'कॉल' : m.kind === 'MEETING' ? 'मीटिंग' : 'काम';
             meet = { key: `meet-${m.scope}-${m.id}`, icon: kindIcon[m.kind] ?? 'time-outline',
-              label: first ? (soon ? 'Starting now' : 'Next up') : `After that · ${meetIdx + 1} of ${ahead.length}`, when: at,
+              label: first ? (soon ? 'Starting now' : 'Next') : `After that · ${meetIdx + 1} of ${ahead.length}`, when: at,
               lines: [m.title],
               sub: `${isToday ? inWords(shownMeet.start - now) : `${kindWord}${who}`}${m.scope === 'private' ? ' · private' : ''}${m.priority === 'URGENT' ? ' · urgent' : ''}`,
               go: () => setOpenTask(m), swipe: meetSwipe,
@@ -381,22 +328,31 @@ export function PhoneHome({ user }: { user: SessionUser }) {
                 `${address}, ${first ? (soon ? 'starting now' : 'next') : 'after that'}: ${m.title}, ${at}${isToday ? `, ${inWords(shownMeet.start - now)}` : ''}.`,
                 `${addressHi}, ${first ? (soon ? 'अभी शुरू हो रहा है' : 'अगला') : 'उसके बाद'}: ${m.title}, ${at}${isToday ? ` बजे, ${inWordsHi(shownMeet.start - now)}` : ''}${!isToday ? ` (${kindHi})` : ''}।`) };
           }
-          let spot: Banner | null = null;
-          if (shown) {
-            const at = pile.findIndex((p) => p.key === shown.key) + 1;
-            spot = { key: `spot-${shown.key}`, icon: CHIP_ICON[chipOf(shown)], label: `${alertLabel(shown)}${shown.from ? ` · ${shown.from}` : ''}`, when: relativeAgo(shown.fireAt),
-              lines: [shown.concealed ? 'Private reminder' : shown.title], sub: `${at} of ${pile.length} waiting`,
-              go: () => openPile(chipOf(shown), shown), speak: () => engine.readItems([shown]), swipe: spotSwipe };
+          let free: Banner | null = null;
+          if (plan.length) {
+            const two = plan.slice(0, 2);
+            const till = freeUntil ? `till ${timeOf(freeUntil)}` : 'till midnight';
+            const tillHi = freeUntil ? `${timeOf(freeUntil)} तक` : 'रात 12 बजे तक';
+            free = { key: 'free', icon: 'sparkles-outline', label: `Free ${till}`, when: '',
+              lines: two.map((p) => p.title),
+              sub: `${two.length === 1 ? 'This fits now' : 'These fit now'} · ${two.map((p) => p.minutes).join(' + ')} min${plan.length > 2 ? ` · ${plan.length - 2} more after` : ''}`,
+              go: () => (served ? openPile(null, served) : select('late')),
+              speak: () => (served ? engine.readItems([served]) : speakTwin(
+                `${address}, you're free ${till}. ${two.length === 1 ? 'One thing fits now' : 'Two things fit now'}: ${two.map((p) => p.title).join(' and ')}.`,
+                `${addressHi}, आप ${tillHi} फ़्री हैं। ${two.length === 1 ? 'एक काम' : 'दो काम'} अभी हो सकते हैं: ${two.map((p) => p.title).join(' और ')}।`)),
+              action: served?.question ? { label: 'Put them in', icon: 'calendar-outline',
+                onPress: () => engine.answerQuestion(served, served.question!, true).catch(() => undefined) } : undefined };
           }
-          const banners = (soon ? [meet, work, spot] : [work, meet, spot]).filter((b): b is Banner => !!b);
-          if (!banners.length) {
+          let card: Banner | null = soon ? meet : (free ?? meet);
+          if (!card) {
             const line = data ? 'Nothing timed left today' : loadError ? 'Can’t reach the JARVIS server' : 'Loading your day…';
-            banners.push({ key: 'now', icon: 'sparkles-outline', label: 'Right now', when: '', lines: [line], sub: !data && loadError ? loadError : '',
+            card = { key: 'now', icon: 'sparkles-outline', label: 'Now', when: '', lines: [line], sub: !data && loadError ? loadError : '',
               go: () => (!data && loadError ? reload(true) : talk()),
               speak: () => speakTwin(`${address}, ${data ? 'nothing timed is left today.' : 'I can’t reach the server right now.'}`,
-                `${addressHi}, ${data ? 'आज कुछ टाइम वाला बचा नहीं है।' : 'अभी सर्वर से बात नहीं हो पा रही।'}`) });
+                `${addressHi}, ${data ? 'आज कुछ टाइम वाला बचा नहीं है।' : 'अभी सर्वर से बात नहीं हो पा रही।'}`) };
           }
-          return banners.map((b) => (
+          const b = card;
+          return (
             <View key={b.key} {...(b.swipe ? b.swipe.panHandlers : {})}>
               <Pressable onPress={b.go} style={s.heroWrap}>
                 <LinearGradient colors={[...gradients.orb]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.hero}>
@@ -414,10 +370,54 @@ export function PhoneHome({ user }: { user: SessionUser }) {
                     <Txt key={i} variant="title" numberOfLines={1} style={{ color: colors.white, marginTop: i ? 2 : 8 }}>{l}</Txt>
                   ))}
                   {b.sub ? <Txt variant="small" numberOfLines={2} style={{ color: 'rgba(255,255,255,0.85)', marginTop: 4 }}>{b.sub}</Txt> : null}
+                  {b.action ? (
+                    <Pressable onPress={() => { tick(); b.action!.onPress(); }} style={s.heroBtn} accessibilityLabel={b.action.label}>
+                      <Icon name={b.action.icon} size={14} color={colors.white} />
+                      <Txt variant="small" style={{ color: colors.white, marginLeft: 6, fontWeight: '600' }}>{b.action.label}</Txt>
+                    </Pressable>
+                  ) : null}
                 </LinearGradient>
               </Pressable>
             </View>
-          ));
+          );
+        })()}
+
+        {/* The Waiting card: what is waiting for him, counted by kind, and the latest one. A tap opens the pile; the
+            speaker icon says the counts, never a title (his rule). */}
+        {(() => {
+          const piles = new Map<AlertGroup, number>();
+          for (const it of pile) piles.set(groupOf(it), (piles.get(groupOf(it)) ?? 0) + 1);
+          const counts: string[] = [];
+          for (const g of GROUP_ORDER) {
+            const n = piles.get(g);
+            if (!n) continue;
+            const w = GROUP_WORDS[g];
+            counts.push(`${n} ${n === 1 ? w.en[0] : w.en[1]}`);
+          }
+          const said = describeWaiting(pile, address, addressHi);
+          return (
+            <Pressable onPress={() => { tick(); if (pile.length) openPile(null, latest ?? undefined); }} style={s.card} accessibilityLabel="Waiting for you">
+              <View style={s.cardHead}>
+                <Icon name="notifications-outline" size={16} color={colors.accent} />
+                <Txt variant="label" style={{ marginLeft: 8, flex: 1 }}>Waiting for you</Txt>
+                <Pressable onPress={() => { tick(); speakTwin(said.en, said.hi); }} hitSlop={10} style={s.cardSpeak} accessibilityLabel="Say it">
+                  <Icon name="volume-high-outline" size={15} color={colors.accent} />
+                </Pressable>
+              </View>
+              {pile.length ? (
+                <>
+                  <Txt variant="title" numberOfLines={2} style={{ marginTop: 8 }}>{counts.join(' · ')}</Txt>
+                  {latest ? (
+                    <Txt variant="small" numberOfLines={1} style={{ color: colors.inkSoft, marginTop: 4 }}>
+                      Latest: {latest.concealed ? 'Private reminder' : latest.title} · {relativeAgo(latest.fireAt)}
+                    </Txt>
+                  ) : null}
+                </>
+              ) : (
+                <Txt variant="small" style={{ color: colors.muted, marginTop: 8 }}>Nothing waiting for you</Txt>
+              )}
+            </Pressable>
+          );
         })()}
 
         {data && loadError ? (
@@ -509,11 +509,15 @@ const s = StyleSheet.create({
   cornerWalkie: { position: 'absolute', left: 16 },
   walkieBtn: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.accentDeep, alignItems: 'center', justifyContent: 'center', ...shadow, shadowOpacity: 0.25, elevation: 8 },
   walkieDot: { position: 'absolute', top: 3, right: 3, width: 11, height: 11, borderRadius: 6, borderWidth: 2, borderColor: colors.bg },
-  chips: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14, paddingHorizontal: 6 },
-  chip: { alignItems: 'center', width: 72 },
-  chipRing: { width: 56, height: 56, borderRadius: 28, borderWidth: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
-  chipN: { fontSize: 20, fontFamily: fonts.semibold, lineHeight: 24 },
-  heroWrap: { marginTop: 18, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
+  today: { flexDirection: 'row', alignItems: 'center', marginTop: 14 },
+  todayItem: { flexDirection: 'row', alignItems: 'baseline', paddingVertical: 4 },
+  todayN: { fontSize: 22, fontFamily: fonts.semibold, lineHeight: 26 },
+  todayDot: { color: colors.faint, marginHorizontal: 10, fontSize: 18 },
+  card: { marginTop: 14, backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.line, padding: 16, ...shadow },
+  cardHead: { flexDirection: 'row', alignItems: 'center' },
+  cardSpeak: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center' },
+  heroBtn: { alignSelf: 'flex-start', marginTop: 10, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.22)', flexDirection: 'row', alignItems: 'center' },
+  heroWrap: { marginTop: 14, borderRadius: radius.lg, ...shadow, shadowOpacity: 0.18, shadowColor: colors.accentDeep },
   hero: { borderRadius: radius.lg, padding: 18 },
   heroTop: { flexDirection: 'row', alignItems: 'center' },
   heroIcon: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center', marginRight: 8 },

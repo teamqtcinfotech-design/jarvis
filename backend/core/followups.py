@@ -35,7 +35,19 @@ ACTIVE_HOURS = range(9, 20)  # 9:00 .. 19:59 local
 DIGEST_AT = (18, 30)
 BRIEFING_WINDOW = timedelta(hours=4)  # a briefing missed (worker down) is still given within this long, then dropped
 OPEN = [Status.OPEN, Status.IN_PROGRESS, Status.BLOCKED]
-REMIND_AGAIN = timedelta(minutes=45)  # the free-time suggestion comes back this often while it goes unanswered
+# The free-time suggestion comes this long before a free stretch begins (or the moment it does), once, never again
+# for the same stretch (his rule, 25 Nov 2026: three moments a day, no nagging — the morning plan, five minutes
+# before free time, the evening line).
+FREE_LEAD = timedelta(minutes=5)
+
+
+def _digest_at(prefs: dict) -> tuple[int, int]:
+    """Each person's evening time (the summary of what they gave, and the late-today line)."""
+    raw = str(prefs.get("digestTime") or f"{DIGEST_AT[0]:02d}:{DIGEST_AT[1]:02d}")
+    try:
+        return int(raw[:2]), int(raw[3:5])
+    except ValueError:
+        return DIGEST_AT
 
 
 def _already(key: str) -> bool:
@@ -181,10 +193,11 @@ def piled_up(now=None) -> int:
 
 
 def free_time(now=None) -> int:
-    """"You're free till 4. Two late items could be done now: X, Y. Shall I put them in?" Said once per free stretch,
-    to each person inside their own office hours, when late or pending work exists and fits (scheduling.free_now,
+    """"You're free till 4. Two late items could be done now: X, Y. Shall I put them in?" Said ONCE per free stretch,
+    five minutes before it begins (or the moment it does: a meeting ended early, was cancelled), to each person
+    inside their own office hours, when late or pending work exists and fits (scheduling.free_now,
     scheduling.fit_into_free_time). A yes lays the items into the stretch (services.answer_place), a no leaves the
-    day alone; neither is asked again for the same stretch."""
+    day alone; answered or not, the same stretch is never raised again."""
     now = now or timezone.now()
     raised = 0
     for user in services.team():
@@ -193,17 +206,11 @@ def free_time(now=None) -> int:
         if not slot:
             continue
         start, end = slot
+        if start - tu.to_local(now) > FREE_LEAD:
+            continue  # the stretch is still a while away: said five minutes before it, not earlier
         key = f"free:{tu.to_local(now).date().isoformat()}:{tu.to_local(end):%H%M}"
-        # Once per free stretch; and again every REMIND_AGAIN while he has not answered (overdue work is what matters
-        # most to him). A yes or a no settles the stretch: nothing is asked twice after an answer.
-        asked = Alert.objects.filter(recipient=user, ref_type="followup", ref_id__startswith=f"{key}")
-        if asked.filter(acknowledged_at__isnull=False).exists():
-            continue  # answered (whichever copy): settled for this stretch
-        latest = asked.order_by("-created_at").first()
-        if latest is not None:
-            if now - latest.created_at < REMIND_AGAIN:
-                continue
-            key = f"{key}:{int((now - latest.created_at).total_seconds() // 60)}m"
+        if Alert.objects.filter(recipient=user, ref_type="followup", ref_id__startswith=f"{key}").exists():
+            continue  # once per stretch, whatever he answered
         dash = services.dashboard(user)
         pool = list(dash.get("overdue") or []) + list(dash.get("today") or []) + list(dash.get("anytime") or [])
         plan = scheduling.fit_into_free_time(pool, start, end, now)
@@ -237,6 +244,62 @@ def free_time(now=None) -> int:
     return raised
 
 
+def evening_late(now=None) -> int:
+    """At each person's evening time (digestTime, 6:30 PM by default): one line on what stayed late today, with the
+    offer to lay it into the next working day's free time ("Two things stayed late today: X and Y. Shall I put
+    them in tomorrow morning?"). A yes places them there (services.answer_place), a no leaves them; once a day,
+    nothing when nothing is late, nothing more than four hours after the time (the worker was down)."""
+    now = now or timezone.now()
+    local = tu.to_local(now)
+    raised = 0
+    for user in services.team():
+        prefs = get_prefs(user)
+        hh, mm = _digest_at(prefs)
+        at = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if local < at or local - at > BRIEFING_WINDOW:
+            continue
+        key = f"late:{local.date().isoformat()}"
+        if Alert.objects.filter(recipient=user, ref_type="followup", ref_id=f"{key}@{user.id}").exists():
+            continue
+        dash = services.dashboard(user)
+        late = [i for i in (dash.get("overdue") or []) if i.get("kind") in scheduling.MOVABLE_KINDS and i.get("status") in OPEN]
+        if not late:
+            continue
+        late.sort(key=lambda i: (scheduling.PLACE_RANK.get(i.get("priority"), 2), str(i.get("due_date") or "")))  # urgent first, then the oldest
+        day = local.date() + timedelta(days=1)
+        for _ in range(7):
+            if not scheduling.is_off_day(prefs, day):
+                break
+            day += timedelta(days=1)
+        placed: list[dict] = []
+        pool = late
+        for start, end in scheduling.free_slots(user, day, scheduling.MIN_FREE_MINUTES, prefs)[:4]:
+            if not pool:
+                break
+            plan = scheduling.fit_into_free_time(pool, start, end, now)
+            placed += plan["placed"]
+            taken = {p["id"] for p in plan["placed"]}
+            pool = [i for i in pool if i["id"] not in taken]
+        n = len(late)
+        names = [i["title"] for i in late]
+        listed = ", ".join(names[:3]) + (f" and {n - 3} more" if n > 3 else "")
+        two = " and ".join(names[:2]) + (f", and {n - 2} more" if n > 2 else "")
+        two_hi = " और ".join(names[:2]) + (f", और {n - 2} और" if n > 2 else "")
+        day_en, day_hi = tu.fmt_day(day), tu.fmt_day_hi(day)
+        address, address_hi = services.address_of(user), services.address_hi_of(user)
+        if placed:
+            spoken = (f"{address}, {n} thing{'s' if n > 1 else ''} stayed late today: {two}. Shall I put {'them' if n > 1 else 'it'} in {day_en} morning?")
+            spoken_hi = f"{address_hi}, आज {n} काम लेट रह गय{'े' if n > 1 else 'ा'}: {two_hi}। {day_hi} सुबह रख दूँ?"
+            question = {"kind": "place", "en": "Shall I put them in?" if n > 1 else "Shall I put it in?", "hi": "रख दूँ?",
+                        "plan": placed, "until": placed[-1]["start"]}
+        else:
+            spoken = f"{address}, {n} thing{'s' if n > 1 else ''} stayed late today: {two}. {day_en} has no free time for {'them' if n > 1 else 'it'} yet."
+            spoken_hi = f"{address_hi}, आज {n} काम लेट रह गय{'े' if n > 1 else 'ा'}: {two_hi}। {day_hi} अभी इनके लिए खाली समय नहीं है।"
+            question = None
+        raised += _raise(user, key, f"{n} late today", listed, spoken, spoken_hi=spoken_hi, question=question)
+    return raised
+
+
 def run(now=None) -> int:
     """One pass. Safe to call every few minutes; it only raises what is due and not yet raised."""
     now = now or timezone.now()
@@ -250,6 +313,10 @@ def run(now=None) -> int:
         raised += morning_briefings(now)  # has its own clock: the briefing may be set before ACTIVE_HOURS
     except Exception:  # noqa: BLE001 — the other nudges must still run
         log.exception("morning briefing failed")
+    try:
+        raised += evening_late(now)  # its own clock too: the evening time may be after ACTIVE_HOURS
+    except Exception:  # noqa: BLE001 — the other nudges must still run
+        log.exception("evening late-today line failed")
     if local.hour not in ACTIVE_HOURS:
         return raised
     try:
@@ -268,12 +335,7 @@ def run(now=None) -> int:
     request_stale = timedelta(hours=int(md_prefs.get("requestWaitHours") or REQUEST_STALE.total_seconds() // 3600))
 
     def digest_due(prefs: dict) -> bool:
-        raw = str(prefs.get("digestTime") or f"{DIGEST_AT[0]:02d}:{DIGEST_AT[1]:02d}")
-        try:
-            hh, mm = int(raw[:2]), int(raw[3:5])
-        except ValueError:
-            hh, mm = DIGEST_AT
-        return (local.hour, local.minute) >= (hh, mm)
+        return (local.hour, local.minute) >= _digest_at(prefs)
 
     # 1) Staff tasks with no update for a while
     for task in delegated_qs().filter(status__in=OPEN):

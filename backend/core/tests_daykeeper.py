@@ -92,18 +92,44 @@ class DayKeeperTests(BaseCase):
         self.assertIsNone(PrivateTask.objects.get(id=self.c.id).scheduled_start)
         self.assertIsNone(PrivateTask.objects.get(id=self.a.id).scheduled_start)
 
-    def test_the_suggestion_comes_back_while_unanswered_and_stops_after_an_answer(self):
+    def test_the_suggestion_is_said_once_per_stretch_answered_or_not(self):
+        # His rule (25 Nov 2026): no nagging. Unanswered for an hour: still not asked again; answered: never again.
         self.assertEqual(self.keeper(), 1)
-        self.assertEqual(self.keeper(), 0)  # not within the same three quarters of an hour
-        # An hour goes by (the suggestion was made an hour before the keeper's clock) and he has not answered: asked again.
-        Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").update(created_at=self.now - timedelta(hours=1))
-        with mock.patch("core.followups.REMIND_AGAIN", timedelta(minutes=45)):
-            self.assertEqual(self.keeper(), 1)
-        self.assertEqual(Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").count(), 2)
-        latest = Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").order_by("-created_at").first()
-        services.answer_place(self.md, latest, False)  # "nahi": settled, so never again for this stretch
-        Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").update(created_at=self.now - timedelta(hours=2))
         self.assertEqual(self.keeper(), 0)
+        Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").update(created_at=self.now - timedelta(hours=1))
+        self.assertEqual(self.keeper(), 0)
+        self.assertEqual(Alert.objects.filter(recipient=self.md, ref_type="followup", ref_id__startswith="free:").count(), 1)
+        services.answer_place(self.md, self.suggestion(), False)
+        self.assertEqual(self.keeper(), 0)
+
+    def test_the_suggestion_comes_five_minutes_before_the_stretch_not_earlier(self):
+        # The meeting ends at 3: at 2:50 nothing (ten minutes away), at 2:56 the suggestion for the stretch after it.
+        with mock.patch("core.followups.get_prefs", return_value=dict(ALL_DAY)):
+            self.assertEqual(followups.free_time(now=self.now.replace(hour=14, minute=50)), 0)
+            self.assertEqual(followups.free_time(now=self.now.replace(hour=14, minute=56)), 1)
+        self.assertIn("free till", self.suggestion().spoken_text)
+        self.assertEqual([p["start"][11:16] for p in self.suggestion().question["plan"]], ["15:00", "15:30"])
+
+    def test_the_evening_line_names_what_stayed_late_and_offers_tomorrow_morning(self):
+        prefs = dict(ALL_DAY, digestTime="18:30")
+        with mock.patch("core.followups.get_prefs", return_value=prefs):
+            self.assertEqual(followups.evening_late(now=self.now.replace(hour=18, minute=0)), 0)      # not yet
+            self.assertGreaterEqual(followups.evening_late(now=self.now.replace(hour=18, minute=31)), 1)
+            self.assertEqual(followups.evening_late(now=self.now.replace(hour=18, minute=45)), 0)      # once a day
+        alert = Alert.objects.get(recipient=self.md, ref_type="followup", ref_id__startswith="late:")
+        self.assertIn("2 things stayed late today: Send the bank statement and Renew the trade licence.", alert.spoken_text)
+        self.assertTrue(alert.spoken_text.endswith("morning?"), alert.spoken_text)
+        tomorrow = (tu.today_local() + timedelta(days=1)).isoformat()
+        self.assertEqual(alert.question["kind"], "place")
+        self.assertTrue(all(p["start"][:10] == tomorrow for p in alert.question["plan"]), alert.question["plan"])
+        # The yes lays them into tomorrow; nothing late means no line at all.
+        en, _hi = services.answer_place(self.md, alert, True)
+        self.assertTrue(en.startswith("Done:"), en)
+        self.assertEqual(tu.to_local(PrivateTask.objects.get(id=self.c.id).scheduled_start).date().isoformat(), tomorrow)
+        PrivateTask.objects.filter(owner=self.md).exclude(id=self.meeting.id).update(due_date=tu.today_local() + timedelta(days=3))
+        Alert.objects.filter(ref_id__startswith="late:").delete()
+        with mock.patch("core.followups.get_prefs", return_value=prefs):
+            self.assertEqual(followups.evening_late(now=self.now.replace(hour=18, minute=31)), 0)
 
     def test_no_leaves_the_day_alone(self):
         self.keeper()

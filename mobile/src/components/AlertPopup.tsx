@@ -32,7 +32,7 @@ export function AlertPopup() {
         <View style={s.head}>
           <AlertAvatar item={item} size={28} />
           <View style={{ flex: 1, marginLeft: 10 }}>
-            <Txt variant="label" style={{ color }} numberOfLines={1}>{item.question?.kind === 'place' ? 'Free time' : alertLabel(item)}{item.from ? ` · ${item.from}` : ''}</Txt>
+            <Txt variant="label" style={{ color }} numberOfLines={1}>{item.question?.kind === 'place' ? (/late today/i.test(item.title) ? 'Late today' : 'Free time') : alertLabel(item)}{item.from ? ` · ${item.from}` : ''}</Txt>
             <Txt variant="caption" numberOfLines={1}>{relativeAgo(item.fireAt)}</Txt>
           </View>
           <Pressable onPress={engine.dismissPopup} hitSlop={10} accessibilityLabel="Close">
