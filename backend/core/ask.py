@@ -37,7 +37,8 @@ THE ANSWER
 - ONE sentence (two at most) that says exactly what was asked, nothing more: the name of the one item when one item is asked ("meri agli meeting kaunsi hai" -> "Sharma ji ke saath, kal 10:30 baje."), the number alone when a number is asked ("kitni meetings" -> "Teen."), yes or no FIRST when it is a yes-or-no question, followed by at most ONE nearby fact, the next thing after that time, never what came before it ("12 baje koi meeting hai?" -> "Nahi, 12 baje kuch nahi hai; agli 4 baje Mehta ji ke saath hai."). Short beats complete: the speaker asks again if they want more.
 - Never a list unless the speaker asked for one ("sab batao", "kaun kaun se"); then at most five, in one breath.
 - "Next" / "agla" = the first item after NOW in time order. "Iske baad" / "isse pehle" / "isko" / "ye" / "wo" = relative to last_list.items and last_list.cursor in the context (the item JARVIS last spoke about); use the item tool on that id when you need its details.
-- Numbers and times come from the tools: never count items yourself, never add up minutes yourself, never work out "how long till" yourself; the tools give counts, minutes and "in N minutes".
+- Numbers and times come from the tools: never count items yourself, never add up minutes yourself, never work out "how long till" yourself; the tools give counts, minutes and "in N minutes". Totals are in the diary already added up (meeting_time, task_time, free_time): "kitna time meetings mein jaayega" is answered with that total in hours and minutes ("Kal 3 ghante 30 minute meetings mein jaayenge."), never item by item. Every item carries its minutes; never say an item has no time when the facts give a start or minutes.
+- "Pehla" / "doosra" / "teesra" / "aakhri" = that place in last_list.items (the list of the last answer, in the order it was given). When your answer counts several things (messages, tasks, approvals), put ALL their ids in "about" in the order you would read them, so the next "pehla kya hai" or "doosra padho" points at the right one.
 - When the facts do not contain the answer, say exactly what is missing, in the same specific words ("12 baje ki koi meeting nahi hai.", "Mansi naam ka koi staff ya team member nahi mila.", "Himanshu ki taraf se aaj kuch nahi aaya."). Never say "samajh nahi aaya", never ask the speaker to repeat.
 - Language: say_en follows the speaker's own way (English when they wrote English, Hinglish in Roman letters when they spoke Hinglish). say_hi is the same sentence in Devanagari for the Hindi voice. Keep names and titles as they are.
 - The address ("{address}") at most once, and only in a question or a greeting; never "Ji Sir", never "Okay Sir", never filler.
@@ -156,8 +157,11 @@ class _Facts:
         end = _local(i.get("scheduled_end"))
         if end:
             out["end"] = end.strftime("%H:%M")
-        if i.get("estimated_minutes"):
-            out["minutes"] = i["estimated_minutes"]
+        # Every item has its minutes (its own estimate, else its kind's usual length), so totals never need a guess.
+        if end and start:
+            out["minutes"] = max(0, int((end - start).total_seconds() // 60))
+        else:
+            out["minutes"] = scheduling.minutes_for(i.get("kind"), i.get("estimated_minutes"))
         a = i.get("assignee") or {}
         if a.get("staff_name"):
             out["for"] = a["staff_name"]
@@ -200,11 +204,25 @@ def _diary(f: _Facts, a: dict) -> dict:
             if office_end > cursor + timedelta(minutes=15):
                 free.append({"from": cursor.strftime("%H:%M"), "to": office_end.strftime("%H:%M"),
                              "minutes": int((office_end - cursor).total_seconds() // 60)})
+        meeting_minutes = sum(b["minutes"] for b in items if b["kind"] in ("MEETING", "CALL"))
+        task_minutes = sum(b["minutes"] for b in items if b["kind"] not in ("MEETING", "CALL"))
         out["days"].append({"day": d.isoformat(), "weekday": d.strftime("%A"), "items": items, "count": len(items),
                             "meetings": sum(1 for b in items if b["kind"] in ("MEETING", "CALL")),
+                            "tasks": sum(1 for b in items if b["kind"] not in ("MEETING", "CALL")),
+                            "timed": sum(1 for b in items if b.get("start")), "untimed": sum(1 for b in items if not b.get("start")),
+                            # The totals, already added up: "kitna time meetings mein jaayega" is read, never computed.
+                            "meeting_minutes": meeting_minutes, "meeting_time": _hours(meeting_minutes),
+                            "task_minutes": task_minutes, "task_time": _hours(task_minutes),
                             "office_hours": f"{office_start:%H:%M}-{office_end:%H:%M}", "free": free,
+                            "free_minutes": sum(w["minutes"] for w in free), "free_time": _hours(sum(w["minutes"] for w in free)),
                             "off_day": scheduling.is_off_day(prefs, d)})
     return out
+
+
+def _hours(minutes: int) -> str:
+    """"3 h 30 min" / "45 min" / "0 min": the way a total is said."""
+    h, m = divmod(max(0, int(minutes)), 60)
+    return f"{h} h {m} min" if h and m else f"{h} h" if h else f"{m} min"
 
 
 def _next_up(f: _Facts, a: dict) -> dict:
@@ -284,11 +302,15 @@ def _waiting(f: _Facts, a: dict) -> dict:
             params["from"] = params["to"] = d.isoformat()
     view = datacards.build(f.user, "alerts", f.include_private, params=params) or {}
     rows = view.get("rows") or []
+    items = []
+    for n, r in enumerate(rows[:30]):
+        rid = str(r.get("id") or f"alert-{n}")
+        # Kept as something the cursor can point at: "pehla kya hai", "doosra padho" after a count of messages.
+        f.known[rid] = {"id": rid, "title": r.get("title") or "", "scope": "alert", "kind": r.get("kind")}
+        items.append({"id": rid, "what": r.get("kind"), "title": r.get("title"), "from": r.get("who"),
+                      "state": r.get("status"), "when": f"{r.get('day')} {r.get('when')}".strip(), "amount": r.get("amount") or ""})
     return {"count": len(rows), "by_kind": {s["label"]: s["value"] for s in view.get("stats") or []},
-            "items": [{"id": r.get("id"), "what": r.get("kind"), "title": r.get("title"), "from": r.get("who"),
-                       "state": r.get("status"), "when": f"{r.get('day')} {r.get('when')}".strip(), "amount": r.get("amount") or ""}
-                      for r in rows[:30]],
-            "jarvis_summary": view.get("summary") or ""}
+            "items": items, "order": "newest first", "jarvis_summary": view.get("summary") or ""}
 
 
 def _item(f: _Facts, a: dict) -> dict:

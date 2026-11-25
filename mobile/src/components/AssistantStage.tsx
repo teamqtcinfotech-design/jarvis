@@ -17,6 +17,7 @@ import { Animated, Easing, Keyboard, Linking, Modal, Platform, Pressable, Scroll
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, RadialGradient, Stop } from 'react-native-svg';
 
+import { chipOf, useAlertEngine } from '@/lib/alertEngine';
 import { type Msg, useConversation } from '@/lib/conversation';
 import { mdWord } from '@/lib/names';
 import { useSession } from '@/lib/session';
@@ -26,7 +27,31 @@ import { useDashboard } from '@/lib/useDashboard';
 import { DataCard } from './DataCard';
 import { DraftCard } from './DraftCard';
 import { Orb } from './Orb';
+import { alertLabel } from './AlertBanner';
 import { Icon, Txt } from './ui';
+
+/** What arrived while he was talking: a strip above the orb, never a voice over him (his ask, 25 Nov 2026). A tap
+ *  opens it; it clears when the talk ends and JARVIS has offered the count. */
+function ArrivedStrip() {
+  const engine = useAlertEngine();
+  const items = engine.arrived;
+  if (!items.length) return null;
+  const last = items[items.length - 1];
+  const label = `${alertLabel(last)}${last.from ? ` from ${last.from}` : ''}`;
+  const open = () => {
+    engine.clearArrived();
+    engine.setAllGroup(chipOf(last));
+    engine.setAllVisible(true);
+  };
+  return (
+    <Pressable onPress={open} style={s.arrived} accessibilityLabel="Open what just came">
+      <Icon name="notifications-outline" size={14} color={colors.accent} />
+      <Txt variant="caption" numberOfLines={1} style={{ color: colors.accent, marginLeft: 6, flex: 1 }}>
+        {items.length === 1 ? `${label} just came · tap to open` : `${items.length} came while we talked · tap to open`}
+      </Txt>
+    </Pressable>
+  );
+}
 
 const BIG = 216;            // the orb in the middle
 const SMALL = 0.4;          // and how small it gets at the top
@@ -288,6 +313,7 @@ export function AssistantStage() {
               ) : null}
             </ScrollView>
             {/* the orb (absolute, see below) sits in this gap, with its status line just above it */}
+            <ArrivedStrip />
             <Txt numberOfLines={1} style={[s.status, { marginTop: 6, marginBottom: BIG * DOCK + 14 }, conv.listening && { color: colors.accent }]}>
               {conv.listening && conv.partial ? conv.partial : conv.status}
             </Txt>
@@ -313,6 +339,7 @@ export function AssistantStage() {
         {/* the words under the big orb */}
         {!compact && !docked ? (
           <View style={[s.voice, { top: bigTop + BIG - 6 }]} pointerEvents="box-none">
+            <ArrivedStrip />
             <Txt style={[s.status, conv.listening && { color: colors.accent }]}>{conv.status}</Txt>
             {conv.listening && conv.partial ? (
               <Txt style={s.partial}>{conv.partial}</Txt>
@@ -454,6 +481,7 @@ export function AssistantStage() {
 
 const s = StyleSheet.create({
   blob: { position: 'absolute' },
+  arrived: { flexDirection: 'row', alignItems: 'center', alignSelf: 'center', maxWidth: '92%', paddingVertical: 5, paddingHorizontal: 12, borderRadius: 999, backgroundColor: colors.accentSoft, marginBottom: 6 },
   orb: { position: 'absolute', top: 0, width: BIG, height: BIG },
   voice: { position: 'absolute', left: 24, right: 24, alignItems: 'center' },
   status: { fontSize: 13, lineHeight: 18, color: colors.muted, fontFamily: fonts.medium, textAlign: 'center' },

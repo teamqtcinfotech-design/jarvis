@@ -199,7 +199,7 @@ function minutesIn(text: string): number | undefined {
 // (nothing is dropped); "isse pehle wala" goes back one; "mujhse abhi bolo mat" keeps JARVIS quiet for a while.
 const STOP_WORDS = /\b(stop|ruko|ruk jao|bas karo|bas|chup|mat padho|padhna band|sunana band|nahi padhna|don'?t read|stop reading|stop speaking)\b|रुको|बस|चुप|मत पढ़ो|पढ़ना बंद/i;
 const PREV_WORDS = /\b(pichhla|pichla|previous|pehle wala|pehle wali|isse pehle|iske pehle|usse pehle|go back|peeche wala)\b|पिछला|पहले वाला|इससे पहले|उससे पहले/i;
-const QUIET_WORDS = /\b(bolo mat|mat bolo|bolo hi mat|bolna mat|chup raho|chup ho jao|be quiet|don'?t speak|don'?t disturb|disturb mat|suggestions? mat|yaad mat dila|remind mat|mute|silent rehna)\b|बोलो मत|मत बोलो|चुप रहो|डिस्टर्ब मत/i;
+const QUIET_WORDS = /\b(bolo mat|mat bolo|bolo hi mat|bolna mat|chup raho|chup ho jao|chup karo|be quiet|don'?t speak|don'?t disturb|disturb mat|suggestions? mat|yaad mat dila|remind mat|mute|silent|silent kar do|silent rehna|inko silent|ye silent)\b|बोलो मत|मत बोलो|चुप रहो|चुप करो|डिस्टर्ब मत|साइलेंट/i;
 /** "5 baje tak": minutes from now till that clock time today (the evening reading when the morning one has gone). */
 function untilMinutes(text: string): number | undefined {
   const m = text.match(/(\d{1,2})(?::(\d{2}))?\s*(?:baje|बजे|pm|am|o'?clock)/i);

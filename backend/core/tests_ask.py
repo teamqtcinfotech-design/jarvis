@@ -189,6 +189,8 @@ class AnswerBankTests(BaseCase):
             ("Nikki ke baare mein batao", ["nikki", "accountant"], []),
             ("Nikki ki taraf se koi message hai?", ["2", "do", "two"], ["samajh"]),
             ("mujhe koi lease sign karni hai kya?", ["nahi", "no"], ["samajh"]),
+            # Two meetings of 30 minutes: the total, said in hours and minutes, never "60 30 30" item by item.
+            (f"mujhe {day_word} kitna time meetings mein jaayega?", ["1 ghant", "ek ghant", "1 hour", "one hour", "60 min"], ["samajh", "nahi pata", "specified"]),
         ]
         failures = []
         for text, must, must_not in bank:
@@ -201,4 +203,10 @@ class AnswerBankTests(BaseCase):
         d = self.ask("iske baad kya hai?")
         if "mehta" not in (d.get("spoken_reply") or "").lower():
             failures.append(f"'iske baad kya hai?' -> {d.get('spoken_reply')!r}")
+        # "Pehla kya hai" after a count of messages: the list of the last answer is the cursor list.
+        self.ask("Nikki ki taraf se kya kya aaya hai?")
+        d = self.ask("pehla kya hai?")
+        said = (d.get("spoken_reply") or "").lower()
+        if not ("gst" in said or "vendor" in said):
+            failures.append(f"'pehla kya hai?' -> {d.get('spoken_reply')!r}")
         self.assertEqual(failures, [], "\n".join(failures))

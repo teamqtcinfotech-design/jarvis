@@ -225,6 +225,12 @@ interface EngineValue {
   /** "Mujhse abhi bolo mat": nothing is spoken until then; what arrives is kept and counted when the quiet ends. */
   quietUntil: number;
   setQuietFor: (minutes: number) => void;
+  /** What arrived while he was talking with JARVIS (shown as a strip on the talk sheet, never spoken over him). */
+  arrived: EngineItem[];
+  clearArrived: () => void;
+  /** A reminder at its moment, or the free-time suggestion, in front of him as a popup card (his ask, 25 Nov 2026). */
+  popup: EngineItem | null;
+  dismissPopup: () => void;
 }
 
 const EngineContext = createContext<EngineValue | null>(null);
@@ -548,11 +554,29 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
 
   // The order things were read aloud in, so "isse pehle wala" can go back one.
   const readOrder = useRef<string[]>([]);
+  // A reminder at its moment, or the free-time suggestion, comes up as a popup card as well as being said (his ask,
+  // 25 Nov 2026: "give the pop up for upcoming task"); it goes by itself after a while, or with its buttons.
+  const [popup, setPopup] = useState<EngineItem | null>(null);
+  const popupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dismissPopup = useCallback(() => {
+    if (popupTimer.current) clearTimeout(popupTimer.current);
+    popupTimer.current = null;
+    setPopup(null);
+  }, []);
+  const showPopup = useCallback((item: EngineItem) => {
+    if (popupTimer.current) clearTimeout(popupTimer.current);
+    setPopup(item);
+    popupTimer.current = setTimeout(() => {
+      popupTimer.current = null;
+      setPopup(null);
+    }, 45_000);
+  }, []);
   const deliver = useCallback(
     (item: EngineItem, mode: 'loud' | 'silent') => {
       show(item, mode);
       if (mode === 'loud') {
         readOrder.current = [...readOrder.current.filter((k) => k !== item.key), item.key].slice(-40);
+        if (item.source === 'reminder' || item.question?.kind === 'place') showPopup(item);
         Haptics.notificationAsync(
           item.priority === 'URGENT' ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success,
         ).catch(() => undefined);
@@ -566,7 +590,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       tell([item]);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- md is a fresh object each render; its two words are what matter
-    [show, spokenFor, tell, isMD, md.en, md.hi],
+    [show, spokenFor, tell, isMD, md.en, md.hi, showPopup],
   );
 
   /**
@@ -768,11 +792,16 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const afterTalk = useRef<EngineItem[]>([]);
   const afterTalkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sayAfterTalk = useRef<(items: EngineItem[]) => void>(() => undefined);
+  // What arrived while he was talking, for the strip on the talk sheet ("1 new message from Himanshu"): it is
+  // never spoken over him; a tap opens it, and it clears once the talk ends and the count has been offered.
+  const [arrived, setArrived] = useState<EngineItem[]>([]);
+  const clearArrived = useCallback(() => setArrived([]), []);
   const setTalking = useCallback((talking: boolean) => {
     talkingRef.current = talking;
     if (afterTalkTimer.current) clearTimeout(afterTalkTimer.current);
     afterTalkTimer.current = null;
     if (talking) return;
+    setArrived([]);
     if (!afterTalk.current.length) {
       scheduleNextRef.current(2500);
       return;
@@ -815,6 +844,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         if (talkingRef.current) {
           deliver(item, 'silent');
           afterTalk.current.push(item);
+          setArrived((a) => (a.some((x) => x.key === item.key) ? a : [...a, item])); // the strip on the talk sheet
           return null;
         }
         // A reminder at its moment is said as it is; news is counted first and read only when he says so.
@@ -859,8 +889,16 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   );
 
   useEffect(() => {
-    sayAfterTalk.current = (items) => (items.length === 1 ? deliver(items[0], 'loud') : deliverTogether(items));
-  }, [deliver, deliverTogether]);
+    sayAfterTalk.current = (items) => {
+      // News that came while he was talking is COUNTED, never read out (his rule): "2 updates came, shall I read
+      // them?"; a reminder that fell due meanwhile is said as it is.
+      const news = items.filter((i) => i.source === 'server');
+      const due = items.filter((i) => i.source !== 'server');
+      if (news.length) offerNews(news);
+      if (due.length === 1) deliver(due[0], 'loud');
+      else if (due.length) deliverTogether(due);
+    };
+  }, [deliver, deliverTogether, offerNews]);
 
   const tick = useCallback(() => {
     // While JARVIS is not on screen, the phone's always-on part (ReminderWatcher) delivers reminders and news and
@@ -1551,6 +1589,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     previous,
     quietUntil,
     setQuietFor,
+    arrived,
+    clearArrived,
+    popup,
+    dismissPopup,
     meetingMode,
     setMeetingMode,
     offer,
