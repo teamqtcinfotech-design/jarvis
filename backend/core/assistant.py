@@ -2453,6 +2453,13 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     lang_mod.remember(user, heard)
 
     draft = _draft_for(user, cmd, intent, full_text, reply_language, ctx, on_screen, card, history, include_private, pending)
+    if draft.pop("_reinterpret", False):
+        # The answer model said this is an instruction, not a question (25 Nov 2026): the brain reads the words
+        # itself and everything runs as for a sentence it read; a reading that is still a question keeps the answer.
+        fresh = ai_brain.interpret(full_text, ctx, staff_names, has_pending_requests=bool(pending), user=user)
+        if not fresh.get("ai_failed") and fresh.get("intent") not in {"query", "unknown", "small_talk", "confirm_pending", "cancel_pending"}:
+            return build_draft(user, text, previous, history, awaiting, choices, include_private, card, screen,
+                               cmd={**fresh, "_reasked": True})
 
     # More than one thing in one breath ("4 baje Aman ke saath meeting aur 8 baje Sharma ji ke saath"): every further
     # item is built by exactly the same rules (where it goes, is the person known, does it clash) and rides along on
@@ -3415,7 +3422,13 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         # The answer path (core/ask.py, 24 Nov 2026): a question is answered in one exact sentence from the facts by
         # the strongest model with read-only lookups; the items it spoke about become the cursor for "isko" /
         # "iske baad". "Dikhao" / "list" keep the card path below, and so does any failure to reach the model.
-        asked = ask.try_answer(user, full_text, ctx, include_private, on_screen, address, address_hi) if intent == "query" else None
+        asked = ask.try_answer(user, full_text, ctx, include_private, on_screen, address, address_hi) \
+            if intent == "query" and not cmd.get("_reasked") else None
+        if asked is not None and asked.get("do"):
+            # Not a question: an instruction filed as one ("QTC Developer 2 ko bolo…" sent by the voice as show). The
+            # brain re-reads the words and acts (build_draft); the template answer below stands only if that fails.
+            draft["_reinterpret"] = True
+            asked = None
         if asked is not None:
             _say(draft, asked["en"], asked["hi"])
             if asked.get("view"):

@@ -13,7 +13,7 @@ from django.test import override_settings
 
 from core import ask, services
 from core import timeutils as tu
-from core.models import Kind, Priority
+from core.models import Kind, Priority, SharedTask
 from core.tests import BaseCase, _cmd, _workday
 
 
@@ -100,6 +100,26 @@ class AnswerPathTests(BaseCase):
         d = self.interpret("kal 12 baje koi meeting hai?", _cmd(intent="query", view_kind="today"), client)
         self.assertTrue(d["spoken_reply"].startswith("Nahi, 12 baje"), d["spoken_reply"])
         self.assertEqual([i["id"] for i in services.last_view(self.md)["items"]], [str(self.mehta.id)])
+
+    def test_an_instruction_filed_as_a_question_is_done_not_answered(self):
+        # "Nikki ko bolo GST file bheje" reached the server as a question (the voice chose show): the answer model
+        # says it is not a question, the brain re-reads the words and the work is given; never "main yahan se nahi
+        # bhej sakta" (his test, 25 Nov 2026).
+        client = _FakeClient([], lambda r: {"do": True})
+        query = _cmd(intent="query", view_kind="person", view_who="Nikki")
+        work = _cmd(intent="assign_to_person", staff_name="Nikki", recipients=["Nikki"], title="Send the GST file", spoken_reply="Ji Sir.")
+        with mock.patch("core.ai_brain.ai_available", return_value=True), \
+                mock.patch("core.ai_brain._get_answer_client", return_value=client), \
+                mock.patch("core.ai_brain.interpret", side_effect=[query, work]) as brain:
+            r = self.md_client.post("/api/v1/assistant/interpret/", {"text": "Nikki ko bolo GST file bheje"}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        d = r.json()
+        self.assertEqual(brain.call_count, 2)
+        self.assertTrue(d["booked"], d["spoken_reply"])
+        self.assertIn("Nikki has it", d["spoken_reply"])
+        self.assertEqual(SharedTask.objects.get(title="Send the GST file").assignee_user, self.nikki)
+        # The question path is not asked twice: the answer model saw the sentence once.
+        self.assertEqual(len(client.requests), 2)
 
     def test_dikhao_keeps_the_card_and_never_calls_the_model(self):
         client = _FakeClient([], lambda r: {})

@@ -43,6 +43,7 @@ THE ANSWER
 - Language: say_en follows the speaker's own way (English when they wrote English, Hinglish in Roman letters when they spoke Hinglish). say_hi is the same sentence in Devanagari for the Hindi voice. Keep names and titles as they are.
 - The address ("{address}") at most once, and only in a question or a greeting; never "Ji Sir", never "Okay Sir", never filler.
 - A person: who they are (job, department), then only what was asked (their open work, what they sent, leave). Everything a tool returns about them is allowed; nothing is private except the speaker's own personal items, which the tools already handle.
+- NOT A QUESTION: when the speaker is telling you to DO something (give work to someone: "X ko bolo…", "X ko task do", send a message, set or move a meeting, change, complete or cancel an item, set a reminder), or asks whether you can do such a thing, do not answer and never say you cannot: reply with exactly {{"do": true}} and nothing else. JARVIS can give work to anyone on the team or in the staff directory, send messages and change the diary; the part of JARVIS that does it takes over.
 
 OUTPUT
 After the tools, reply with ONLY a JSON object, no other text:
@@ -422,7 +423,7 @@ def _parse(raw: str) -> dict | None:
             data = json.loads(candidate)
         except ValueError:
             continue
-        if isinstance(data, dict) and str(data.get("say_en") or "").strip():
+        if isinstance(data, dict) and (str(data.get("say_en") or "").strip() or data.get("do") is True):
             return data
     return None
 
@@ -478,6 +479,9 @@ def try_answer(user, text: str, ctx: dict, include_private: bool, on_screen: dic
             if data is None:
                 log.warning("ask: the model's final text was not the answer object")
                 return None
+            if data.get("do") is True:
+                # An instruction filed as a question ("QTC Developer 2 ko bolo…" sent as show): not answered, done.
+                return {"do": True}
             return _finish(f, data)
         log.warning("ask: more than %s rounds of lookups; the templates answer", MAX_ROUNDS)
     except anthropic.RateLimitError:

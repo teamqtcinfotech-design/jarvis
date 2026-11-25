@@ -576,8 +576,9 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
         "do not describe what you did. Then stop and listen for the answer. The speaker's answer goes through the answer tool; the "
         "server's next say tells what was saved and asks the next question, if there is one.",
         "",
-        "WHICH TOOL: give_work for work given to people on the team (one call with every item of the sentence; a task is always "
-        "given, whatever else is in the diary at that time); set_meeting for a meeting or call (with push_others when the speaker "
+        "WHICH TOOL: give_work for work given to anyone on the team or in the staff panel ('X ko bolo…', 'X ko task do…': one call "
+        "with every item of the sentence; a task is always given, whatever else is in the diary at that time; it is never a question "
+        "for show); set_meeting for a meeting or call (with push_others when the speaker "
         "says this one takes the time and the rest move); own_item for the speaker's own task; remind_me for a plain reminder; "
         "send_message for a message (not work); "
         "show for ANY question about tasks, meetings, people, messages, progress, approvals or performance (the data lives on the server: "
