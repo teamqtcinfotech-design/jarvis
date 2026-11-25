@@ -43,6 +43,7 @@ THE ANSWER
 - Language: say_en follows the speaker's own way (English when they wrote English, Hinglish in Roman letters when they spoke Hinglish). say_hi is the same sentence in Devanagari for the Hindi voice. Keep names and titles as they are.
 - The address ("{address}") at most once, and only in a question or a greeting; never "Ji Sir", never "Okay Sir", never filler.
 - A person: who they are (job, department), then only what was asked (their open work, what they sent, leave). Everything a tool returns about them is allowed; nothing is private except the speaker's own personal items, which the tools already handle.
+- "Staff" means the company's staff panel (the staff tool: the whole company, by department); "team" means only the few with JARVIS accounts (in the context). "Kitne staff hain" is answered from the staff tool, never from the team list.
 - NOT A QUESTION: when the speaker is telling you to DO something (give work to someone: "X ko bolo…", "X ko task do", send a message, set or move a meeting, change, complete or cancel an item, set a reminder), or asks whether you can do such a thing, do not answer and never say you cannot: reply with exactly {{"do": true}} and nothing else. JARVIS can give work to anyone on the team or in the staff directory, send messages and change the diary; the part of JARVIS that does it takes over.
 
 OUTPUT
@@ -85,6 +86,8 @@ TOOLS = [
          "required": ["report"]}},
     {"name": "counts", "description": "How much is open on the speaker's list (total, late, due today, later or undated; official and personal for the MD), what they are waiting on from others, and (MD) how much open work each team member holds.",
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "staff", "description": "The company's STAFF: everyone in the staff panel (the staff directory), with department, level, leave and open panel tasks, counted by department. Use for 'kitne staff hain', 'staff mein kaun kaun hai', 'Accounts mein kaun hai', 'kaun chhutti par hai'. The few people with JARVIS accounts (the team in the context) are not the staff.",
+     "input_schema": {"type": "object", "properties": {"department": {"type": "string", "description": "only this department, else everyone"}}}},
 ]
 
 _DAY_WORDS = {"today": 0, "aaj": 0, "tomorrow": 1, "kal": 1, "day after": 2, "day after tomorrow": 2, "parso": 2,
@@ -392,8 +395,22 @@ def _counts(f: _Facts, a: dict) -> dict:
     return out
 
 
+def _staff(f: _Facts, a: dict) -> dict:
+    """The staff panel's people as JARVIS holds them (synced from the panel): the whole company, by department."""
+    dept = " ".join(str(a.get("department") or "").lower().split())
+    rows = [s for s in StaffMember.objects.filter(active=True).order_by("department", "name")
+            if not dept or dept in (s.department or "").lower()]
+    by_dept: dict[str, int] = {}
+    for s in rows:
+        by_dept[s.department or "No department"] = by_dept.get(s.department or "No department", 0) + 1
+    people = [{"name": s.name, "department": s.department, "level": s.designation or s.level, "on_leave": s.on_leave,
+               "leave_until": s.leave_until.isoformat() if s.leave_until else "", "open_panel_tasks": s.open_tasks} for s in rows[:60]]
+    return {"count": len(rows), "by_department": by_dept, "people": people,
+            "note": "the staff panel's directory; the team with JARVIS accounts is separate" if not dept else ""}
+
+
 _LOOKUPS = {"diary": _diary, "next_up": _next_up, "person": _person, "waiting": _waiting, "item": _item,
-            "search": _search, "panel": _panel, "counts": _counts}
+            "search": _search, "panel": _panel, "counts": _counts, "staff": _staff}
 
 
 def run_lookup(f: _Facts, name: str, args: dict) -> dict:

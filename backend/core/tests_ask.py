@@ -83,7 +83,7 @@ class AnswerPathTests(BaseCase):
         # The strongest model, the lookups on the table, the question at the end.
         first = client.requests[0]
         self.assertEqual(first["model"], "claude-opus-5-5")
-        self.assertEqual({t["name"] for t in first["tools"]}, {"diary", "next_up", "person", "waiting", "item", "search", "panel", "counts"})
+        self.assertEqual({t["name"] for t in first["tools"]}, {"diary", "next_up", "person", "waiting", "item", "search", "panel", "counts", "staff"})
         self.assertIn("meri agli meeting kaunsi hai", first["messages"][0]["content"])
         # The item spoken about is the cursor: "isko hata do" / "iske baad kya" next will mean it.
         last = services.last_view(self.md)
@@ -159,6 +159,11 @@ class AnswerPathTests(BaseCase):
         self.assertEqual(counts["team_open_work"].get("Nikki"), 1)
         nobody = ask.run_lookup(f, "person", {"name": "Zubin"})
         self.assertIn("nobody by that name", nobody["note"])
+        # "Kitne staff hain": the staff panel's directory, never the few JARVIS accounts (his live test, 25 Nov 2026).
+        staff = ask.run_lookup(f, "staff", {})
+        self.assertGreaterEqual(staff["count"], 5)
+        self.assertIn("Ramesh Kumar", [p["name"] for p in staff["people"]])
+        self.assertEqual(ask.run_lookup(f, "staff", {"department": "accounts"})["by_department"].get("Accounts"), 2)
         after = ask.run_lookup(f, "next_up", {"count": 1, "after_id": str(self.sharma.id)})
         self.assertEqual(after["items"][0]["title"], "Meeting with Mehta ji")   # "iske baad kya"
         one = ask.run_lookup(f, "item", {"id": str(self.sharma.id)})
