@@ -85,11 +85,9 @@ class FocusTests(BaseCase):
         rows = self.her_list(via="turn")  # the voice turn: no card is ever sent back
         d = self.turn("move her second task to Friday",
                       _cmd(intent="change_task", due_date=self.friday.isoformat(), changed_fields=["due_date"]))
-        self.assertEqual(d["action"], "change_task")
+        # The place in the list names it, the change is clear: done at once (his rule, 25 Nov 2026), named back.
+        self.assertEqual(d["action"], "saved", d)
         self.assertIn(rows[1]["title"], d["show"])
-        self.assertIn(tu.fmt_day(self.friday).split(",")[0], d["show"])
-        d = self.turn("haan", _cmd(intent="confirm_pending"))
-        self.assertEqual(d["action"], "saved")
         self.assertEqual(SharedTask.objects.get(id=rows[1]["id"]).due_date, self.friday)
         for other in (rows[0], rows[2]):
             self.assertNotEqual(SharedTask.objects.get(id=other["id"]).due_date, self.friday)

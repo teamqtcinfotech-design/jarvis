@@ -386,6 +386,18 @@ def _undo_one(user: User, ref: dict) -> int:
             task = SharedTask.objects.get(id=ref["id"])
             services.change_shared_task(user, ref["id"], changes, task.version)
         return 1
+    if kind == "edited":
+        # A title, priority, kind or length changed at once by voice: undo puts the old values back.
+        before = ref.get("before") if isinstance(ref.get("before"), dict) else {}
+        if not before:
+            return 0
+        if ref.get("scope") == "private":
+            task = PrivateTask.objects.get(id=ref["id"], owner=user)
+            services.update_private_task(user, ref["id"], before, task.version)
+        else:
+            task = SharedTask.objects.get(id=ref["id"])
+            services.change_shared_task(user, ref["id"], before, task.version)
+        return 1
     if kind == "organise":
         from . import organise  # noqa: PLC0415 — organise imports this module
         return organise.undo(user, ref.get("inverse") or {})

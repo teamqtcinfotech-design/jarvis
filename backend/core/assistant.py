@@ -89,8 +89,22 @@ def _ask(draft: dict, en: str, hi: str = "") -> None:
     draft["needs_clarification"], draft["question"], draft["question_hi"] = True, en, hi
 
 
+# Words of the instruction itself, never of a title: "Sharma ji wali ko 7 baje kar do" names Sharma ji, not every item
+# with "kar" or "wali" in it (that read-out list of candidates was his complaint, 25 Nov 2026).
+_FILLER = {
+    "wali", "wala", "waali", "waala", "wale", "baje", "bje", "baj", "kar", "karo", "kardo", "karna", "kare", "karna", "kardena",
+    "hai", "hain", "tha", "thi", "abhi", "aaj", "kal", "parso", "subah", "shaam", "dopahar", "raat", "meeting", "meetings", "call",
+    "task", "tasks", "kaam", "wala", "usko", "isko", "uski", "iski", "uska", "iska", "unko", "inko", "time", "badal", "badlo", "badlna",
+    "change", "move", "shift", "hata", "hatao", "hatado", "delete", "cancel", "rakho", "rakh", "rakhdo", "dena", "dedo", "bhej", "bhejo",
+    "bolo", "bata", "batao", "sir", "the", "with", "for", "and", "aur", "phir", "fir", "please", "jo", "woh", "wo", "yeh", "ye", "tak",
+    "baad", "pehle", "minute", "minutes", "min", "ghante", "ghanta", "hour", "hours", "subah", "update", "urgent", "priority", "title",
+    "name", "naam", "aage", "peeche", "age", "shift", "adjust", "kahin", "kahi", "koi", "baat", "nahi", "haan", "theek", "thik", "okay",
+    "that", "this", "one", "set", "put", "make", "into", "from", "about", "mera", "meri", "mere", "apna", "apni", "kisi", "sath", "saath",
+}
+
+
 def _match_items(words: str, items: list[dict]) -> list[dict]:
-    tokens = [t for t in re.findall(r"\w+", words.lower()) if len(t) > 2]
+    tokens = [t for t in re.findall(r"\w+", words.lower()) if len(t) > 2 and not t.isdigit() and t not in _FILLER]
     if not tokens:
         return []
     scored = []
@@ -229,6 +243,9 @@ _ORDINAL_NUMBER = re.compile(r"\b(?:number|no\.?|item|option|नंबर)\s*(\d
 # "it", "that one", "isko": the sentence points at something rather than naming it.
 _POINTING = re.compile(r"\b(it|this|that|these|those|ye|yeh|isko|iska|iski|ise|is|usko|uska|uski|use|us|wo|woh|wahi|yahi)\b"
                        r"|इसको|इसे|इसका|इसकी|उसको|उसे|उसका|उसकी|ये|यह|वो|वह", re.IGNORECASE)
+# A question of its own ("kitni meetings hain?", "kya aaya?", "kab hai?"), not an answer to "which one?".
+_FRESH_QUESTION = re.compile(r"\b(kitn[aeio]|kaun ?s[aie]|kya|kab|kahan|kidhar|how many|how much|what|when|where|which|who|is there|"
+                             r"koi|batao|dikhao)\b|कितन[ाेी]|क्या|कब|कहाँ|कौन|बताओ|दिखाओ|\?\s*$", re.IGNORECASE)
 # "she", "uska", "unko": the person spoken about a moment ago (last_list.about), not named again.
 _PRONOUN = re.compile(r"\b(she|he|her|his|him|usko|uska|uski|uske|unko|unka|unki|unke|unhe|unhein|unhen)\b"
                       r"|उसको|उसका|उसकी|उसके|उनको|उनका|उनकी|उनके|उन्हें", re.IGNORECASE)
@@ -362,6 +379,96 @@ def _time_targets(text: str, user: User) -> list[tuple[dict, str]]:
             out.append((target, new))
             prev = target
     return out
+
+
+_DAY_WORDS = {"aaj": 0, "आज": 0, "kal": 1, "कल": 1, "parso": 2, "परसों": 2}
+
+
+def _pick_by_when(text: str, user: User, choices: list[dict]) -> list[dict]:
+    """The answer to "which one?" given by WHEN it is: "kal wali", "4 baje wali", "saade das wali", "Friday wali"; the
+    choices (id + title) that sit at that day or time, when exactly one does."""
+    ids = {str(c.get("id")) for c in choices if isinstance(c, dict) and c.get("id")}
+    by_time = [t for t, _n in _time_targets(text, user) if str(t.get("id")) in ids]
+    if len(by_time) == 1:
+        return [c for c in choices if str(c.get("id")) == str(by_time[0]["id"])]
+    low = text.lower()
+    today = tu.today_local()
+    day = next((today + timedelta(days=n) for w, n in _DAY_WORDS.items() if re.search(rf"\b{w}\b", low)), None)
+    if day is None:
+        for n, name in enumerate(("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")):
+            if name in low:
+                day = today + timedelta(days=(n - today.weekday()) % 7)
+                break
+    if day is None:
+        return []
+    full = _full_items(user)
+    on_day = []
+    for c in choices:
+        it = full.get(str(c.get("id")))
+        if not it:
+            continue
+        start = _starts(it)
+        when = start.date() if start else (date.fromisoformat(it["due_date"]) if it.get("due_date") else None)
+        if when == day:
+            on_day.append(c)
+    return on_day if len(on_day) == 1 else []
+
+
+def _change_now(user: User, draft: dict, item: dict, address: str, address_hi: str) -> None:
+    """A clear change to one item ("Sharma ji wali ko 7 baje kar do", "isko urgent kar do", "iska naam X rakh do"):
+    done at once, undo for a minute (his rule: specific = done). A day or time that lands on another meeting is not
+    done blind: the diary is looked at first and the named clash question stands (see _settle_move_clash)."""
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    changes = dict(draft.get("changes") or {})
+    draft["targets"], draft["target"] = [item], item
+    if {"due_date", "due_time"} & changes.keys():
+        _advise_schedule(user, draft, address)
+        draft["_advised"] = True
+        if (draft.get("schedule") or {}).get("question"):
+            return  # the clash question stands: the card waits for his answer
+    task = _target_task(item)
+    if task is None:
+        draft["action"] = "answer"
+        _say(draft, f"{address}, I could not find that item any more.", f"{address_hi}, वो आइटम अब मिला नहीं।")
+        return
+    scope = item.get("scope") or ("private" if isinstance(task, PrivateTask) else "shared")
+    local = tu.to_local(task.due_at) if task.due_at else None
+    apply: dict = {}
+    refs: list[dict] = []
+    if {"due_date", "due_time"} & changes.keys():
+        d = _safe_date(str(changes.get("due_date") or "")) or (local.date().isoformat() if local else
+                                                               task.due_date.isoformat() if task.due_date else tu.today_local().isoformat())
+        t = _safe_time(str(changes.get("due_time") or "")) or (local.strftime("%H:%M") if local else "")
+        apply["due_date"] = date.fromisoformat(d)
+        if t:
+            apply["due_time"] = time.fromisoformat(t)
+        refs.append({"type": "moved", "scope": scope, "id": str(task.id),
+                     "before": {"due_date": task.due_date.isoformat() if task.due_date else "", "due_time": local.strftime("%H:%M") if local else ""}})
+    before: dict = {}
+    for key in ("title", "priority", "kind", "duration_minutes"):
+        if key in changes and changes[key] not in (None, ""):
+            apply[key] = changes[key]
+            before[key] = (task.estimated_minutes or 0) if key == "duration_minutes" else getattr(task, key)
+    if before:
+        refs.append({"type": "edited", "scope": scope, "id": str(task.id), "before": before})
+    try:
+        if scope == "private":
+            services.update_private_task(user, str(task.id), apply, task.version)
+        else:
+            _task, req = services.change_shared_task(user, str(task.id), apply, task.version, "")
+            if req is not None:
+                sir, sir_hi = services.md_address(), services.md_address_hi()
+                draft["action"], draft["card_done"] = "answer", True
+                _say(draft, f"{address}, that is {sir}'s own work: I've asked {sir}.", f"{address_hi}, ये {sir_hi} का अपना काम है: {sir_hi} से पूछ लिया है।")
+                return
+    except (services.ServiceError, ObjectDoesNotExist, ValueError) as exc:
+        draft["action"] = "answer"
+        _say(draft, f"{address}, I could not change {item['title']}: {getattr(exc, 'message', 'it has changed meanwhile')}.",
+             f"{address_hi}, {item['title']} नहीं बदल पाया।")
+        return
+    actions.remember_done(user, refs, item["title"])
+    draft["action"], draft["card_done"], draft["booked"], draft["undo"], draft["schedule"] = "answer", True, True, True, None
+    _say(draft, f"Done: {item['title']}, {describe_changes(changes)}.", f"हो गया: {item['title']}, {describe_changes_hi(changes)}।")
 
 
 def _moves_clear(user: User, pairs: list[tuple[dict, str]]) -> bool:
@@ -2237,6 +2344,12 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
     cmd: the command already read (the live voice line fills the form itself, core/livevoice.py): no model is
     asked; everything after the reading runs exactly as it does for a sentence the brain read."""
     full_text = f"{previous}. {text}".strip(". ") if previous else text
+    if (choices or awaiting) and _FRESH_QUESTION.search(text) and not _POINTING.search(text) and _ordinal_index(text) is None \
+            and not re.search(r"\bwal[ai]\b|वाल[ाी]", text, re.IGNORECASE) and not hinglish_parser.yes_no(text):
+        # A fresh question while JARVIS waits on him ("meri aaj kitni meeting hai?" right after "which one?") is
+        # answered on its own; the waiting question is left behind, never glued to the answer (25 Nov 2026).
+        choices, awaiting, pending, previous = None, "", None, ""
+        full_text = text
     card = _clean_pending(pending) if awaiting else None  # the waiting card (not to be confused with pending requests)
     ctx = services.ai_context(user, include_private=include_private)
     # The language to answer in, from the sentence itself (or lately); the model is told, not asked.
@@ -2312,6 +2425,8 @@ def build_draft(user: User, text: str, previous: str = "", history: list | None 
         # The answer to "which one?" read by the server as well: "doosra" / "the first one" by its place among the
         # choices, or the words of one title ("Pune wala"), so the same question is never asked again once answered.
         picked = _pick_choice(text, choices["items"], by_words=cmd.get("intent") not in {"confirm_pending", "cancel_pending"})
+        if not picked:
+            picked = _pick_by_when(text, user, choices["items"])  # "kal wali", "4 baje wali", "Friday wali"
         if picked:
             cmd["target_refs"] = [i["id"] for i in picked]
             cmd["intent"] = choices["intent"]
@@ -3069,6 +3184,9 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                          f"{address_hi}, '{names}' में क्या बदलूँ: समय, दिन, प्रायोरिटी या नाम?")
                 elif askers and len(matches) == 1:
                     _prepare_arrange(user, draft, askers[0], matches[0], address, address_hi)
+                elif len(matches) == 1:
+                    # One item, a clear change: done at once, undo for a minute (his rule: specific = done; 25 Nov 2026).
+                    _change_now(user, draft, matches[0], address, address_hi)
                 else:
                     _say(draft, f"{address}, {describe_changes(draft['changes'])} for '{names}'?",
                          f"{address_hi}, '{names}' {describe_changes_hi(draft['changes'])}?")
@@ -3511,7 +3629,8 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         _say(draft, f"{address}, that is already booked: {draft['title']}, {draft['due_label']}.",
              f"{address_hi}, ये पहले से बुक है: {draft['title']}।")
 
-    if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"] and not is_reminder and not draft.get("swap"):
+    if draft["action"] in _SLOT_ACTIONS and not draft["needs_clarification"] and not is_reminder and not draft.get("swap") \
+            and not draft.pop("_advised", False):
         _advise_schedule(user, draft, address)
 
     if is_reminder and draft["action"] in {"private_task", "pa_self_task", "own_task"} and not draft["needs_clarification"] \

@@ -3061,6 +3061,35 @@ class MeetingJugglingTests(BaseCase):
         sharma.refresh_from_db()
         self.assertEqual((tu.to_local(aman.due_at).strftime("%H:%M"), tu.to_local(sharma.due_at).strftime("%H:%M")), ("11:00", "14:00"))
 
+    def test_a_name_with_two_meetings_asks_once_with_only_those_and_kal_wali_answers_it(self):
+        # "Sharma ji wali ko 7 baje kar do": two Sharma ji meetings, so one short question with those two (never an item
+        # that merely has "kar" in its title); "kal wali" picks by the day and the move is done.
+        day1, day2 = _workday(1), _workday(3)
+        sharma1 = self._meeting("Meeting with Sharma ji", day1, time(16, 0))
+        sharma2 = self._meeting("Sharma ji site visit", day2, time(11, 0))
+        services.create_private_task(self.md, {"title": "Karigar payment kar dena", "due_date": day1})
+        day_word = "kal" if day1 == tu.today_local() + timedelta(days=1) else day1.strftime("%A")
+        d = self.turn(self.md_client, "Sharma ji wali ko 7 baje kar do", _cmd(intent="change_task", changed_fields=["due_time"], due_time="19:00"))
+        self.assertIn("which one", d["show"].lower(), d)
+        self.assertIn("Sharma", d["show"])
+        self.assertNotIn("Karigar", d["show"])
+        d = self.turn(self.md_client, f"{day_word} wali", _cmd(intent="change_task", changed_fields=["due_time"], due_time="19:00"))
+        self.assertEqual(d["action"], "saved", d)
+        sharma1.refresh_from_db()
+        sharma2.refresh_from_db()
+        self.assertEqual(tu.to_local(sharma1.due_at).strftime("%H:%M"), "19:00")
+        self.assertEqual(tu.to_local(sharma2.due_at).strftime("%H:%M"), "11:00")
+
+    def test_a_fresh_question_is_answered_not_glued_to_the_which_one(self):
+        day = _workday(2)
+        self._meeting("Aman review", day, time(11, 0))
+        self._meeting("Sharma call", day, time(13, 0))
+        d = self.turn(self.md_client, "meeting ka time badal do", _cmd(intent="change_task", changed_fields=["due_time"], due_time="15:00"))
+        self.assertIn("which", d["show"].lower())
+        d = self.turn(self.md_client, "meri aaj kitni meetings hain?", _cmd(intent="query", view_kind="today", view_types=["MEETING"]))
+        self.assertNotIn("which", d["show"].lower(), d)
+        self.assertNotIn("badal", d["show"].lower(), d)
+
     def test_which_one_is_never_asked_a_third_time(self):
         day = _workday(2)
         self._meeting("Aman review", day, time(11, 0))
@@ -3173,13 +3202,18 @@ class MeetingJugglingTests(BaseCase):
     def test_length_changes_by_voice(self):
         day = _workday(2)
         aman = self._meeting("Aman review", day, time(13, 15))
-        self.turn(self.md_client, "Aman review 15 minute ki kar do",
-                  _cmd(intent="change_task", target_refs=[str(aman.id)], changed_fields=["duration_minutes"], duration_minutes=15))
-        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        # One item, a clear change: done at once (his rule, 25 Nov 2026), no "shall I?"; undo puts the length back.
+        r = self.turn(self.md_client, "Aman review 15 minute ki kar do",
+                      _cmd(intent="change_task", target_refs=[str(aman.id)], changed_fields=["duration_minutes"], duration_minutes=15))
         self.assertEqual(r["action"], "saved", r)
+        self.assertTrue(r["show"].startswith("Done: Aman review"), r["show"])
         aman.refresh_from_db()
         self.assertEqual(aman.estimated_minutes, 15)
         self.assertEqual(tu.to_local(aman.scheduled_end).strftime("%H:%M"), "13:30")
+        r = self.turn(self.md_client, "undo", _cmd(intent="undo"))
+        self.assertIn("Undone", r["show"])
+        aman.refresh_from_db()
+        self.assertEqual(aman.estimated_minutes, 30)
 
     def test_two_meetings_swap_on_one_yes(self):
         day = _workday(2)
