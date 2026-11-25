@@ -45,7 +45,7 @@ class _FakeClient:
         return _Response([_Block(type="text", text=json.dumps(answer, ensure_ascii=False))], "end_turn")
 
 
-@override_settings(JARVIS_AI_ASK_ENABLED=True)
+@override_settings(JARVIS_AI_ASK_ENABLED=True, JARVIS_AI_ACT_ENABLED=False)  # the answer path on its own; the act path has tests_act
 class AnswerPathTests(BaseCase):
     def setUp(self):
         super().setUp()

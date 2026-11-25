@@ -1,0 +1,249 @@
+"""The act path (25 Nov 2026): the sentence is read by the model with the day's thread in front of it and done through
+the tools around the services; the fixed engine reads it only when the model cannot be reached or a card is open on
+the phone. The model here is a scripted double; the tools run for real."""
+import json
+import os
+import unittest
+from datetime import time
+from unittest import mock
+
+import anthropic
+import httpx
+from django.test import override_settings
+
+from core import act, services
+from core import timeutils as tu
+from core.models import BrainThread, Kind, Priority, SharedTask
+from core.tests import BaseCase, _cmd, _workday
+
+
+class _Block:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+    def model_dump(self, mode="json", exclude_none=True):  # noqa: ARG002 — the SDK's signature
+        return dict(self.__dict__)
+
+
+class _Response:
+    def __init__(self, content, stop_reason):
+        self.content, self.stop_reason, self.usage = content, stop_reason, None
+
+
+class _FakeModel:
+    """A scripted model. Each step is a list of tool calls [(name, input), ...] or the final answer: a dict, or a
+    callable given the results of the last tool round (keyed by tool id "t<round>_<n>")."""
+
+    def __init__(self, *steps):
+        self.steps, self.requests, self.round = list(steps), [], 0
+        self.messages = self
+
+    def create(self, **kw):
+        self.requests.append(kw)
+        step = self.steps.pop(0) if self.steps else {"say_en": "Ji.", "say_hi": "", "about": []}
+        if callable(step):
+            last = kw["messages"][-1]["content"]
+            results = {r["tool_use_id"]: json.loads(r["content"]) for r in (last if isinstance(last, list) else [])
+                       if isinstance(r, dict) and r.get("type") == "tool_result"}
+            step = step(results)
+        if isinstance(step, list):
+            self.round += 1
+            blocks = [_Block(type="tool_use", id=f"t{self.round}_{i}", name=name, input=args) for i, (name, args) in enumerate(step)]
+            return _Response(blocks, "tool_use")
+        return _Response([_Block(type="text", text=json.dumps(step, ensure_ascii=False))], "end_turn")
+
+
+class _Down:
+    def __init__(self):
+        self.messages = self
+
+    def create(self, **kw):
+        raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+
+
+@override_settings(JARVIS_AI_ACT_ENABLED=True, JARVIS_AI_ACT_MODEL="claude-sonnet-5-5", JARVIS_AI_ACT_STRONG_MODEL="claude-opus-5-5")
+class ActPathTests(BaseCase):
+    def setUp(self):
+        super().setUp()
+        self.nikki = services.team_add(self.md, {"name": "Nikki", "title": "Accountant", "username": "nikki", "password": "nikki1"})
+        self.day = _workday(1)
+        self.sharma = services.create_private_task(self.md, {"title": "Meeting with Sharma ji", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                             "due_date": self.day, "due_time": time(10, 30), "duration_minutes": 30})
+        self.mehta = services.create_private_task(self.md, {"title": "Meeting with Mehta ji", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                            "due_date": self.day, "due_time": time(16, 0), "duration_minutes": 30})
+
+    def say(self, text, model, brain=None):
+        engine = brain if brain is not None else mock.Mock(side_effect=AssertionError("the fixed engine must not read this"))
+        with mock.patch("core.ai_brain.ai_available", return_value=True), mock.patch("core.act._client", return_value=model), \
+                mock.patch("core.ai_brain.interpret", engine):
+            r = self.md_client.post("/api/v1/assistant/interpret/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_a_rename_is_done_at_once_and_the_thread_carries_it_to_the_next_turn(self):
+        sid = str(self.sharma.id)
+        model = _FakeModel([("edit_item", {"id": sid, "title": "Test GST review"})],
+                           lambda r: {"say_en": "Done: Test GST review.", "say_hi": "हो गया: Test GST review।", "about": [sid]})
+        d = self.say("Sharma ji wali meeting ka naam Test GST review rakh do", model)
+        self.sharma.refresh_from_db()
+        self.assertEqual(self.sharma.title, "Test GST review")
+        self.assertEqual((d["spoken_reply"], d["booked"], d["undo"], d["engine"], d["model"]),
+                         ("Done: Test GST review.", True, True, "act", "claude-sonnet-5-5"))
+        first = model.requests[0]
+        turn = first["messages"][0]["content"][0]["text"]
+        self.assertIn(sid, turn)                                         # the open items carry their ids
+        self.assertIn("<said>Sharma ji wali meeting ka naam", turn)
+        self.assertTrue({"diary", "edit_item", "move_item", "give_work", "undo", "old_engine"} <= {t["name"] for t in first["tools"]})
+        self.assertEqual(first["system"][0]["cache_control"], {"type": "ephemeral"})
+        self.assertEqual(BrainThread.objects.get(user=self.md).turns, 1)
+        self.assertEqual(services.last_view(self.md)["items"][0]["id"], sid)  # the cursor: "isko" next means it
+        # "undo": the earlier turn rides along in the thread, and the old name comes back.
+        model2 = _FakeModel([("undo", {})], lambda r: {"say_en": r["t1_0"]["said"], "say_hi": "", "about": []})
+        d = self.say("undo", model2)
+        self.sharma.refresh_from_db()
+        self.assertEqual(self.sharma.title, "Meeting with Sharma ji")
+        self.assertTrue(d["spoken_reply"])
+        sent = model2.requests[0]["messages"]
+        self.assertGreater(len(sent), 2)
+        self.assertIn("Test GST review", json.dumps(sent[:-1], ensure_ascii=False))
+        self.assertEqual(BrainThread.objects.get(user=self.md).turns, 2)
+
+    def test_a_move_onto_another_meeting_asks_once_and_the_yes_moves_it(self):
+        sid = str(self.sharma.id)
+
+        def question(results):
+            fact = results["t1_0"]
+            self.assertEqual(fact["clash"][0]["title"], "Meeting with Mehta ji")
+            self.assertEqual(fact["suggested"]["time"], "16:30")
+            return {"say_en": "Aapki 4 baje Mehta ji ke saath meeting hai. Sharma ji ko 4:30 rakh dun?", "say_hi": "", "about": [sid]}
+
+        d = self.say("Sharma ji wali ko 4 baje kar do",
+                     _FakeModel([("move_item", {"id": sid, "date": self.day.isoformat(), "time": "16:00"})], question))
+        self.sharma.refresh_from_db()
+        self.assertEqual(tu.to_local(self.sharma.due_at).hour, 10)        # nothing moved before the answer
+        self.assertFalse(d["booked"])
+        self.assertIn("4:30 rakh dun", d["spoken_reply"])
+        d = self.say("haan", _FakeModel([("move_item", {"id": sid, "date": self.day.isoformat(), "time": "16:30", "force": True})],
+                                        lambda r: {"say_en": "Done: Meeting with Sharma ji, 4:30 PM.", "say_hi": "", "about": [sid]}))
+        self.sharma.refresh_from_db()
+        self.assertEqual(tu.to_local(self.sharma.due_at).strftime("%H:%M"), "16:30")
+        self.assertTrue(d["booked"] and d["undo"])
+
+    def test_a_question_is_answered_from_the_lookups_and_sets_the_cursor(self):
+        def final(results):
+            items = results["t1_0"]["items"]
+            return {"say_en": f"{items[0]['title']} ke saath, kal 10:30 baje.", "say_hi": "", "about": [items[0]["id"]]}
+
+        d = self.say("meri kal ki pehli meeting kaunsi hai", _FakeModel([("next_up", {"count": 1, "kinds": ["MEETING"]})], final))
+        self.assertFalse(d["booked"])
+        self.assertTrue(d["spoken_reply"].endswith("kal 10:30 baje."))
+        self.assertEqual(services.last_view(self.md)["cursor"], 0)
+
+    def test_work_for_one_person_goes_at_once_and_a_list_for_two_becomes_the_card(self):
+        def relay(results):
+            fact = results["t1_0"]
+            self.assertTrue(fact.get("done"), fact)
+            return {"say_en": fact["said"], "say_hi": fact.get("said_hi") or "", "about": []}
+
+        d = self.say("Nikki ko bolo GST file bhej de", _FakeModel([("give_work", {"items": [{"to": "Nikki", "title": "Send the GST file"}]})], relay))
+        self.assertEqual(SharedTask.objects.get(title="Send the GST file").assignee_user, self.nikki)
+        self.assertIn("Nikki has it", d["spoken_reply"])
+        self.assertTrue(d["booked"])
+        # Two things for two people: the list card the speaker checks; nothing is sent until "sab bhej do".
+        d = self.say("Nikki ko bolo ledger check kare aur Priya ko bolo courier bhej de",
+                     _FakeModel([("give_work", {"items": [{"to": "Nikki", "title": "Check the ledger"}, {"to": "Priya", "title": "Send the courier"}]})]))
+        self.assertEqual(len(d.get("batch") or []), 1, d.get("spoken_reply"))
+        self.assertFalse(d.get("booked"))
+        self.assertFalse(SharedTask.objects.filter(title="Check the ledger").exists())
+        self.assertEqual(d["engine"], "act")
+
+    def test_unsure_hands_the_same_turn_fresh_to_the_strong_model(self):
+        sid = str(self.sharma.id)
+        model = _FakeModel({"escalate": True}, [("edit_item", {"id": sid, "priority": "URGENT"})],
+                           lambda r: {"say_en": "Done: Meeting with Sharma ji, urgent.", "say_hi": "", "about": [sid]})
+        d = self.say("isko urgent kar do", model)
+        self.assertEqual([r["model"] for r in model.requests], ["claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5-5"])
+        self.sharma.refresh_from_db()
+        self.assertEqual((self.sharma.priority, d["model"]), ("URGENT", "claude-opus-5-5"))
+        self.assertNotIn("escalate", json.dumps(model.requests[1]["messages"]))  # the weak reading is not in its thread
+
+    def test_when_the_model_cannot_be_reached_the_fixed_engine_reads_the_sentence(self):
+        read = _cmd(intent="change_task", target_refs=[str(self.sharma.id)], changed_fields=["priority"], priority="HIGH", spoken_reply="Ji Sir.")
+        d = self.say("Sharma wali ko high priority kar do", _Down(), brain=mock.Mock(return_value=read))
+        self.assertNotEqual(d.get("engine"), "act")
+        self.sharma.refresh_from_db()
+        self.assertEqual(self.sharma.priority, "HIGH")
+        self.assertFalse(BrainThread.objects.filter(user=self.md, turns__gt=0).exists())
+
+    def test_what_has_no_tool_is_handed_to_the_fixed_engine(self):
+        read = _cmd(intent="set_setting", setting_key="wakeWord", setting_value="OK Boss", spoken_reply="Ji Sir, ab OK Boss boliye.")
+        brain = mock.Mock(return_value=read)
+        d = self.say("ab mujhe OK Boss bolke bulao", _FakeModel([("old_engine", {})]), brain=brain)
+        self.assertEqual((d["engine"], brain.call_count), ("act", 1))
+
+    def test_the_live_line_sends_the_sentence_through_talk_and_a_card_keeps_the_fixed_engine(self):
+        secret = {"value": "xai-short-lived-token", "expires_at": 0}
+        with mock.patch("core.ai_brain.ai_available", return_value=True), mock.patch("core.xai.configured", return_value=True), \
+                mock.patch("core.xai.client_secret", return_value=secret):
+            r = self.md_client.get("/api/v1/assistant/live/session/")
+        self.assertEqual(r.status_code, 200, r.content)
+        sess = r.json()["session"]
+        self.assertEqual({t["name"] for t in sess["tools"] if t.get("type") == "function"}, {"talk", "setting", "screen", "briefing", "dismiss", "end"})
+        self.assertIn("talk for everything the speaker says", sess["instructions"])
+        sid = str(self.sharma.id)
+        model = _FakeModel([("edit_item", {"id": sid, "title": "Test budget review"})],
+                           lambda r: {"say_en": "Done: Test budget review.", "say_hi": "हो गया: Test budget review।", "about": [sid]})
+        with mock.patch("core.ai_brain.ai_available", return_value=True), mock.patch("core.act._client", return_value=model), \
+                mock.patch("core.ai_brain.interpret", side_effect=AssertionError("the fixed engine must not read this")):
+            r = self.md_client.post("/api/v1/assistant/live/tool/", {"name": "talk", "arguments": {"said": "Sharma ji wali meeting ko Test budget review naam do"}}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        d = r.json()
+        self.assertEqual(d["spoken_reply"], "Done: Test budget review.")
+        self.assertIn(d["say"], ("Done: Test budget review.", "हो गया: Test budget review।"))  # the voice reads the twin of the speaker's language
+        self.sharma.refresh_from_db()
+        self.assertEqual(self.sharma.title, "Test budget review")
+        # A card waiting on the phone keeps the fixed engine: "haan" through talk is read by it, never by the thread.
+        with mock.patch("core.ai_brain.ai_available", return_value=True), \
+                mock.patch("core.act._client", side_effect=AssertionError("the thread must not read this")), \
+                mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")) as brain:
+            r = self.md_client.post("/api/v1/assistant/live/tool/", {"name": "talk", "arguments": {"said": "haan"}, "awaiting": "JARVIS asked: save it?",
+                                                                      "pending": {"action": "private_task", "title": "x", "transcript": "x"}}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(brain.called)
+
+
+@unittest.skipUnless(os.environ.get("JARVIS_REAL_BRAIN_TESTS") == "1", "set JARVIS_REAL_BRAIN_TESTS=1 to run against the real models")
+@override_settings(JARVIS_AI_ENABLED=True, JARVIS_AI_ACT_ENABLED=True)
+class ActBankTests(BaseCase):
+    """His sentences against the real models (the bank): a rename, a move onto a clash and its yes, "abhi"."""
+
+    def setUp(self):
+        super().setUp()
+        self.day = _workday(1)
+        self.sharma = services.create_private_task(self.md, {"title": "Meeting with Sharma ji", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                             "due_date": self.day, "due_time": time(10, 30), "duration_minutes": 30})
+        self.mehta = services.create_private_task(self.md, {"title": "Meeting with Mehta ji", "kind": Kind.MEETING, "priority": Priority.NORMAL,
+                                                            "due_date": self.day, "due_time": time(16, 0), "duration_minutes": 30})
+
+    def say(self, text):
+        r = self.md_client.post("/api/v1/assistant/interpret/", {"text": text}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        d = r.json()
+        self.assertEqual(d.get("engine"), "act", d.get("spoken_reply"))
+        return d
+
+    def test_rename_move_with_clash_and_now(self):
+        self.assertTrue(act.enabled())
+        d = self.say("Sharma ji wali meeting ka naam Test GST review rakh do")
+        self.sharma.refresh_from_db()
+        self.assertEqual(self.sharma.title, "Test GST review", d["spoken_reply"])
+        d = self.say("Test GST review wali ko 4 baje kar do")
+        self.sharma.refresh_from_db()
+        self.assertEqual(tu.to_local(self.sharma.due_at).hour, 10, d["spoken_reply"])     # a clash: asked, not moved
+        self.assertIn("Mehta", d["spoken_reply"])
+        d = self.say("haan")
+        self.sharma.refresh_from_db()
+        self.assertEqual(tu.to_local(self.sharma.due_at).strftime("%H:%M"), "16:30", d["spoken_reply"])
+        d = self.say("Mehta ji wali meeting abhi kar do")
+        self.mehta.refresh_from_db()
+        self.assertLess(abs((tu.to_local(self.mehta.due_at) - tu.now_local()).total_seconds()), 180, d["spoken_reply"])

@@ -2341,13 +2341,22 @@ def _clean_screen(screen) -> dict | None:
 
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
                 awaiting: str = "", choices: dict | None = None, include_private: bool = True,
-                pending: dict | None = None, screen: dict | None = None, cmd: dict | None = None) -> dict:
+                pending: dict | None = None, screen: dict | None = None, cmd: dict | None = None,
+                engine_only: bool = False) -> dict:
     """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed.
     choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer.
     include_private=False: phone locked; the MD's private items are kept out of the model's view.
     pending: the waiting card itself (so a yes can take the time JARVIS offered, or a new time can be checked).
     cmd: the command already read (the live voice line fills the form itself, core/livevoice.py): no model is
-    asked; everything after the reading runs exactly as it does for a sentence the brain read."""
+    asked; everything after the reading runs exactly as it does for a sentence the brain read.
+    engine_only: the fixed engine reads it even when the act path is on (the act path hands over what it has no tool for)."""
+    # The act path (core/act.py, 25 Nov 2026): a sentence with no card waiting on the phone is read and done by the
+    # model with the day's thread; this engine reads it only when the model cannot be reached (or a card is open).
+    from . import act  # noqa: PLC0415 — act builds on this module
+    if cmd is None and not engine_only and not awaiting and not (choices or {}).get("items") and act.enabled():
+        done = act.run(user, text, previous=previous, history=history, include_private=include_private, screen=screen)
+        if done is not None:
+            return done
     full_text = f"{previous}. {text}".strip(". ") if previous else text
     if (choices or awaiting) and _FRESH_QUESTION.search(text) and not _POINTING.search(text) and _ordinal_index(text) is None \
             and not re.search(r"\bwal[ai]\b|वाल[ाी]", text, re.IGNORECASE) and not hinglish_parser.yes_no(text):

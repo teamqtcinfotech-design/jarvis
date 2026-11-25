@@ -17,7 +17,7 @@ import re
 
 from django.conf import settings
 
-from . import ai_brain, assistant, datacards, hinglish_parser, services, xai
+from . import act, ai_brain, assistant, datacards, hinglish_parser, services, xai
 from . import timeutils as tu
 from .models import User
 
@@ -252,10 +252,23 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"said": _SAID}, "required": ["said"]}},
     {"type": "function", "name": "end", "description": "The conversation is over ('bas', 'thank you', 'bye', 'theek hai bas'). Call it, then say a short goodbye.",
      "parameters": {"type": "object", "properties": {"said": _SAID}, "required": ["said"]}},
+    {"type": "function", "name": "talk",
+     "description": "Everything the speaker says that is not a setting, a screen action, the briefing, 'dismiss' or the end: work for people, "
+                    "meetings, their own items, reminders, messages, any question, a change / delete / done on an item, the answer to a question "
+                    "JARVIS asked, undo, remember, organising. The whole sentence as heard goes in said; the server understands it.",
+     "parameters": {"type": "object", "properties": {"said": _SAID}, "required": ["said"]}},
     {"type": "web_search"},
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS if t.get("type") == "function"}
+# With the act path on (core/act.py), the voice is ears and mouth only: the sentence goes through talk and the server
+# understands it; the forms stay for a server without the model.
+SESSION_TOOL_NAMES = {"talk", "setting", "screen", "briefing", "dismiss", "end"}
+BRAIN_TOOL_NAMES = TOOL_NAMES - {"setting", "screen", "briefing", "dismiss", "end"}
+
+
+def session_tools() -> list:
+    return [t for t in TOOLS if t.get("type") != "function" or t["name"] in SESSION_TOOL_NAMES] if act.enabled() else TOOLS
 
 
 _NOW_IN = re.compile(r"\babhi\b|\bnow\b|अभी", re.IGNORECASE)
@@ -521,6 +534,28 @@ def _items_line(items: list[dict]) -> str:
     return "; ".join(one(i) for i in items)
 
 
+def _which_tool() -> str:
+    if act.enabled():
+        return ("WHICH TOOL: talk for everything the speaker says: work for people, meetings, their own items, reminders, messages, ANY "
+                "question about tasks, meetings, people, messages, progress or the company, a change / delete / done on an item, the answer "
+                "to a question JARVIS asked, undo, remember, organising (the whole sentence as heard goes in said; the server understands it "
+                "and its say is the whole reply: never answer those from memory, never count or guess). Only these go elsewhere: setting for "
+                "a JARVIS setting; screen for PDF, share, open an item, settings, the walkie-talkie, home; briefing; dismiss for 'ye hatao / "
+                "band karo' on the alert or card on screen; end for 'bas', 'thank you', 'bye' (call it, then say a short goodbye).")
+    return ("WHICH TOOL: give_work for work given to anyone on the team or in the staff panel ('X ko bolo…', 'X ko task do…': one call "
+            "with every item of the sentence; a task is always given, whatever else is in the diary at that time; it is never a question "
+            "for show); set_meeting for a meeting or call (with push_others when the speaker "
+            "says this one takes the time and the rest move); own_item for the speaker's own task; remind_me for a plain reminder; "
+            "send_message for a message (not work); "
+            "show for ANY question about tasks, meetings, people, messages, progress, approvals or performance (the data lives on the server: "
+            "never answer those from memory, never count or guess); change / complete / cancel_item for an existing item (its id from the open "
+            "items when it is one of them, else the words that pick it out); update_task for an update on an item the other side should hear "
+            "('bank band tha, kal karunga'); tick_step when a part of an item's checklist is done ('hotel ho gaya'); approve for yes / no on an "
+            "approval asked of the speaker; answer when JARVIS has just asked something; undo; remember; "
+            "organise for departments and sections; setting; screen for PDF, share, open an item, settings, the walkie-talkie, home; "
+            "briefing; dismiss; end for 'bas', 'thank you', 'bye' (call it, then say a short goodbye).")
+
+
 def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str:
     """What the voice model is told: who it is talking to, the facts it may use, how to talk, and the rule that
     everything goes through the form. Every "Sir" is the MD's own word of address."""
@@ -576,18 +611,7 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
         "do not describe what you did. Then stop and listen for the answer. The speaker's answer goes through the answer tool; the "
         "server's next say tells what was saved and asks the next question, if there is one.",
         "",
-        "WHICH TOOL: give_work for work given to anyone on the team or in the staff panel ('X ko bolo…', 'X ko task do…': one call "
-        "with every item of the sentence; a task is always given, whatever else is in the diary at that time; it is never a question "
-        "for show); set_meeting for a meeting or call (with push_others when the speaker "
-        "says this one takes the time and the rest move); own_item for the speaker's own task; remind_me for a plain reminder; "
-        "send_message for a message (not work); "
-        "show for ANY question about tasks, meetings, people, messages, progress, approvals or performance (the data lives on the server: "
-        "never answer those from memory, never count or guess); change / complete / cancel_item for an existing item (its id from the open "
-        "items when it is one of them, else the words that pick it out); update_task for an update on an item the other side should hear "
-        "('bank band tha, kal karunga'); tick_step when a part of an item's checklist is done ('hotel ho gaya'); approve for yes / no on an "
-        "approval asked of the speaker; answer when JARVIS has just asked something; undo; remember; "
-        "organise for departments and sections; setting; screen for PDF, share, open an item, settings, the walkie-talkie, home; "
-        "briefing; dismiss; end for 'bas', 'thank you', 'bye' (call it, then say a short goodbye).",
+        _which_tool(),
         "Repeats ('har mahine 10 tarikh ko', 'roz subah 9 baje', 'har Monday') go in repeat_words exactly as said, on ONE item; the parts of "
         "one task ('hotel, flights aur car') go in steps; an approval asked of someone ('Sir se 50 hazaar ka approval chahiye') is give_work "
         "with kind APPROVAL and the amount in rupees, to the person who approves.",
@@ -649,7 +673,7 @@ def session_config(user: User, include_private: bool = True) -> dict:
     session = {
         "instructions": instructions_for(user, ctx, include_private),
         "voice": voice,
-        "tools": TOOLS,
+        "tools": session_tools(),
         "turn_detection": {"type": "server_vad"},
         "audio": {
             "input": {"format": {"type": "audio/pcm", "rate": RATE},
@@ -679,10 +703,18 @@ def run_tool(user: User, name: str, arguments, *, previous: str = "", history: l
             arguments = json.loads(arguments or "{}")
         except ValueError:
             arguments = {}
-    cmd = cmd_for(user, name, arguments)
-    text = cmd.pop("_said") or name
-    draft = assistant.build_draft(user, text, previous, history, awaiting, choices, include_private=include_private,
-                                  pending=pending, screen=screen, cmd=cmd)
+    arguments = arguments if isinstance(arguments, dict) else {}
+    said = " ".join(str(arguments.get("said") or "").split())[:1000]
+    if name == "talk" or (name in BRAIN_TOOL_NAMES and said and act.enabled() and not awaiting and not (choices or {}).get("items")):
+        # The sentence itself goes to the brain (core/act.py through build_draft); a card waiting on the phone keeps
+        # the fixed engine, which owns that card.
+        draft = assistant.build_draft(user, said or name, previous, history, awaiting, choices, include_private=include_private,
+                                      pending=pending, screen=screen)
+    else:
+        cmd = cmd_for(user, name, arguments)
+        text = cmd.pop("_said") or name
+        draft = assistant.build_draft(user, text, previous, history, awaiting, choices, include_private=include_private,
+                                      pending=pending, screen=screen, cmd=cmd)
     say = draft.get("speak_text") or draft.get("spoken_reply") or ""
     draft["say"] = say
     draft["say_lang"] = draft.get("speak_lang") or "en"

@@ -22,7 +22,7 @@ from core.taskpanel.client import MockTaskPanel, TaskPanelError
 SECRET = "SECRET-Mehta-Divorce-Lawyer"
 
 
-@override_settings(JARVIS_AI_ENABLED=False, LARAVEL_MODE="mock", TASKPANEL_MODE="mock", TASKPANEL_WRITES_ENABLED=True,
+@override_settings(JARVIS_AI_ENABLED=False, JARVIS_AI_ACT_ENABLED=False, LARAVEL_MODE="mock", TASKPANEL_MODE="mock", TASKPANEL_WRITES_ENABLED=True,
                    TASKPANEL_DEFAULT_CATEGORY="general", JARVIS_TASKPANEL_STAFF=True, JARVIS_DEFAULT_LANGUAGE="en")
 class BaseCase(TestCase):
     """Every test runs against the built-in TaskPanel double, whatever the developer's own .env says (a laptop pointed

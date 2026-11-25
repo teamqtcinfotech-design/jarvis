@@ -183,6 +183,12 @@ JARVIS_AI_ANSWER_MODEL = os.environ.get("JARVIS_AI_ANSWER_MODEL", "claude-sonnet
 JARVIS_AI_ASK_ENABLED = env_bool("JARVIS_AI_ASK_ENABLED", True)
 JARVIS_AI_ASK_MODEL = os.environ.get("JARVIS_AI_ASK_MODEL", "claude-opus-5-5")
 JARVIS_AI_ASK_EFFORT = os.environ.get("JARVIS_AI_ASK_EFFORT", "medium")
+# The act path (core/act.py, 25 Nov 2026): everything the speaker says, understood and done by the model with the day's
+# thread in front of it and tools around the services; Sonnet reads first, Opus when it is unsure. Off = the fixed engine.
+JARVIS_AI_ACT_ENABLED = env_bool("JARVIS_AI_ACT_ENABLED", bool(ANTHROPIC_API_KEY))
+JARVIS_AI_ACT_MODEL = os.environ.get("JARVIS_AI_ACT_MODEL", "claude-sonnet-5-5")
+JARVIS_AI_ACT_STRONG_MODEL = os.environ.get("JARVIS_AI_ACT_STRONG_MODEL", "claude-opus-5-5")
+JARVIS_AI_ACT_EFFORT = os.environ.get("JARVIS_AI_ACT_EFFORT", "medium")
 JARVIS_AI_ANSWER_TIMEOUT_SECONDS = float(os.environ.get("JARVIS_AI_ANSWER_TIMEOUT_SECONDS", "50"))
 JARVIS_AI_MAX_SEARCHES = int(os.environ.get("JARVIS_AI_MAX_SEARCHES", "3"))  # web searches per question
 JARVIS_AI_DAILY_ANSWER_LIMIT = int(os.environ.get("JARVIS_AI_DAILY_ANSWER_LIMIT", "150"))  # per user per day

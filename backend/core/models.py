@@ -817,6 +817,21 @@ class AiUsage(models.Model):
         constraints = [models.UniqueConstraint(fields=["user", "day", "kind"], name="unique_ai_usage_day")]
 
 
+class BrainThread(models.Model):
+    """The day's conversation with the brain (core/act.py): what the speaker said and what JARVIS looked up and did,
+    exactly as the model saw it, so "isko", "wo wali", "pehle wali baat" mean what they mean in a chat. One per
+    person per day; encrypted at rest (it holds titles); nobody but the server reads it."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="brain_threads")
+    day = models.DateField()
+    messages_json = EncryptedTextField(blank=True, default="[]")
+    turns = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "day"], name="unique_brain_thread_day")]
+
+
 class TalkSession(models.Model):
     """One walkie-talkie talk: who started it, who was in it, how many turns and how long. Never the sound itself
     (nothing is recorded, by design); this is what the Recent list and Sir's team view show."""
