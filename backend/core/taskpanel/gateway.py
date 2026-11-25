@@ -162,9 +162,11 @@ class GatewayTaskPanel:
             level_raw = s.get("level")
             level = str(_first(s, "level_name", default="") or LEVEL_NAMES.get(level_raw) or level_raw or "")
             staff.append({
+                # Everyone the panel lists IS the staff (his rule, 25 Nov 2026: the complete list, always); whether
+                # the panel will take work for them is a separate fact (panel_active, role), checked in validate().
                 "key": key, "name": str(s["name"]).strip(), "department": DEPT_NAMES.get(dept_code, dept_code.title()),
                 "designation": level, "level": level, "role": role,
-                "active": bool(s.get("active", True)) and role != "viewer",
+                "active": True, "panel_active": bool(s.get("active", True)),
                 "on_leave": bool(s.get("on_leave", False)), "leave_until": s.get("leave_until") or None,
                 "open_tasks": int(s.get("open_tasks") or 0), "main": bool(s.get("main", False)),
             })
@@ -195,6 +197,9 @@ class GatewayTaskPanel:
             raise TaskPanelError(422, "title_required", "A title is required.")
         if not person or not person["active"]:
             raise TaskPanelError(422, "recipient_not_found", "That staff member is not in the TaskPanel directory.")
+        if person.get("role") == "viewer" or not person.get("panel_active", True):
+            why = "a viewer in the panel" if person.get("role") == "viewer" else "marked inactive in the panel"
+            raise TaskPanelError(422, "recipient_inactive", f"{person['name']} is {why}, so the panel will not take a task for them.")
         if person["on_leave"]:
             until = person.get("leave_until")
             try:

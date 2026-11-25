@@ -74,14 +74,12 @@ class MoveTheMeetingNowTests(NowCase):
     def test_sharmaji_wali_meeting_abhi_kar_do_moves_that_meeting_to_this_minute(self):
         d = self.interpret(self.md_client, "Sharmaji wali meeting abhi kar do", _cmd(
             intent="change_task", target_refs=[str(self.sharma.id)], changed_fields=[], spoken_reply="Ji Sir."))
-        self.assertEqual(d["action"], "change_task")
-        self.assertEqual(d["changes"], {"due_date": self.now.date().isoformat(), "due_time": self.hhmm(self.now)})
+        # A clear move of one item is done at once with undo (his rule, 25 Nov 2026); Aman's slot has elapsed, so
+        # nothing clashes and no question is asked.
+        self.assertEqual((d["action"], d["booked"], d["undo"]), ("answer", True, True), d["spoken_reply"])
         self.assertFalse(d["needs_clarification"], d["spoken_reply"])
-        self.assertEqual(d["schedule"]["clashes"], [])          # Aman's slot has elapsed; its own old slot does not count
-        self.assertFalse(d["schedule"]["question"])
-        # The yes: the app applies the change to the same meeting.
-        r = self.md_client.patch(f"/api/v1/private-tasks/{self.sharma.id}/", {"expected_version": self.sharma.version, **d["changes"]}, format="json")
-        self.assertEqual(r.status_code, 200, r.content)
+        self.assertIsNone(d.get("schedule"))
+        self.assertTrue(d["spoken_reply"].startswith("Done: Meeting with Sharmaji"), d["spoken_reply"])
         self.sharma.refresh_from_db()
         self.assertEqual(self.hhmm(self.sharma.due_at), self.hhmm(self.now))
         self.assertEqual(self.sharma.scheduled_end - self.sharma.scheduled_start, timedelta(minutes=60))  # the hour is kept

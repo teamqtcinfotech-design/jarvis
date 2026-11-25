@@ -204,7 +204,12 @@ class GatewayTests(BaseCase):
         self.assertNotIn("staff_26", by_key)                       # hidden: a company login, not a person
         self.assertEqual(by_key["nikki"].department, "Accounts")
         self.assertEqual((by_key["nikki"].level, by_key["nikki"].role, by_key["nikki"].open_tasks), ("Senior", "exec", 2))
-        self.assertFalse(by_key["staff_25"].active)                 # a viewer cannot receive work
+        # A viewer is in the complete list (his rule, 25 Nov 2026) but the panel will not take work for them.
+        self.assertEqual((by_key["staff_25"].active, by_key["staff_25"].role), (True, "viewer"))
+        with self.assertRaises(gateway.TaskPanelError) as ctx:
+            self.client_obj.validate(sync.link_for(self.md), {"data": {"title": "Test file", "assignee_key": "staff_25"}})
+        self.assertEqual(ctx.exception.code, "recipient_inactive")
+        self.assertIn("viewer", ctx.exception.message)
         self.assertTrue(by_key["kajal"].on_leave)
         # The MD's own link exists by itself in gateway mode, so the ledger and the feed have their actor.
         link = sync.link_for(self.md)

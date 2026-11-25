@@ -754,14 +754,15 @@ class SmartAssistantTests(BaseCase):
         r = self.turn(self.md_client, "Sharma meeting 5 baje kar do", _cmd(
             intent="change_task", target_refs=[str(task.id)], changed_fields=["due_time"], due_time="17:00",
             spoken_reply="Sir, move the Sharma meeting to 5 PM?"))
-        self.assertEqual(r["action"], "change_task")
-        task.refresh_from_db()
-        self.assertNotEqual(tu.to_local(task.due_at).hour, 17)  # nothing changes before the yes
-        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
-        self.assertEqual(r["action"], "saved")
+        # One item, a clear time: moved at once, no "move it to 5 PM?" (his rule, 25 Nov 2026); undo for a minute.
+        self.assertEqual(r["action"], "saved", r)
+        self.assertTrue(r["show"].startswith("Done: Meeting with Sharma ji"), r["show"])
         task.refresh_from_db()
         self.assertEqual(tu.to_local(task.due_at).hour, 17)
         self.assertEqual(task.version, 2)
+        r = self.turn(self.md_client, "undo", _cmd(intent="undo"))
+        task.refresh_from_db()
+        self.assertEqual(tu.to_local(task.due_at).hour, 9, r)
 
     def test_delete_task_by_voice_cancels_at_once_and_undo_brings_it_back(self):
         # Deleting is done at once (21 Nov 2026: "if I say hata do, just delete, don't ask"): a cancel, never an
@@ -2806,7 +2807,7 @@ class LanguageTests(BaseCase):
         self.assertEqual((r["action"], r["say_lang"]), ("saved", "hi"))
         self.assertIn("सेव हो गया", r["say"])
         self.assertIn("कल 4 बजे याद दिला दूँगा", r["say"])
-        self.assertTrue(r["show"].startswith("Saved."), r["show"])
+        self.assertTrue(r["show"].startswith("Saved: Meeting with Sharma ji"), r["show"])
         # Nothing waiting, asked in English: English.
         r = self.turn(self.md_client, "yes please", _cmd(intent="confirm_pending"))
         self.assertEqual(r["say_lang"], "en")
@@ -3439,7 +3440,7 @@ class AlertsAndRescheduleTests(BaseCase):
         d = self.interpret(self.md_client, "Priya ko alert bhejo ki client aa gaye",
                            _cmd(intent="send_alert", title="Client arrived", notes="Client aa gaye hain, reception par hain.", engine="ai"))
         self.assertEqual(d["action"], "answer")
-        self.assertIn("Sent", d["spoken_reply"])
+        self.assertIn("gone to Priya", d["spoken_reply"])     # specific, not a bare "Sent" (his rule, 24 Nov 2026)
         alert = Alert.objects.get(recipient=self.pa, ref_type="message")
         self.assertIn("Client aa gaye hain", alert.spoken_text)
         self.assertIsNone(alert.snoozed_until)

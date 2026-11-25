@@ -1485,6 +1485,26 @@ _PANEL_KINDS = [
     ("itr_statistics", "ITR statistics", ("itr",)),
     ("capital_statements", "Capital statements", ("capital",)),
     ("working_metrics", "Working metrics", ("metrics",)),
+    # The rest of what the panel serves (its datasets route, 25 Nov 2026): read only, like everything here.
+    ("house_franchises", "Sub-franchises", ("sub franchises", "sub franchise", "sub-franchises", "sub-franchise", "house franchises", "house franchise")),
+    ("house_partners", "Sub-franchise partners", ("house partners", "sub franchise partners", "sub-franchise partners")),
+    ("partner_franchise", "Partners by franchise", ("partners by franchise", "partner franchise", "franchise ke partners", "franchise wise partners")),
+    ("franchise_estimates", "Franchise estimates", ("estimates", "estimate")),
+    ("franchise_level_commissions", "Franchise level commissions", ("level commissions", "level commission")),
+    ("franchise_bonuses", "Franchise bonuses", ("bonuses", "bonus")),
+    ("franchise_equity", "Franchise equity", ("equity",)),
+    ("franchise_first_payments", "Franchise first payments", ("first payments", "first payment")),
+    ("franchise_bp", "Franchise business partners", ("business partners", "business partner", "franchise bp")),
+    ("business_payments", "Business payments", ("business payments", "business payment")),
+    ("partner_events", "Partner events", ("partner events", "partner event")),
+    ("franchise_events", "Franchise events", ("franchise events", "franchise event")),
+    ("interview_pipeline", "Interview pipeline", ("interviews", "interview pipeline", "interview")),
+    ("payment_directory", "Payment directory", ("payment directory",)),
+    ("itr_undertakings", "ITR undertakings", ("undertakings", "undertaking")),
+    ("staff_leave", "Staff leave", ("staff leave", "leave record", "leave records", "chhutti record")),
+    ("tasks", "Panel tasks", ("panel tasks", "taskpanel tasks")),
+    ("task_people", "Panel task people", ("task people",)),
+    ("person_tasks", "Panel tasks by person", ("person tasks", "tasks by person")),
 ]
 _PANEL_LABEL = {k: label for k, label, _w in _PANEL_KINDS}
 _PANEL_EXAMPLES = "partners, franchises, franchise requests, payments, withdrawals, commissions, agreements, targets, TDS"
