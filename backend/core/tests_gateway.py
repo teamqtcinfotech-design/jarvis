@@ -248,16 +248,24 @@ class GatewayTests(BaseCase):
         self.assertTrue(cmd.result["replayed"])
         self.assertEqual(len(self.api.tasks), 1)
 
-    def test_someone_on_leave_or_a_wrong_category_is_refused_before_anything_is_sent(self):
+    def test_someone_on_leave_is_refused_and_a_wrong_category_is_made_to_fit(self):
         kajal = StaffMember.objects.get(external_id="kajal")
         r = self.md_client.post("/api/v1/delegations/", {"title": "x", "staff_id": kajal.id, "category_key": "other"}, format="json", HTTP_IDEMPOTENCY_KEY="gw-2")
         self.assertEqual(r.status_code, 422)
         self.assertEqual(r.json()["code"], "recipient_on_leave")
+        self.assertFalse(any(c[1] == "task.create" for c in self.api.calls))
+        # "TDS / Report" cannot go to the developer: the task still goes, on the shelf the panel allows him (Other).
+        # The person is who the work is for; the category is only where the panel files it (his rule, 25 Nov 2026).
         dev = StaffMember.objects.get(external_id="staff_24")
         r = self.md_client.post("/api/v1/delegations/", {"title": "x", "staff_id": dev.id, "category_key": "tds"}, format="json", HTTP_IDEMPOTENCY_KEY="gw-3")
-        self.assertEqual(r.status_code, 422)
-        self.assertEqual(r.json()["code"], "category_recipient_conflict")
-        self.assertFalse(any(c[1] == "task.create" for c in self.api.calls))
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual([c[2]["cat"] for c in self.api.calls if c[1] == "task.create"], ["other"])
+        # Nikki's own shelf is picked from the words when the asked-for one is not hers.
+        cats = {c["key"]: {**c, "department": c["dept"]} for c in self.api.categories}
+        nikki = {"key": "nikki", "department": "acc"}
+        self.assertEqual(gateway.fit_category(cats, nikki, {"category_key": "login", "title": "GST file bhej do"}), "tds")
+        self.assertEqual(gateway.fit_category(cats, nikki, {"category_key": "", "title": "Attendance form"}), "other")
+        self.assertEqual(gateway.fit_category(cats, {"key": "staff_25", "department": "admin"}, {"title": "x"}), "")
 
     def test_the_live_voice_line_knows_the_staff_panel(self):
         # The voice's briefing names the panel staff next to the team, and tells the voice never to refuse a name by
@@ -274,10 +282,11 @@ class GatewayTests(BaseCase):
         results = services.delegate_to_team(self.md, {"title": "Attendance form", "priority": "NORMAL"}, [s.id for s in draft_members],
                                             category_key="tds", description="sab ko bolo attendance form bhar do")
         self.assertEqual(sorted(results["assigned"]), ["NIKKI", "QTC Developer2"])
-        # The panel's own rule left QTC fed out (not in Other's list); the speaker hears that reason, not a "viewer" guess.
+        # No shelf of the panel can reach QTC fed; the speaker hears that, not a "viewer" guess.
         self.assertEqual([n["name"] for n in results["not_assigned"]], ["QTC fed"])
         self.assertIn("QTC fed", results["not_assigned"][0]["reason"])
-        self.assertEqual({c[2]["cat"] for c in self.api.calls if c[1] == "task.create"}, {"other"})
+        # Each person's own shelf: TDS / Report is Nikki's, the developer gets Other.
+        self.assertEqual({c[2]["to"]: c[2]["cat"] for c in self.api.calls if c[1] == "task.create"}, {"nikki": "tds", "staff_24": "other"})
         self.assertEqual(len(self.api.tasks), 2)
 
     def test_progress_in_taskpanel_reaches_jarvis_as_an_alert(self):

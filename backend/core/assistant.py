@@ -925,7 +925,10 @@ def _prepare_delegation(draft: dict, cmd: dict, user: User, address: str, addres
         due_at=due_at, due_date=draft["due_date"] or None,
     )
     try:
-        tp_client().validate(link, body)
+        checked = tp_client().validate(link, body)
+        fitted = str(((checked or {}).get("normalized") or {}).get("category_key") or "")
+        if fitted and fitted in valid_keys:
+            draft["category_key"] = fitted  # the shelf the panel files it on for this person; the card shows it
     except TaskPanelError as err:
         if err.status == 422 and err.code != "due_in_past":
             draft["needs_clarification"] = True

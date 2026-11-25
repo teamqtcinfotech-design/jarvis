@@ -2197,8 +2197,6 @@ def delegate_to_team(user: User, data: dict, staff_ids: list[int], *, category_k
         raise ServiceError("no_members", "There is no one to assign this to.", 422)
     if len(staff_ids) > MAX_TEAM_SIZE:
         raise ServiceError("team_too_large", f"A team task can go to at most {MAX_TEAM_SIZE} people at once.", 422)
-    if settings.TASKPANEL_MODE == "gateway":
-        category_key = "other"  # the only category with no department: the one that can go to everyone
     results = {"assigned": [], "pending": [], "not_assigned": []}
     # Everyone named gets one; the panel's own answer (accepted, or its reason) is what comes back per person.
     for person in staff_qs().filter(id__in=staff_ids).order_by("name"):

@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -76,6 +77,53 @@ def _name_of(value, fallback: str = "") -> str:
     if isinstance(value, dict):
         return str(_first(value, "name", default=fallback) or fallback)
     return fallback
+
+
+_WORD = re.compile(r"[a-z]+")
+_SMALL = {"not", "the", "and", "for", "or", "to", "of", "a", "an", "in", "on", "ko", "ka", "ki", "ke", "do", "de", "kar", "bhej"}
+# Words of a task that point at a category's name (the panel's shelves are named for client issues; his tasks are not).
+_HINTS = {"gst": "report", "tds": "report", "return": "report", "returns": "report", "ledger": "ledger", "statement": "statement",
+          "refund": "refund", "payout": "payout", "payment": "payment", "kyc": "kyc", "document": "documents", "documents": "documents",
+          "pan": "kyc", "aadhaar": "kyc", "call": "call", "phone": "call", "inform": "inform", "login": "login", "otp": "login",
+          "app": "app", "activation": "activation", "agreement": "agreement", "consent": "consent", "welcome": "welcome",
+          "onboarding": "onboarding", "profile": "profile", "renewal": "renewal", "itr": "itr", "roc": "roc", "meeting": "meeting",
+          "approval": "approval", "commission": "commission", "mapping": "mapping", "franchise": "franchise", "withdrawal": "withdrawal",
+          "slip": "slip", "hold": "hold", "release": "release", "email": "email", "mmt": "mmt", "dispatch": "dispatch"}
+
+
+def _fits(cat: dict, person: dict) -> bool:
+    """May the panel put a task of this category on this person? Its own list of people when it has one, else its
+    department (none = anyone)."""
+    allowed = cat.get("assignable_to") or []
+    if allowed:
+        return person["key"] in allowed
+    return not cat.get("department") or cat["department"] == person["department"]
+
+
+def fit_category(cats: dict, person: dict, data: dict) -> str:
+    """The panel shelf a task for this person goes on. The person is who the work is for; the category is only where
+    the panel files it (his rule, 25 Nov 2026: "Nikki is staff, just send it to Nikki"). The one asked for, when the
+    panel lets it reach them; else the one of their own shelves whose name the task's words point at; else Other when
+    they may take it; else the first of their own shelves; "" when nothing can reach them (the panel's answer then
+    says so)."""
+    asked = str(data.get("category_key") or "")
+    if asked in cats and _fits(cats[asked], person):
+        return asked
+    ours = [c for c in cats.values() if _fits(c, person)]
+    if not ours:
+        return ""
+    words = {w for w in _WORD.findall(f"{data.get('title') or ''} {data.get('description') or ''}".lower()) if w not in _SMALL}
+    words |= {_HINTS[w] for w in words if w in _HINTS}
+
+    def score(cat: dict) -> int:
+        return len(words & {w for w in _WORD.findall(str(cat.get("name") or "").lower()) if w not in _SMALL})
+
+    best = max(ours, key=score)
+    if score(best) > 0:
+        return best["key"]
+    if "other" in cats and _fits(cats["other"], person):
+        return "other"
+    return ours[0]["key"]
 
 
 class GatewayTaskPanel:
@@ -143,7 +191,7 @@ class GatewayTaskPanel:
     def directory(self, link) -> dict:
         """The staff and the categories, in the shape sync.sync_directory stores: key, name, department, designation,
         active, on_leave, leave_until (plus role, level, open_tasks). Hidden keys (settings.TASKPANEL_HIDE_KEYS:
-        test logins, company logins) are left out; a viewer cannot receive work, so counts as not active."""
+        test logins, company logins) are left out; everyone else is listed, whatever the panel's role flag says."""
         _check_link(link)
         cached = self._directory
         if cached["data"] is not None and cached["at"] and time.monotonic() - cached["at"] < settings.TASKPANEL_DIRECTORY_TTL_SECONDS:
@@ -186,7 +234,8 @@ class GatewayTaskPanel:
 
     def validate(self, link, body: dict) -> dict:
         """TaskPanel's own creation rules, checked here first so a draft is questioned before anything is sent:
-        the person is known, active and not on leave; the category exists and may go to that person."""
+        the person is known and not on leave; the category is made to fit the person (see fit_category) and comes
+        back in "normalized", which is what command() sends."""
         _check_link(link)
         data = body.get("data") or {}
         directory = self.directory(link)
@@ -207,14 +256,12 @@ class GatewayTaskPanel:
             except ValueError:
                 until_label = str(until)
             raise TaskPanelError(422, "recipient_on_leave", f"{person['name']} is on leave until {until_label}.")
-        cat = cats.get(str(data.get("category_key") or ""))
-        if not cat:
-            raise TaskPanelError(422, "category_unknown", "Choose a valid task category.")
-        allowed = cat.get("assignable_to") or []
-        if (allowed and person["key"] not in allowed) or (not allowed and cat["department"] and cat["department"] != person["department"]):
+        fitted = fit_category(cats, person, data)
+        if not fitted:
             raise TaskPanelError(422, "category_recipient_conflict",
-                                 f"{cat['name']} tasks go to {cat['department'] or 'its own department'}, but {person['name']} is in "
-                                 f"{person['department'] or 'another department'}. Use Other, or choose someone from {cat['department']}.")
+                                 f"The panel has no task category that can go to {person['name']}"
+                                 f"{' (' + person['department'] + ')' if person.get('department') else ''}.")
+        data = {**data, "category_key": fitted}
         if data.get("priority") not in {"normal", "high", "urgent"}:
             raise TaskPanelError(422, "priority_invalid", "Priority must be Normal, High or Urgent.")
         if data.get("due_at"):
@@ -303,7 +350,7 @@ class GatewayTaskPanel:
         if command.get("type") != "task.create":
             raise TaskPanelError(422, "unsupported_command", "Only task.create is enabled in this phase.")
         data = command.get("data") or {}
-        self.validate(link, {"data": data})  # the known refusals (leave, department) in JARVIS's words, before a call
+        data = self.validate(link, {"data": data})["normalized"]  # leave refused in JARVIS's words; the category made to fit
         body = {
             "command_id": str(command["command_id"]),
             "cat": str(data.get("category_key") or settings.TASKPANEL_DEFAULT_CATEGORY),
