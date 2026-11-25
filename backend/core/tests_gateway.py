@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from django.test import override_settings
 from django.utils import timezone
 
-from core import services
+from core import livevoice, services
 from core import timeutils as tu
 from core.models import Alert, IntegrationCommand, SharedTask, StaffMember, TaskPanelLink
 from core.taskpanel import gateway, sync
@@ -257,6 +257,15 @@ class GatewayTests(BaseCase):
         self.assertEqual(r.status_code, 422)
         self.assertEqual(r.json()["code"], "category_recipient_conflict")
         self.assertFalse(any(c[1] == "task.create" for c in self.api.calls))
+
+    def test_the_live_voice_line_knows_the_staff_panel(self):
+        # The voice's briefing names the panel staff next to the team, and tells the voice never to refuse a name by
+        # itself ("team mein QTC Developer 2 naam ka koi nahi hai" came from the voice, not the server; his test, 25 Nov 2026).
+        text = livevoice.instructions_for(self.md, services.ai_context(self.md))
+        self.assertIn("QTC Developer2 (Admin)", text)
+        self.assertIn("NIKKI (Accounts)", text)
+        self.assertIn("QTC fed (Admin)", text)                    # the viewer is in the complete list too
+        self.assertIn("Never say yourself that someone is not on the team", text)
 
     def test_everyone_gets_one_task_each_in_category_other_and_leave_is_skipped(self):
         draft_members = [s for s in services.team_members("all")[0]]

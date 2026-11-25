@@ -530,6 +530,9 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
     team = ", ".join(
         f"{m['name']} ({m['title']}{', ' + m['department'] if m.get('department') else ''}, {_he(m.get('gender', ''))}"
         f"{', the MD' if m.get('is_md') else ''})" for m in ctx.get("team", []))
+    # The company's staff panel (his rule, 25 Nov 2026: the complete list): the voice must know these names are real
+    # people work can go to, so it never refuses "QTC Developer 2" or "Mansi" by itself.
+    staff = ", ".join(f"{s['name']} ({s['department']})" if s.get("department") else s["name"] for s in ctx.get("staff", [])[:60]) or "none"
     depts = "; ".join(f"{d['name']}: {', '.join(d['members'])}" for d in ctx.get("departments", []) if d.get("members")) or "none yet"
     sections = ", ".join(ctx.get("sections", [])) or "none yet"
     contacts = "; ".join(f"{c['name']}" + (f" ({c['who']})" if c.get("who") else "") for c in ctx.get("contacts", [])[:40]) or "none"
@@ -544,6 +547,8 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
         + (f" (in Hindi: \"{address_hi}\")" if address_hi != address else "") + ".",
         f"Now: {now.strftime('%A %d %B %Y, %H:%M')} (India).",
         f"The team (work and messages go to them by name or by job): {team or 'nobody else yet'}.",
+        f"The company's staff panel (work goes to them by name through give_work, exactly like the team; the server sends it to "
+        f"their panel): {staff}.",
         f"Departments: {depts}. Work sections (folders): {sections}.",
         f"Outside people the speaker has told you about: {contacts}. Things to remember about the speaker: {memories}.",
         "The speaker's open items (id, title, when). Overdue: " + (_items_line(open_items.get("overdue", [])) or "none")
@@ -590,9 +595,11 @@ def instructions_for(user: User, ctx: dict, include_private: bool = True) -> str
         "speaker they are busy or not free. 'Sharmaji wali meeting abhi kar do' is change with now = true. 'Nikki ko bolo Sharmaji wali "
         "meeting abhi arrange karwa de' is change with ask_person = Nikki and now = true: the meeting stays until Nikki confirms.",
         "Fill the form in Latin letters (Roman Hinglish or English), the way the team writes on WhatsApp. People: the name as on the "
-        "team list (a name heard slightly wrong means the closest team member), or their job, 'me' for the speaker, 'everyone' or a "
-        "department for a group. when_words: the speaker's own time words, exactly as said, in Latin letters; never turn them into a "
-        "date yourself. said: the whole sentence as heard.",
+        "team list or the staff panel list (a name heard slightly wrong means the closest person on either list), or their job, 'me' "
+        "for the speaker, 'everyone' or a department for a group. A name on neither list still goes into the tool exactly as heard: "
+        "the server knows who it is, or asks 'did you mean…?'. Never say yourself that someone is not on the team or cannot be "
+        "found, and never leave out one person's item from a sentence. when_words: the speaker's own time words, exactly as said, "
+        "in Latin letters; never turn them into a date yourself. said: the whole sentence as heard.",
         "",
         "Questions about the world (weather, news, prices, general knowledge): answer yourself, briefly, with web search when needed. "
         "Nobody's personal items are ever read to anyone else: if asked about someone else's personal things, say they are private. "
