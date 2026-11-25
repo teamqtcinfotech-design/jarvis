@@ -267,6 +267,20 @@ class GatewayTests(BaseCase):
         self.assertEqual(gateway.fit_category(cats, nikki, {"category_key": "", "title": "Attendance form"}), "other")
         self.assertEqual(gateway.fit_category(cats, {"key": "staff_25", "department": "admin"}, {"title": "x"}), "")
 
+    def test_the_brain_sees_a_staff_members_panel_tasks_by_name(self):
+        # "Nikki ke paas kya kya hai?": the panel's own list with titles, whoever gave them (his live test, 25 Nov 2026).
+        from core import ask
+        dev = StaffMember.objects.get(external_id="staff_24")
+        r = self.md_client.post("/api/v1/delegations/", {"title": "Check the test server", "staff_id": dev.id, "category_key": "other"},
+                                format="json", HTTP_IDEMPOTENCY_KEY="gw-person")
+        self.assertEqual(r.status_code, 201, r.content)
+        self.api.add_task("Fix the login page", "staff_24")   # made in the panel itself, not through JARVIS
+        found = ask.run_lookup(ask._Facts(self.md, True), "person", {"name": "QTC Developer2"})["found"]  # noqa: SLF001
+        entry = next(e for e in found if e["name"] == "QTC Developer2")
+        self.assertEqual(entry["open_tasks_in_panel"], 2)
+        self.assertEqual({t["title"] for t in entry["panel_tasks"]}, {"Check the test server", "Fix the login page"})
+        self.assertEqual(entry["given_by_speaker_through_jarvis_open"], 1)
+
     def test_the_live_voice_line_knows_the_staff_panel(self):
         # The voice's briefing names the panel staff next to the team, and tells the voice never to refuse a name by
         # itself ("team mein QTC Developer 2 naam ka koi nahi hai" came from the voice, not the server; his test, 25 Nov 2026).

@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from . import ai_brain, ai_usage, datacards, scheduling, services
 from . import timeutils as tu
+from .taskpanel.client import get_client as tp_client
 from .models import AiUsage, Alert, Contact, Memory, StaffMember, Status
 
 log = logging.getLogger("jarvis.ask")
@@ -277,11 +278,24 @@ def _person(f: _Facts, a: dict) -> dict:
         f.person_named = u.spoken_name
     for s in StaffMember.objects.filter(active=True, name__icontains=name.split()[0])[:5]:
         given = [i for i in f.dash.get("delegated") or [] if (i.get("assignee") or {}).get("staff_id") == s.id and i["status"] not in (Status.COMPLETED, Status.CANCELLED)]
-        out["found"].append({"name": s.name, "where": "staff directory (company panel)", "department": s.department,
-                             "designation": s.designation or s.level, "on_leave": s.on_leave,
-                             "leave_until": s.leave_until.isoformat() if s.leave_until else "",
-                             "open_tasks_in_panel": s.open_tasks, "given_by_speaker_open": len(given),
-                             "given": [f.brief(i) for i in given[:5]]})
+        entry = {"name": s.name, "where": "staff directory (company panel)", "department": s.department,
+                 "designation": s.designation or s.level, "on_leave": s.on_leave,
+                 "leave_until": s.leave_until.isoformat() if s.leave_until else "",
+                 "open_tasks_in_panel": s.open_tasks, "given_by_speaker_through_jarvis_open": len(given),
+                 "given_through_jarvis": [f.brief(i) for i in given[:5]]}
+        # Their tasks as the panel holds them now (titles, status, who gave them), whoever gave them and from
+        # wherever: the panel is the one record (his live test, 25 Nov 2026: "what are those?" must name them).
+        client = tp_client()
+        if hasattr(client, "person_tasks"):
+            try:
+                rows = [t for t in client.person_tasks(s.external_id, status="all") if t.get("status") != "done"]
+                entry["panel_tasks"] = [{"id": t.get("legacy_id") or t.get("uuid"), "title": t.get("title"), "status": t.get("status"),
+                                         "priority": t.get("priority"), "due": t.get("due_at") or "", "from": t.get("sender_name") or t.get("sender_key") or ""}
+                                        for t in rows[:10]]
+                entry["open_tasks_in_panel"] = len(rows)
+            except Exception as exc:  # noqa: BLE001 — the panel is another server; its failure is a fact for the model
+                entry["panel_tasks_error"] = f"the panel could not be read: {type(exc).__name__}"
+        out["found"].append(entry)
         f.person_named = f.person_named or s.name
     out["contacts"] = [{"name": c.name, "who": c.note} for c in Contact.objects.filter(owner=f.user, name__icontains=name.split()[0])[:3]]
     out["memories"] = [m.text for m in Memory.objects.filter(owner=f.user, text__icontains=name.split()[0])[:5]]
