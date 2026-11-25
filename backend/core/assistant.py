@@ -705,8 +705,10 @@ def _route_intent(user: User, cmd: dict, text: str) -> str:
             if all(p.is_md for p in people) and not user.is_md:
                 return "request_for_md"
             intent = "assign_to_person"
-        elif intent == "assign_to_person" and len(names) == 1 and services.resolve_staff(names[0])[0]:
-            intent = "assign_to_staff"  # not on the team, but a TaskPanel staff member has that name
+        elif intent == "assign_to_person" and len(names) == 1 and any(services.resolve_staff(names[0])):
+            # Not on the team, but a TaskPanel staff member has that name (or one close to it: the staff path then
+            # takes the one person it clearly is, or asks "did you mean…?", never "nobody called that on the team").
+            intent = "assign_to_staff"
         elif intent == "assign_to_staff" and any(st in ("known", "close", "ambiguous") for _, st in team_hits):
             intent = "assign_to_person"
     # A meeting or call WITH someone on the team is the speaker's meeting with that person (they are told and both

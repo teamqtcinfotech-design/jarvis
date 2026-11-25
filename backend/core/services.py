@@ -2086,24 +2086,36 @@ def categories_qs():
 def resolve_staff(name: str) -> tuple[list[StaffMember], list[StaffMember]]:
     """Return (matches, suggestions) from the live directory.
 
-    Only an exact name or whole-word match counts as a match ("QTC Developer" never matches
-    "QTC Developer2"). A partial match ("Ram" -> Ramesh) is only a suggestion the user must confirm.
+    An exact name, a whole-word match, or the start of exactly one name counts as a match: the microphone writes
+    "QTC Developer 2" for "QTC Developer2" and he says "QTC Developer" for the only developer (his test, 25 Nov
+    2026: the right person is taken and said back by the real name, never "nobody called that"). A partial word
+    ("Ram" -> Ramesh) is only a suggestion the user must confirm.
     """
-    norm = " ".join((name or "").lower().split())
+    norm = _staff_key(name)
     if not norm:
         return [], []
     active = list(staff_qs())
-    exact = [s for s in active if " ".join(s.name.lower().split()) == norm]
+    keyed = [(s, _staff_key(s.name)) for s in active]
+    exact = [s for s, k in keyed if k == norm]
     if exact:
         return exact, []
     tokens = norm.split()
-    whole_words = [s for s in active if all(t in s.name.lower().split() for t in tokens)]
+    whole_words = [s for s, k in keyed if all(t in k.split() for t in tokens)]
     if whole_words:
         return whole_words, []
+    starts = [s for s, k in keyed if k.startswith(norm + " ") or (k.startswith(norm) and k[len(norm):len(norm) + 1].isdigit())]
+    if len(starts) == 1:
+        return starts, []
     if len(tokens[0]) < 3:
         return [], []
-    partial = [s for s in active if any(w.startswith(tokens[0]) for w in s.name.lower().split())]
+    partial = [s for s, k in keyed if any(w.startswith(tokens[0]) for w in k.split())]
     return [], partial[:5]
+
+
+def _staff_key(name: str) -> str:
+    """A staff name as the panel writes it: lower case, one space between words, a number joined to its word
+    ("QTC Developer 2" and "QTC Developer2" are the same key)."""
+    return re.sub(r"\s+(?=\d)", "", " ".join((name or "").lower().split()))
 
 
 def delegate_to_staff(user: User, data: dict, staff: StaffMember, *, category_key: str = "",

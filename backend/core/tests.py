@@ -350,6 +350,20 @@ class TaskPanelRulesTests(BaseCase):
         matches, _ = services.resolve_staff("QTC Developer2")
         self.assertEqual([s.external_id for s in matches], ["staff_108"])
 
+    def test_a_name_heard_with_a_space_is_the_same_developer(self):
+        # The microphone writes "QTC Developer 2" and the model may call it work for "a person": it is QTC Developer2
+        # of the staff panel, taken as such, never "I don't know anyone called that on the team" (his test, 25 Nov 2026).
+        matches, _ = services.resolve_staff("QTC Developer 2")
+        self.assertEqual([s.external_id for s in matches], ["staff_108"])
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="assign_to_person", title="Send the test file",
+                                                                       staff_name="QTC Developer 2", engine="ai")):
+            draft = self._interpret(self.md_client, "QTC Developer 2 ko bolo test file bheje")
+        self.assertEqual((draft["action"], draft["needs_clarification"]), ("delegation", False), draft["spoken_reply"])
+        self.assertEqual(draft["staff"]["name"], "QTC Developer2")
+        # A word two people share ("QTC") is asked about as before; a cut-off word ("Ramesh K") is never taken blind.
+        self.assertEqual(len(services.resolve_staff("QTC")[0]), 2)
+        self.assertEqual(services.resolve_staff("Ramesh K")[0], [])
+
     def test_partial_name_is_only_a_suggestion(self):
         matches, suggestions = services.resolve_staff("Ram")
         self.assertEqual(matches, [])
