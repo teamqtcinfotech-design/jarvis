@@ -2179,8 +2179,7 @@ def own_actor_keys() -> set[str]:
 def team_members(team_name: str) -> tuple[list[StaffMember], list[StaffMember], str]:
     """Resolve 'all' or a department name to (members, skipped_on_leave, label)."""
     name = " ".join((team_name or "").lower().split())
-    # Viewers are listed in the directory but the panel will not take work for them, so "everyone" never names them.
-    active = [s for s in staff_qs().exclude(role="viewer") if s.external_id not in own_actor_keys()]
+    active = [s for s in staff_qs() if s.external_id not in own_actor_keys()]
     if name in ALL_TEAM_WORDS:
         chosen, label = active, "the whole team"
     else:
@@ -2201,8 +2200,8 @@ def delegate_to_team(user: User, data: dict, staff_ids: list[int], *, category_k
     if settings.TASKPANEL_MODE == "gateway":
         category_key = "other"  # the only category with no department: the one that can go to everyone
     results = {"assigned": [], "pending": [], "not_assigned": []}
-    # A viewer in the panel cannot receive work there: left out of "everyone" rather than refused one by one.
-    for person in staff_qs().filter(id__in=staff_ids).exclude(role="viewer").order_by("name"):
+    # Everyone named gets one; the panel's own answer (accepted, or its reason) is what comes back per person.
+    for person in staff_qs().filter(id__in=staff_ids).order_by("name"):
         try:
             task, command = delegate_to_staff(user, data, person, category_key=category_key, description=description)
         except ServiceError as err:

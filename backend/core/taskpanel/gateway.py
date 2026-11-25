@@ -197,9 +197,9 @@ class GatewayTaskPanel:
             raise TaskPanelError(422, "title_required", "A title is required.")
         if not person or not person["active"]:
             raise TaskPanelError(422, "recipient_not_found", "That staff member is not in the TaskPanel directory.")
-        if person.get("role") == "viewer" or not person.get("panel_active", True):
-            why = "a viewer in the panel" if person.get("role") == "viewer" else "marked inactive in the panel"
-            raise TaskPanelError(422, "recipient_inactive", f"{person['name']} is {why}, so the panel will not take a task for them.")
+        # The panel's role / active flags are not trusted as a refusal here (25 Nov 2026: live reports Nikki, Mansi,
+        # Kajal… as "viewer, inactive" while showing open tasks for them). The panel itself decides on task.create;
+        # its own answer is what the speaker hears.
         if person["on_leave"]:
             until = person.get("leave_until")
             try:

@@ -204,12 +204,13 @@ class GatewayTests(BaseCase):
         self.assertNotIn("staff_26", by_key)                       # hidden: a company login, not a person
         self.assertEqual(by_key["nikki"].department, "Accounts")
         self.assertEqual((by_key["nikki"].level, by_key["nikki"].role, by_key["nikki"].open_tasks), ("Senior", "exec", 2))
-        # A viewer is in the complete list (his rule, 25 Nov 2026) but the panel will not take work for them.
+        # A "viewer" is in the complete list and JARVIS does not refuse work for them by itself: the live panel marks
+        # people who plainly hold tasks as "viewer, inactive" (25 Nov 2026), so the panel's own answer decides.
         self.assertEqual((by_key["staff_25"].active, by_key["staff_25"].role), (True, "viewer"))
         with self.assertRaises(gateway.TaskPanelError) as ctx:
-            self.client_obj.validate(sync.link_for(self.md), {"data": {"title": "Test file", "assignee_key": "staff_25"}})
-        self.assertEqual(ctx.exception.code, "recipient_inactive")
-        self.assertIn("viewer", ctx.exception.message)
+            self.client_obj.validate(sync.link_for(self.md), {"data": {"title": "Test file", "assignee_key": "staff_25",
+                                                                        "category_key": "other", "priority": "normal"}})
+        self.assertEqual(ctx.exception.code, "category_recipient_conflict")   # the panel's own rule, never a "viewer" guess
         self.assertTrue(by_key["kajal"].on_leave)
         # The MD's own link exists by itself in gateway mode, so the ledger and the feed have their actor.
         link = sync.link_for(self.md)
@@ -269,10 +270,13 @@ class GatewayTests(BaseCase):
 
     def test_everyone_gets_one_task_each_in_category_other_and_leave_is_skipped(self):
         draft_members = [s for s in services.team_members("all")[0]]
-        self.assertEqual({s.external_id for s in draft_members}, {"nikki", "staff_24"})  # kajal on leave, bijender is the MD, viewer out
+        self.assertEqual({s.external_id for s in draft_members}, {"nikki", "staff_24", "staff_25"})  # kajal on leave, bijender is the MD
         results = services.delegate_to_team(self.md, {"title": "Attendance form", "priority": "NORMAL"}, [s.id for s in draft_members],
                                             category_key="tds", description="sab ko bolo attendance form bhar do")
         self.assertEqual(sorted(results["assigned"]), ["NIKKI", "QTC Developer2"])
+        # The panel's own rule left QTC fed out (not in Other's list); the speaker hears that reason, not a "viewer" guess.
+        self.assertEqual([n["name"] for n in results["not_assigned"]], ["QTC fed"])
+        self.assertIn("QTC fed", results["not_assigned"][0]["reason"])
         self.assertEqual({c[2]["cat"] for c in self.api.calls if c[1] == "task.create"}, {"other"})
         self.assertEqual(len(self.api.tasks), 2)
 
