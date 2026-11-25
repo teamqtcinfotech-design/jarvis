@@ -1504,6 +1504,43 @@ def panel_kind(words: str) -> str:
     return ""
 
 
+# The report route's named filters (seen live, 25 Nov 2026): the panel counts with them (result_mode=count) and lists
+# with them. Values the panel accepted: partners account_status active|inactive, payment_status active|pending|closed|
+# none; franchises account_status active|inactive, agreement_status pending, login_status never. KYC and documents are
+# never served by the panel's privacy rules.
+PANEL_FILTERS = ("account_status", "payment_status", "kyc_status", "agreement_status", "email_status", "login_status",
+                 "video_status", "record_status", "document_state", "renewal_state", "company_type", "house_status",
+                 "task_status", "request_stage", "date_field", "window_days")
+
+
+def panel_count(user, kind_words: str, filters: dict | None = None, period: dict | None = None) -> dict:
+    """How many records a panel report holds under the filters given, from the panel itself (result_mode=count), with
+    no rows fetched: {"kind", "total", "filters"} or {"error"}. MD only."""
+    if not user.is_md:
+        return {"error": "the partner and franchise records are only for the MD"}
+    from .taskpanel.client import TaskPanelError, get_client  # here, not at the top: the client reads settings
+    client = get_client()
+    if not hasattr(client, "report"):
+        return {"error": "the company panel is not connected on this server"}
+    kind = panel_kind(kind_words or "")
+    if not kind:
+        return {"error": f"which report: {_PANEL_EXAMPLES}?"}
+    params: dict = {"result_mode": "count"}
+    for k, v in (filters or {}).items():
+        if k in PANEL_FILTERS and v:
+            params[k] = str(v)
+    for k in ("from", "to"):
+        if (period or {}).get(k):
+            params[k] = str(period[k])
+    try:
+        data = client.report(kind, params)
+    except TaskPanelError as err:
+        return {"error": err.message, "kind": kind, "filters": {k: v for k, v in params.items() if k != "result_mode"}}
+    total = data.get("total") if isinstance(data.get("total"), int) else None
+    return {"kind": kind, "label": _PANEL_LABEL.get(kind, kind.replace("_", " ").title()), "total": total,
+            "filters": {k: v for k, v in params.items() if k != "result_mode"}, "as_of": data.get("as_of")}
+
+
 def _panel_view(user, p: dict) -> dict:
     address, address_hi = _addr(user)
     empty = _table("panel", "Company panel", [], [("title", "Name")], layout="table")
@@ -1526,6 +1563,10 @@ def _panel_view(user, p: dict) -> dict:
         params["from"] = p["from"].isoformat()
     if p.get("to"):
         params["to"] = p["to"].isoformat()
+    # The panel's own filters ("kitne partners inactive hain"): passed through as named; the panel says if a value is wrong.
+    for k in PANEL_FILTERS:
+        if p.get(k):
+            params[k] = str(p[k])
     label = _PANEL_LABEL.get(kind, kind.replace("_", " ").title())
     try:
         data = client.report(kind, params)

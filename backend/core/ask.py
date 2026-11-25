@@ -75,10 +75,13 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "search", "description": "Find by words across everything: tasks and meetings (any list the speaker may see), alerts and messages of the last 30 days, contacts, memories, the team and the staff directory.",
      "input_schema": {"type": "object", "properties": {"words": {"type": "string"}}, "required": ["words"]}},
-    {"name": "panel", "description": "The company panel's records (MD only, view only): partners, partner_directory, partner_pipeline, partner_ledger, franchises, franchise_requests, franchise_onboarding, franchise_payments, franchise_targets, franchise_pipeline, franchise_commissions, payments, withdrawal_payouts, commissions, agreements, tds_sheet, itr_statistics; narrowed by words (a name, an ID, a city) and a period.",
+    {"name": "panel", "description": "The company panel's records (MD only, view only): partners, partner_directory, partner_pipeline, partner_ledger, franchises, franchise_requests, franchise_onboarding, franchise_payments, franchise_targets, franchise_pipeline, franchise_commissions, payments, withdrawal_payouts, commissions, agreements, tds_sheet, itr_statistics; narrowed by words (a name, an ID, a city) and a period. With filters or count_only the PANEL COUNTS for you ('kitne partners inactive hain' = report partners, filters {account_status: inactive}) and returns the total: never count rows yourself (a page holds 20 of thousands). Accepted so far: partners account_status active|inactive, payment_status active|pending|closed|none; franchises account_status active|inactive, agreement_status pending, login_status never. KYC and documents are never served by the panel: say so plainly when asked.",
      "input_schema": {"type": "object", "properties": {
          "report": {"type": "string"}, "words": {"type": "string"},
-         "from": {"type": "string", "description": "YYYY-MM-DD"}, "to": {"type": "string", "description": "YYYY-MM-DD"}}, "required": ["report"]}},
+         "from": {"type": "string", "description": "YYYY-MM-DD"}, "to": {"type": "string", "description": "YYYY-MM-DD"},
+         "count_only": {"type": "boolean", "description": "true = only the total under the filters, no rows"},
+         "filters": {"type": "object", "description": "the panel's own filters: account_status, payment_status, agreement_status, login_status, email_status, kyc_status, record_status", "additionalProperties": {"type": "string"}}},
+         "required": ["report"]}},
     {"name": "counts", "description": "How much is open on the speaker's list (total, late, due today, later or undated; official and personal for the MD), what they are waiting on from others, and (MD) how much open work each team member holds.",
      "input_schema": {"type": "object", "properties": {}}},
 ]
@@ -353,6 +356,10 @@ def _search(f: _Facts, a: dict) -> dict:
 def _panel(f: _Facts, a: dict) -> dict:
     if not f.user.is_md:
         return {"error": "the company panel is only for the MD"}
+    filters = {k: str(v) for k, v in (a.get("filters") or {}).items() if v} if isinstance(a.get("filters"), dict) else {}
+    if a.get("count_only") or filters:
+        # The panel counts under its own filters (result_mode=count): the exact total, no rows, no guessing.
+        return datacards.panel_count(f.user, str(a.get("report") or ""), filters, {k: a.get(k) for k in ("from", "to") if a.get(k)})
     params: dict = {"group": str(a.get("report") or "")}
     if a.get("words"):
         params["words"] = str(a["words"])

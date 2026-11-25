@@ -3009,6 +3009,68 @@ class MeetingJugglingTests(BaseCase):
         new = next(t for t in PrivateTask.objects.filter(priority=Priority.URGENT) if t.title == "Priority meeting")  # the title is encrypted
         self.assertEqual(tu.to_local(new.due_at).strftime("%H:%M"), "11:00")
 
+    def test_moving_a_meeting_onto_another_asks_once_and_yes_moves_the_other_on(self):
+        # "CA wali ko 11 baje kar do" when 11 is Aman's: the question names the one that would move; "haan" moves it.
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        lunch = self._meeting("Lunch with Mehta CA", day, time(14, 0))
+        d = self.turn(self.md_client, "lunch with Mehta CA wali ko 11 baje kar do",
+                      _cmd(intent="change_task", target_refs=[str(lunch.id)], changed_fields=["due_time"], due_time="11:00"))
+        self.assertIn("you already have Aman review at 11 AM", d["show"], d)
+        self.assertIn("Shall I move Aman review to 11:30 AM?", d["show"], d)
+        r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
+        self.assertEqual(r["action"], "saved", r)
+        self.assertTrue(r["show"].startswith("Done: Lunch with Mehta CA"), r["show"])
+        self.assertIn("Aman review moved to 11:30 AM", r["show"])
+        aman.refresh_from_db()
+        lunch.refresh_from_db()
+        self.assertEqual((tu.to_local(lunch.due_at).strftime("%H:%M"), tu.to_local(aman.due_at).strftime("%H:%M")), ("11:00", "11:30"))
+
+    def test_adjust_the_other_in_his_own_words(self):
+        # "Koi baat nahi, CA wali ko 11 kar do aur Aman wali kahin aur adjust kar do": the moved one takes 11, Aman moves on.
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(11, 0))
+        lunch = self._meeting("Lunch with Mehta CA", day, time(14, 0))
+        self.turn(self.md_client, "lunch with Mehta CA wali ko 11 baje kar do",
+                  _cmd(intent="change_task", target_refs=[str(lunch.id)], changed_fields=["due_time"], due_time="11:00"))
+        r = self.turn(self.md_client, "koi baat nahi, CA wali ko 11 baje kar do aur Aman wali ko kahin aur adjust kar do",
+                      _cmd(intent="confirm_pending", setting_value="", due_time="11:00"))
+        self.assertEqual(r["action"], "saved", r)
+        aman.refresh_from_db()
+        lunch.refresh_from_db()
+        self.assertEqual((tu.to_local(lunch.due_at).strftime("%H:%M"), tu.to_local(aman.due_at).strftime("%H:%M")), ("11:00", "11:30"))
+        # One undo brings both back.
+        r = self.turn(self.md_client, "undo", _cmd(intent="undo"))
+        self.assertIn("Undone", r["show"])
+        aman.refresh_from_db()
+        lunch.refresh_from_db()
+        self.assertEqual((tu.to_local(lunch.due_at).strftime("%H:%M"), tu.to_local(aman.due_at).strftime("%H:%M")), ("14:00", "11:00"))
+
+    def test_two_moves_by_the_clock_in_one_breath_are_done_at_once(self):
+        # "Saade das wali ko 11 baje kar do aur uske baad wali ko 2 baje": both named by their time, both moved, one line.
+        day = _workday(2)
+        aman = self._meeting("Aman review", day, time(10, 30))
+        sharma = self._meeting("Sharma call", day, time(13, 0))
+        day_word = "parso" if day == tu.today_local() + timedelta(days=2) else "kal" if day == tu.today_local() + timedelta(days=1) else ""
+        r = self.turn(self.md_client, f"{day_word} saade das wali ko 11 baje kar do aur uske baad wali ko 2 baje".strip(),
+                      _cmd(intent="change_task", changed_fields=["due_time"], due_time="11:00"))
+        self.assertEqual(r["action"], "saved", r)
+        self.assertIn("Aman review at 11 AM", r["show"])
+        self.assertIn("Sharma call at 2 PM", r["show"])
+        aman.refresh_from_db()
+        sharma.refresh_from_db()
+        self.assertEqual((tu.to_local(aman.due_at).strftime("%H:%M"), tu.to_local(sharma.due_at).strftime("%H:%M")), ("11:00", "14:00"))
+
+    def test_which_one_is_never_asked_a_third_time(self):
+        day = _workday(2)
+        self._meeting("Aman review", day, time(11, 0))
+        self._meeting("Sharma call", day, time(13, 0))
+        d = self.turn(self.md_client, "meeting ka time badal do", _cmd(intent="change_task", changed_fields=["due_time"], due_time="15:00"))
+        self.assertIn("which", d["show"].lower())
+        d = self.turn(self.md_client, "wo wali", _cmd(intent="change_task", changed_fields=["due_time"], due_time="15:00"))
+        self.assertIn("leave it", d["show"], d)
+        self.assertNotIn("which", d["show"].lower())
+
     def test_usko_wahin_rehne_do_keeps_the_other_and_moves_the_new_one(self):
         day = _workday(2)
         aman = self._meeting("Aman review", day, time(11, 0))

@@ -301,6 +301,87 @@ def _pick_choice(text: str, items: list[dict], by_words: bool = True) -> list[di
     return []
 
 
+# An item named by its clock time (25 Nov 2026): "saade das wali ko 11 baje kar do", "4 baje wali hata do", "uske
+# baad wali ko 1 baje". The words before "wali" are read as a time, the item at that time is the one meant (today's
+# first, else the soonest ahead), "uske baad wali" is the next one on that day, and "ko <time>" after it is its new time.
+_TIME_TARGET = re.compile(r"(.{0,22}?)\s*(?:ki|ke|ko)?\s*(?:wali|wala|waali|waala|वाली|वाला)\b", re.IGNORECASE)
+_NEXT_WALI = re.compile(r"\b(?:us|is|uss|iss)\s*ke\s+baad\s+wal[ai]\b|उसके बाद वाल[ाी]|इसके बाद वाल[ाी]", re.IGNORECASE)
+_NEW_TIME = re.compile(r"\bko\b([^,;]{0,22})", re.IGNORECASE)
+# "kahin aur" / "kahi aur" ("somewhere else") is not a join between two instructions.
+_CLAUSE_SPLIT = re.compile(r"\s*(?:,|;|(?<!kahin )(?<!kahi )\baur\b|\band\b|\bphir\b|\bfir\b|और|फिर)\s*", re.IGNORECASE)
+
+
+def _starts(item: dict):
+    start = item.get("scheduled_start") or item.get("due_at")
+    try:
+        return tu.to_local(datetime.fromisoformat(start)) if start else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _time_targets(text: str, user: User) -> list[tuple[dict, str]]:
+    """[(item, new HH:MM or ""), ...] in the order said, for every clause that names an item by its time."""
+    full = _full_items(user)
+    timed = [(s, it) for it in full.values() if (s := _starts(it)) is not None]
+    low = hinglish_parser._hours_as_digits(text.lower())  # noqa: SLF001 — "saade das" -> "saade 10", as the parser reads it
+    today = tu.today_local()
+    day = None
+    if re.search(r"\bparso\b|परसों", low):
+        day = today + timedelta(days=2)
+    elif re.search(r"\bkal\b|कल", low):
+        day = today + timedelta(days=1)
+    elif re.search(r"\baaj\b|आज", low):
+        day = today
+    out: list[tuple[dict, str]] = []
+    prev = None
+    for clause in _CLAUSE_SPLIT.split(low):
+        m = _TIME_TARGET.search(clause)
+        if not m:
+            continue
+        target = None
+        if _NEXT_WALI.search(clause) and prev is not None:
+            p_start = _starts(prev)
+            after = sorted((s, it) for s, it in timed if p_start is not None and s.date() == p_start.date() and s > p_start and it["id"] != prev["id"])
+            target = after[0][1] if after else None
+        else:
+            hhmm, _explicit = hinglish_parser._extract_time(m.group(1), None, [])  # noqa: SLF001 — the parser's own clock reading
+            if hhmm:
+                cands = sorted((s, it) for s, it in timed if s.strftime("%H:%M") == hhmm and (day is None or s.date() == day))
+                if day is None and len(cands) > 1:
+                    todays = [c for c in cands if c[0].date() == today]
+                    ahead = [c for c in cands if c[0] >= tu.now_local()]
+                    cands = todays or ahead or cands
+                if cands:
+                    target = cands[0][1]
+        new = ""
+        n = _NEW_TIME.search(clause[m.end():])
+        if n:
+            hh, _e = hinglish_parser._extract_time(n.group(1), None, [])  # noqa: SLF001
+            new = hh or ""
+        if target is not None:
+            out.append((target, new))
+            prev = target
+    return out
+
+
+def _moves_clear(user: User, pairs: list[tuple[dict, str]]) -> bool:
+    """Do these moves land on nothing? (A meeting or call onto another meeting, call or fixed block is a clash: then
+    the first is asked about the usual way instead of both being done blind.)"""
+    prefs = services.get_prefs(user)
+    exclude = [str(it["id"]) for it, _n in pairs]
+    for it, hhmm in pairs:
+        if it.get("kind") not in (Kind.MEETING, Kind.CALL):
+            continue
+        start = _starts(it)
+        if start is None:
+            continue
+        review = scheduling.review(user, kind=it["kind"], due_date=start.date().isoformat(), due_time=hhmm,
+                                   minutes=it.get("estimated_minutes"), prefs=prefs, exclude_ids=exclude)
+        if any(c.get("routine") or c.get("kind") in (Kind.MEETING, Kind.CALL) for c in review.get("clashes") or []):
+            return False
+    return True
+
+
 def _cancel_now(user: User, targets: list[dict]) -> tuple[list[dict], list[dict], int]:
     """Cancel these at once (a cancel, never an erase: "undo" brings them back). Returns (done, failed, requests):
     the items cancelled, the ones that could not be, and how many became a request for the MD instead."""
@@ -952,11 +1033,59 @@ def _quiet_label(it: dict) -> str:
 
 
 def _hard_question(card: dict | None) -> bool:
-    """Is this waiting card his own meeting or call over another, with its question still open?"""
+    """Is this waiting card his own meeting or call over another, with its question still open? A move of his own
+    meeting onto another ("CA wali ko 5 baje kar do" when 5 is taken) counts too (25 Nov 2026)."""
     if not isinstance(card, dict) or card.get("needs_clarification"):
         return False
     sched = card.get("schedule") if isinstance(card.get("schedule"), dict) else {}
-    return bool(sched.get("hard") and sched.get("question") and card.get("action") in _BOOKABLE)
+    return bool(sched.get("hard") and sched.get("question") and (card.get("action") in _BOOKABLE or card.get("action") == "change_task"))
+
+
+def _move_and_push(user: User, draft: dict, task, target: dict, title: str, due_date: str, due_time: str,
+                   moves: list, address: str) -> tuple[str, str] | None:
+    """Move his own meeting to the time he said and move the others in order (the move's twin of _book_and_push).
+    Returns the done line and its Hindi twin ("Done: CA wali tomorrow at 5 PM. Meeting with Mehta moved to 5:30 PM."),
+    or None when the item could not be moved (the draft then says why). One undo takes every move back."""
+    from . import actions  # noqa: PLC0415 — actions imports this module
+    address_hi = services.address_hi_of(user)
+    scope = target.get("scope") or ("private" if isinstance(task, PrivateTask) else "shared")
+    before = {"due_date": task.due_date.isoformat() if task.due_date else "",
+              "due_time": tu.to_local(task.due_at).strftime("%H:%M") if task.due_at else ""}
+    if _apply_moves(user, [{"id": str(task.id), "scope": scope, "title": title, "due_date": due_date, "due_time": due_time}]):
+        draft["action"] = "answer"
+        _say(draft, f"{address}, I could not move {title}; it was changed elsewhere.", f"{address_hi}, {title} नहीं हिल पाई, किसी और ने बदली थी।")
+        return None
+    refs = [{"type": "moved", "scope": scope, "id": str(task.id), "before": before}]
+    for m in moves:
+        other = _target_task(m) if isinstance(m, dict) else None
+        if other is not None:
+            refs.append({"type": "moved", "scope": m.get("scope") or "shared", "id": str(other.id),
+                         "before": {"due_date": other.due_date.isoformat() if other.due_date else "",
+                                    "due_time": tu.to_local(other.due_at).strftime("%H:%M") if other.due_at else ""}})
+    failed = _apply_moves(user, moves)
+    actions.remember_done(user, refs, title)
+    draft["_refs"] = refs
+    at = tu.combine_local(date.fromisoformat(due_date), time.fromisoformat(due_time))
+    en = f"Done: {title} {_due_label(due_date, due_time)}."
+    hi = f"हो गया: {title} {_due_label_hi(due_date, due_time)}।"
+    moved_en, moved_hi = [], []
+    for m in moves:
+        if not isinstance(m, dict) or str(m.get("title") or "") in failed:
+            continue
+        d, t = _safe_date(str(m.get("due_date") or "")), _safe_time(str(m.get("due_time") or ""))
+        if not (d and t):
+            continue
+        same_day = date.fromisoformat(d) == at.date()
+        when = tu.combine_local(date.fromisoformat(d), time.fromisoformat(t))
+        moved_en.append(f"{m['title']} moved to {tu.fmt_time(when) if same_day else _due_label(d, t)}")
+        moved_hi.append(f"{m['title']} अब {tu.fmt_time_hi(when) if same_day else _due_label_hi(d, t)}")
+    if moved_en:
+        en += " " + "; ".join(moved_en) + "."
+        hi += " " + "; ".join(moved_hi) + "।"
+    if failed:
+        en += f" I could not move {', '.join(failed)}; it was changed elsewhere."
+        hi += f" {', '.join(failed)} नहीं हिल पाई, किसी और ने बदली थी।"
+    return en, hi
 
 
 def _finish_draft(draft: dict, en: str, hi: str, lang: str) -> dict:
@@ -1067,7 +1196,7 @@ _OTHER_ONE = re.compile(r"\b(us|usko|use|usi|uska|wo|woh|that|that one|purani|pu
 _WHENEVER = re.compile(r"\b(kabhi bhi|kahin bhi|jab bhi|jab (?:main |mai )?free|jab time (?:ho|mile)|jab jagah|jahan jagah|jahan time|whenever|"
                        r"any ?time|any free|free (?:time|slot)|best time|next (?:free )?slot|koi (?:aur |bhi |dusra |doosra )?(?:time|slot)|"
                        r"dusre time|doosre time|aur time|aage (?:kabhi|kahin|jab)|later today|kal (?:ya|nahi to))\b", re.IGNORECASE)
-_MOVE_WORDS = re.compile(r"\b(aage|age|shift|move|baad|badal|badlo|later|push|reschedule|adjust|khiska|postpone|aage karo|aage kar)\b", re.IGNORECASE)
+_MOVE_WORDS = re.compile(r"\b(aage|age|shift|move|baad|badal|badlo|later|push|reschedule|adjust|khiska|postpone|aage karo|aage kar|kahin aur|kahi aur)\b", re.IGNORECASE)
 _DROP_WORDS = re.compile(r"\b(hatao|hata do|hata|cancel|chhodo|chhod do|choddo|chodo|rehne do|mat rakho|mat karo|nahi chahiye|drop|delete|remove|skip|"
                          r"nikaal|nikal do)\b", re.IGNORECASE)
 _HARD_DROP = re.compile(r"\b(hatao|hata do|hata|cancel|chhodo|chhod do|choddo|chodo|mat rakho|mat karo|nahi chahiye|drop|delete|remove|skip|"
@@ -1121,11 +1250,30 @@ def _move_to_free_slot(user: User, draft: dict, item: dict, address: str, addres
 _CLOCK_WORDS = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(baje|bje|बजे|am|pm|o'?clock)", re.IGNORECASE)
 
 
+def _clock_hhmm(clock) -> str:
+    hour, minute, suffix = int(clock.group(1)), int(clock.group(2) or 0), clock.group(3).lower()
+    if suffix in ("am", "pm"):
+        hour = hour % 12 + (12 if suffix == "pm" else 0)
+    elif hour <= 12:
+        hour = hinglish_parser._hour_for_part(hour, None)  # noqa: SLF001 — the same business-hours reading as the parser
+    return f"{hour:02d}:{minute:02d}" if 0 <= hour <= 23 and 0 <= minute <= 59 else ""
+
+
 def _clash_position(text: str, other: str, new: str) -> tuple[str, str]:
-    """Both meetings named in one breath ("Sharma ji ko 5 baje kar do, Mehta ji ko 4 baje rakho"): the one named
-    closest BEFORE the first clock time (or the verb) is the subject, and that clock time is its time. Returns
-    ("other" | "new" | "", "HH:MM" | "")."""
+    """Both meetings named in one breath ("Sharma ji ko 5 baje kar do, Mehta ji ko 4 baje rakho"; "CA wali ko 11 kar
+    do aur Aman wali kahin aur adjust kar do"): clause by clause, the clause that names only the OTHER settles it:
+    with a clock time, that is the other's new time; with a move or drop verb, the other moves on (its time is not
+    said). A clause naming only the new one is its own time, the card's. When no clause settles it, the one named
+    closest BEFORE the first clock time (or the verb) is the subject. Returns ("other" | "new" | "", "HH:MM" | "")."""
     low = text.lower()
+    for clause in _CLAUSE_SPLIT.split(low):
+        o, n = _title_hits(clause, other), _title_hits(clause, new)
+        if o and not n:
+            clock = _CLOCK_WORDS.search(clause)
+            if clock:
+                return "other", _clock_hhmm(clock)
+            if _MOVE_WORDS.search(clause) or _WHENEVER.search(clause) or _DROP_WORDS.search(clause):
+                return "other", ""
     clock = _CLOCK_WORDS.search(low)
     anchor = clock or _MOVE_WORDS.search(low) or _DROP_WORDS.search(low)
     if anchor is None:
@@ -1144,16 +1292,7 @@ def _clash_position(text: str, other: str, new: str) -> tuple[str, str]:
     o, n = last_hit(other), last_hit(new)
     if o < 0 and n < 0 or o == n:
         return "", ""
-    hhmm = ""
-    if clock is not None:
-        hour, minute, suffix = int(clock.group(1)), int(clock.group(2) or 0), clock.group(3).lower()
-        if suffix in ("am", "pm"):
-            hour = hour % 12 + (12 if suffix == "pm" else 0)
-        elif hour <= 12:
-            hour = hinglish_parser._hour_for_part(hour, None)  # noqa: SLF001 — the same business-hours reading as the parser
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            hhmm = f"{hour:02d}:{minute:02d}"
-    return ("other" if o > n else "new"), hhmm
+    return ("other" if o > n else "new"), (_clock_hhmm(clock) if clock is not None else "")
 
 
 def _clash_subject(text: str, pending: dict, sched: dict) -> str:
@@ -1192,10 +1331,13 @@ def _clash_way(text: str, cmd: dict, pending: dict, sched: dict) -> tuple[str, d
     subject = _clash_subject(text, pending, sched)
     if subject == "other":
         # "Sharma ji ko 5 baje kar do, Mehta ji ko 4 baje rakho": the time said next to the other's name is the
-        # other's new time, whatever time the model put in the command.
+        # other's new time, whatever time the model put in the command. "CA wali ko 11 kar do aur Aman wali kahin
+        # aur adjust kar do": no time next to Aman, so the time in the command is the new one's own, and Aman moves on.
         _pos, near = _clash_position(text, (sched.get("clashes") or [{}])[0].get("title") or "", pending.get("title") or "")
         if near:
             t = near
+        elif _pos == "other":
+            d, t = "", ""
     moving = bool(_MOVE_WORDS.search(text) or _WHENEVER.search(text))
     same_time = (t and t == _safe_time(str(pending.get("due_time") or "")) and (not d or d == _safe_date(str(pending.get("due_date") or ""))))
     if same_time and subject != "other" and options.get("push"):
@@ -1238,10 +1380,19 @@ def _settle_clash(user: User, cmd: dict, text: str, pending: dict, sched: dict, 
 
     def again(lead_en: str = "", lead_hi: str = "") -> dict:
         back = dict(pending)
-        q_en, q_hi = (lead_en + str(sched.get("question") or "")).strip(), (lead_hi + str(sched.get("question_hi") or "")).strip()
-        back.update({"needs_clarification": False, "spoken_reply": q_en, "overrides": {}, "keep_card": True})
+        q_en, q_hi = str(sched.get("question") or ""), str(sched.get("question_hi") or "")
+        if asked >= 1:
+            # Asked already: only the question itself again, never the whole situation read out once more (his
+            # complaint, 25 Nov 2026: "it repeats the complete sentence again and again").
+            q_en, q_hi = q_en.rsplit(". ", 1)[-1], q_hi.rsplit("। ", 1)[-1]
+        q_en, q_hi = (lead_en + q_en).strip(), (lead_hi + q_hi).strip()
+        back.update({"needs_clarification": False, "spoken_reply": q_en, "overrides": {}, "keep_card": True,
+                     "schedule": {**sched, "asked": asked + 1}})
         back["speak_text"], back["speak_lang"] = (q_hi, "hi") if lang == "hi" and q_hi else (q_en, "en")
         return back
+
+    if pending.get("action") == "change_task":
+        return _settle_move_clash(user, cmd, text, pending, sched, address, draft, again)
 
     way, extra = _clash_way(text, cmd, pending, sched)
     title = pending.get("title") or "it"
@@ -1297,6 +1448,84 @@ def _settle_clash(user: User, cmd: dict, text: str, pending: dict, sched: dict, 
         if lines is None:
             return draft
         return _after_card(user, draft, pending, address, *lines)
+    return again()
+
+
+def _settle_move_clash(user: User, cmd: dict, text: str, pending: dict, sched: dict, address: str, draft: dict, again) -> dict:
+    """His answer when the meeting he is MOVING lands on another ("CA wali ko 5 baje kar do", and 5 is Mehta ji's):
+    a plain yes takes what was proposed (the other moves on); "koi baat nahi, Mehta wali kahin aur adjust kar do" =
+    push; "usko wahin rehne do" / the offered time = the moved one goes to the next free time instead; a new time =
+    looked at again; "rehne do" = nothing moves. Done at once, both moves in one line, one undo."""
+    lang = pending.get("reply_language") if pending.get("reply_language") in {"en", "hi"} else "en"
+    options = sched.get("options") if isinstance(sched.get("options"), dict) else {}
+    other = (sched.get("clashes") or [{}])[0]
+    asked = int(sched.get("asked") or 0)
+    target = (pending.get("targets") or [{}])[0]
+    task = _target_task(target)
+    if task is None:
+        return again("I could not find that meeting any more. ", "वो मीटिंग अब मिली नहीं। ")
+    changes = pending.get("changes") if isinstance(pending.get("changes"), dict) else {}
+    local = tu.to_local(task.due_at) if task.due_at else None
+    d0 = _safe_date(str(changes.get("due_date") or "")) or (local.date().isoformat() if local else (task.due_date.isoformat() if task.due_date else ""))
+    t0 = _safe_time(str(changes.get("due_time") or "")) or (local.strftime("%H:%M") if local else "")
+    title = str(target.get("title") or task.title)
+    shim = {**pending, "title": title, "due_date": d0, "due_time": t0}
+    way, extra = _clash_way(text, cmd, shim, sched)
+
+    def finish(moves: list, new_d: str = d0, new_t: str = t0, note_en: str = "", note_hi: str = "") -> dict:
+        lines = _move_and_push(user, draft, task, target, title, new_d, new_t, moves, address)
+        if lines is None:
+            return draft
+        return _after_card(user, draft, pending, address, lines[0] + note_en, lines[1] + note_hi)
+
+    if way == "drop_new":
+        return _after_card(user, draft, pending, address, f"Okay, {title} stays where it is.", f"ठीक है, {title} वहीं रहेगी।", settled=False)
+    if way == "push":
+        if not options.get("push"):
+            if other.get("priority") == Priority.URGENT:
+                return again(f"{other.get('title') or 'That meeting'} is urgent and stays. ", f"{other.get('title') or 'वो मीटिंग'} अर्जेंट है, वो वहीं रहेगी। ")
+            return again("That is not possible here. ", "यहाँ ऐसा नहीं हो सकता। ")
+        return finish(options["push"])
+    if way == "move":
+        offered = sched.get("suggested") or {}
+        d, t = _safe_date(str(offered.get("due_date") or "")), _safe_time(str(offered.get("due_time") or ""))
+        if not (d and t):
+            return again("That is not possible here. ", "यहाँ ऐसा नहीं हो सकता। ")
+        return finish([], d, t)
+    if way == "new_time":
+        d, t = extra.get("due_date") or d0, extra.get("due_time") or t0
+        trial = {**pending, "changes": {**changes, "due_date": d, "due_time": t}, "schedule": None}
+        _advise_schedule(user, trial, address, asked=asked + 1)
+        t_sched = trial.get("schedule") or {}
+        if t_sched.get("clashes") and t_sched.get("question") and asked < MAX_SCHEDULE_QUESTIONS:
+            trial["reply_language"], trial["keep_card"] = lang, True
+            hi = t_sched.get("question_hi") or ""
+            trial["speak_text"], trial["speak_lang"] = (hi, "hi") if lang == "hi" and hi else (trial["spoken_reply"], "en")
+            return trial
+        return finish([], d, t)
+    if way == "fit":
+        return again("A moved meeting keeps its length. ", "हिलाई हुई मीटिंग की लंबाई वही रहती है। ")
+    if way in ("time_other", "drop_other"):
+        other_task = _target_task({"id": other.get("id"), "scope": other.get("scope")}) if other.get("id") else None
+        if other_task is None:
+            return again("I could not find that meeting. ", "वो मीटिंग मुझे मिली नहीं। ")
+        if way == "drop_other":
+            done, _failed, _requests = _cancel_now(user, [{"id": str(other_task.id), "scope": other.get("scope") or "shared",
+                                                            "title": other.get("title") or "", "version": other_task.version, "status": other_task.status}])
+            if not done:
+                return again(f"I could not cancel {other.get('title')}. ", f"{other.get('title')} कैंसल नहीं हो पाई। ")
+            return finish([], note_en=f" {other.get('title')} is cancelled (say undo to bring it back).",
+                          note_hi=f" {other.get('title')} कैंसल कर दी (वापस लाने के लिए undo बोलिए)।")
+        if other.get("priority") == Priority.URGENT:
+            return again(f"{other.get('title')} is urgent and stays. ", f"{other.get('title')} अर्जेंट है, वो वहीं रहेगी। ")
+        olocal = tu.to_local(other_task.due_at) if other_task.due_at else None
+        d = extra.get("due_date") or (olocal.date().isoformat() if olocal else d0)
+        t = extra.get("due_time") or (olocal.strftime("%H:%M") if olocal else "")
+        if not (d and t):
+            return again("At what time? ", "कितने बजे? ")
+        move = {"id": str(other_task.id), "scope": other.get("scope") or "shared", "version": other_task.version,
+                "title": other.get("title") or other_task.title, "due_date": d, "due_time": t}
+        return finish([move])
     return again()
 
 
@@ -1536,20 +1765,22 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
         # other, put this one elsewhere) so any of them can be asked for in his own words; ONE is proposed aloud and a
         # plain yes takes it. The one being added is the one that bends (the next free time); only when the new one is
         # urgent does the other move on. Three choices read out in a row were the confusion he complained of (Nov 2026).
-        if whose == "self" and not is_move and d and due_time and not c.get("routine"):
+        moving_own = is_move and draft["action"] == "change_task"
+        if whose == "self" and (not is_move or moving_own) and d and due_time and not c.get("routine"):
             new_start = tu.combine_local(d, time.fromisoformat(due_time))
             new_end = new_start + timedelta(minutes=review.get("minutes") or 30)
             gap = int((c["start"] - new_start).total_seconds() // 60)
             # By priority: an urgent meeting already there is never pushed (push_plan refuses).
             plan = scheduling.push_plan(subject, new_start, new_end, prefs, exclude)
             new_urgent = draft.get("priority") == Priority.URGENT
-            if gap >= 5:
+            if gap >= 5 and not moving_own:
                 options["fit"] = {"duration_minutes": gap}
             if plan:
                 options["push"] = [{k: m[k] for k in ("id", "scope", "version", "title", "due_date", "due_time")} for m in plan]
             if sug:
                 options["move"] = {"due_date": sug["due_date"], "due_time": sug["due_time"]}
-            if plan and new_urgent:
+            if plan and (new_urgent or moving_own):
+                # He chose this time for the meeting he is moving: the one already there moves on (25 Nov 2026).
                 default = "push"
             elif sug:
                 default = "move"
@@ -1567,7 +1798,7 @@ def _advise_schedule(user: User, draft: dict, address: str, asked: int = 1) -> N
                 more_en = f" (and {len(plan) - 1} more after it)" if len(plan) > 1 else ""
                 more_hi = f" (और उसके बाद {len(plan) - 1} और)" if len(plan) > 1 else ""
                 why_en, why_hi = (" This one is urgent:", " ये अर्जेंट है:") if new_urgent else ("", "")
-                tail_en = f"{why_en} shall I move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}?"
+                tail_en = f"{why_en} {'shall' if why_en else 'Shall'} I move {plan[0]['title']} to {tu.fmt_time(plan[0]['start'])}{more_en}?"
                 tail_hi = f"{why_hi} {plan[0]['title']} को {tu.fmt_time_hi(plan[0]['start'])} कर दूँ{more_hi}?"
             elif default == "move":
                 tail_en = f" Shall I put {new_name} at {alt_en}?"
@@ -2745,7 +2976,39 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
         # "Delete it" / "ye hata do" with a card on screen: the card's items are what "it" means.
         chosen = _pointed(user, on_screen, full_text, chosen, _last_items(ctx))
         matches = chosen or _match_items(full_text, open_items)
-        if intent == "delete_task" and (chosen or len(matches) == 1) and not draft.get("needs_clarification"):
+        # "Saade das wali ko 11 baje kar do", "4 baje wali hata do": named by the clock (25 Nov 2026).
+        timed = _time_targets(full_text, user) if intent in ("change_task", "delete_task") and not chosen else []
+        if timed and len(matches) != 1:
+            chosen = [timed[0][0]]
+            matches = chosen
+        # "… aur uske baad wali ko 1 baje": two moves in one breath, each by the clock, done at once when neither
+        # lands on another meeting (specific = done; his rule).
+        both = [(t, n) for t, n in timed if n] if intent == "change_task" and len(timed) >= 2 else []
+        if len(both) >= 2 and (_recipients_of(cmd) or draft.get("needs_clarification") or not _moves_clear(user, both)):
+            both = []
+        if intent == "change_task" and len(both) >= 2:
+            from . import actions  # noqa: PLC0415 — actions imports this module
+            moves, refs = [], []
+            for it, hhmm in both:
+                start = _starts(it)
+                moves.append({"id": it["id"], "scope": it.get("scope") or "shared", "title": it["title"], "due_date": start.date().isoformat(), "due_time": hhmm})
+                refs.append({"type": "moved", "scope": it.get("scope") or "shared", "id": it["id"],
+                             "before": {"due_date": start.date().isoformat(), "due_time": start.strftime("%H:%M")}})
+            failed = _apply_moves(user, moves)
+            done = [m for m in moves if m["title"] not in failed]
+            if done:
+                actions.remember_done(user, [r for r, m in zip(refs, moves) if m["title"] not in failed], done[0]["title"])
+            draft["targets"], draft["target"] = [t for t, _n in both], both[0][0]
+            draft["action"], draft["card_done"], draft["booked"], draft["undo"] = "answer", True, bool(done), bool(done)
+            said_en = "; ".join(f"{m['title']} at {tu.fmt_time(tu.combine_local(date.fromisoformat(m['due_date']), time.fromisoformat(m['due_time'])))}" for m in done)
+            said_hi = "; ".join(f"{m['title']} {tu.fmt_time_hi(tu.combine_local(date.fromisoformat(m['due_date']), time.fromisoformat(m['due_time'])))}" for m in done)
+            en = f"Done: {said_en}." if done else ""
+            hi = f"हो गया: {said_hi}।" if done else ""
+            if failed:
+                en = (en + f" Could not move {', '.join(failed)}; it was changed elsewhere.").strip()
+                hi = (hi + f" {', '.join(failed)} नहीं हिल पाई, किसी और ने बदली थी।").strip()
+            _say(draft, en, hi)
+        elif intent == "delete_task" and (chosen or len(matches) == 1) and not draft.get("needs_clarification"):
             # Deleting is done at once (a cancel, never an erase): "undo" brings it back. No "shall I?".
             done, failed, requests = _cancel_now(user, matches)
             draft["targets"], draft["target"] = done, done[0] if done else None
@@ -2823,7 +3086,14 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
             draft["target_candidates"] = matches[:5]
             verb = "change" if intent == "change_task" else "delete"
             verb_hi = "बदलूँ" if intent == "change_task" else "हटाऊँ"
-            if matches:
+            last_jarvis = next((t.get("text", "") for t in reversed(ctx.get("conversation") or []) if t.get("role") == "jarvis"), "")
+            if ctx.get("choices") or re.search(r"which (?:one|task) should I", last_jarvis, re.IGNORECASE):
+                # "Which one?" was asked already and the answer fitted none: never a third time (his complaint, 25 Nov
+                # 2026). The question is withdrawn; he names it or says its time and it is done then.
+                draft["action"], draft["needs_clarification"], draft["question"], draft["target_candidates"] = "answer", False, "", []
+                _say(draft, f"{address}, I'll leave it. Say its name or its time, like 'saade das wali'.",
+                     f"{address_hi}, रहने देता हूँ। नाम या टाइम बोल दीजिए, जैसे 'साढ़े दस वाली'।")
+            elif matches:
                 names = _named(matches)
                 _ask(draft, f"{address}, which one should I {verb}: {names}? Or all of them?", f"{address_hi}, कौन सा {verb_hi}: {names}? या सभी?")
             else:
