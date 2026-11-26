@@ -244,7 +244,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { user } = useSession();
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
-    setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
+    setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, snoozeOffer, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
     allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems, spotlight,
     stopReading, pendingReads, previous: previousAlert, setQuietFor } = useAlertEngine();
   const inMeeting = presence.inMeeting;
@@ -1324,10 +1324,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         return;
       }
       if (d.action === 'cancel_pending') {
-        declineOffer();
-        const hi = hiLine("Okay, they're on your list.", 'ठीक है, वो आपकी लिस्ट में हैं।');
-        if (hi) reply(hi.show, hi.speak, 'hi', false);
-        else reply("Okay, they're on your list.", undefined, 'en', false);
+        // "No" (his rule, 26 Nov 2026): what was offered is left alone and comes back later, announced the same way.
+        questionRef.current = null;
+        expectingRef.current = false;
+        snoozeOffer()
+          .then((back) => {
+            const en = back ? `Okay, I'll bring it up again ${back.label}.` : "Okay, I'll remind you again later.";
+            const hi = hiLine(en, back ? `ठीक है, ${back.labelHi || back.label} फिर बताऊँगा।` : 'ठीक है, बाद में फिर बताऊँगा।');
+            if (hi) reply(hi.show, hi.speak, 'hi', false);
+            else reply(en, undefined, 'en', false);
+          })
+          .catch(() => sayOwn(`Sorry ${address}, I couldn't set that.`, `माफ़ कीजिए ${addressHi}, वो सेट नहीं हो पाया।`, { interrupt: true }));
         return;
       }
       declineOffer(); // he asked for something else: leave them on the list and carry on
@@ -2014,7 +2021,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // "Hey JARVIS" the held list may arrive a moment late: if he has not started talking yet, ask it then. While the
   // live line is still connecting it waits (said then, the words would be lost).
   useEffect(() => {
-    if (!offer || offer.id === presentedOffer.current || busy || speakingAny || live === 'connecting') return;
+    // While he has just spoken, or the opening greeting is on its way (an exchange), the offer waits its turn.
+    if (!offer || offer.id === presentedOffer.current || busy || speakingAny || live === 'connecting' || exchanging) return;
     const justWoke = Date.now() - wokeAtRef.current < 8000 && !voice.partial;
     if (listening && !justWoke && !liveOn) return;
     presentedOffer.current = offer.id;
@@ -2023,7 +2031,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       fns.current.presentOffer(offer, false);
     }, 0);
     return () => clearTimeout(kick);
-  }, [offer, listening, busy, speakingAny, liveOn, live, voice.partial, cancelVoice]);
+  }, [offer, listening, busy, speakingAny, liveOn, live, exchanging, voice.partial, cancelVoice]);
 
   // "Hey JARVIS": the native listener either tells us directly (app open) or brings the app to the front
   // with a pending flag (app was closed). One microphone user at a time: it pauses while JARVIS talks or listens.
@@ -2061,15 +2069,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     return undefined;
   }, [listening, busy, prefs.wakeWordEnabled]);
 
-  // A conversation is going on while JARVIS speaks, thinks or has the recogniser open, and, with the talk sheet up
-  // or the live line on, while he has spoken within the last moments (an exchange): nothing new is said or shown
-  // over it, and it is counted once the conversation ends (his rule, 25 Nov 2026). In voice mode the line stays
-  // open behind the home all the while (26 Nov 2026), so an open line alone no longer counts: once he has been
-  // quiet for a while, reminders and messages come as they always did.
+  // A conversation is going on while JARVIS speaks, thinks or has the recogniser open, and while he has spoken
+  // within the last moments or the opening greeting is on its way (an exchange): nothing new is said or shown over
+  // it, and it is counted once the conversation ends (his rule, 25 Nov 2026). In voice mode the line stays open
+  // behind the home all the while (26 Nov 2026), so an open line alone does not count: once he has been quiet for
+  // a while, reminders and messages come as they always did.
   useEffect(() => {
     const micOpen = voice.state === 'listening';
-    setTalking(micOpen || speakingAny || busy !== '' || ((talkOpen || live !== 'off') && exchanging));
-  }, [voice.state, speakingAny, busy, talkOpen, live, exchanging, setTalking]);
+    setTalking(micOpen || speakingAny || busy !== '' || exchanging);
+  }, [voice.state, speakingAny, busy, exchanging, setTalking]);
 
   // Voice mode when the app comes up (his ask, 26 Nov 2026): at a cold start, and again whenever the app comes back
   // to the front (the line is closed while it is away). The fingerprint lock, a tapped notification and "Hey JARVIS"
@@ -2084,17 +2092,32 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     let pending: ReturnType<typeof setTimeout> | null = null;
     const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const begin = async (greetFirst: boolean) => {
+      // The greeting leads: from here until it has been said, the alert engine keeps what is due and the offer waits
+      // its turn, so "Sir, ek reminder hai" follows "Namaste, Sir" instead of racing it (also while the fingerprint
+      // is still being asked). The hold is let go the moment voice mode decides not to start.
+      const hold = (ms: number) => greetFirst && markExchange(ms);
+      hold(95_000);
       if ((await lockEnabled()) && (await lockAvailable())) {
         // Never talk over the locked screen: wait for the fingerprint (he may also just leave it locked).
         const until = Date.now() + 90_000;
         while (!cancelled && !recentlyUnlocked() && Date.now() < until) await pause(400);
-        if (cancelled || !recentlyUnlocked()) return;
+        if (cancelled || !recentlyUnlocked()) {
+          hold(0);
+          return;
+        }
       }
       for (let tries = 0; tries < 40 && !cancelled; tries++) {
-        if (AppState.currentState !== 'active') return;
-        if (fns.current.autoVoice(greetFirst) !== 'later') return;
+        if (AppState.currentState !== 'active') {
+          hold(0);
+          return;
+        }
+        hold(8000);
+        const r = fns.current.autoVoice(greetFirst);
+        if (r === 'no') hold(0);
+        if (r !== 'later') return;
         await pause(3000);
       }
+      hold(0);
     };
     const schedule = (greetFirst: boolean) => {
       if (pending) clearTimeout(pending);

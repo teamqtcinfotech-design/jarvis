@@ -99,31 +99,62 @@ export interface HeldOffer {
   kind: 'held' | 'news';
 }
 
-/** "3 updates have come. Shall I read them?" — the count only, never a title (his rule); the banner lists them. */
+/** The word an item is announced by, before he has said whether to hear it: reminder, message, approval, request,
+ *  new task, update. */
+const OFFER_KINDS: { en: [string, string]; hi: string }[] = [
+  { en: ['reminder', 'reminders'], hi: 'रिमाइंडर' },
+  { en: ['message', 'messages'], hi: 'संदेश' },
+  { en: ['approval', 'approvals'], hi: 'मंज़ूरी' },
+  { en: ['request', 'requests'], hi: 'रिक्वेस्ट' },
+  { en: ['new task', 'new tasks'], hi: 'नया काम' },
+  { en: ['update', 'updates'], hi: 'अपडेट' },
+];
+function offerKindOf(it: EngineItem): number {
+  if (it.source === 'reminder') return 0;
+  if (it.refType === 'message') return 1;
+  if (it.question?.kind === 'approve') return 2;
+  if (it.alertKind === 'NEW_REQUEST' && it.requestId) return 3;
+  if (it.alertKind === 'TASK_ASSIGNED') return 4;
+  return 5;
+}
+
+/** "Sir, ek reminder hai. Kya main bataun?" — the kind and the count only, never what it is about (his rule, 26 Nov
+ *  2026: nothing describes itself unasked; a yes tells, a no leaves it and brings it back later). The banner lists
+ *  them. With a `when` ("while you were away") the line says they came then. */
 function countOffer(what: number | EngineItem[], address: string, addressHi: string, when: { en: string; hi: string } | null): { text: string; textHi: string } {
   const lead = when ? `${address}, ${when.en}: ` : `${address}, `;
   const leadHi = when ? `${addressHi}, ${when.hi}: ` : `${addressHi}, `;
   if (typeof what !== 'number') {
-    // By kind ("2 reminders and 1 message came"), counts only: he reads them one at a time when he says so.
-    const piles = new Map<AlertGroup, number>();
-    for (const it of what) piles.set(groupOf(it), (piles.get(groupOf(it)) ?? 0) + 1);
+    const counts = new Map<number, number>();
+    for (const it of what) counts.set(offerKindOf(it), (counts.get(offerKindOf(it)) ?? 0) + 1);
     const en: string[] = [];
     const hi: string[] = [];
-    for (const g of GROUP_ORDER) {
-      const n = piles.get(g);
-      if (!n) continue;
-      const w = g === 'update' ? { en: ['reminder', 'reminders'] as [string, string], hi: 'रिमाइंडर' } : GROUP_WORDS[g];
-      en.push(`${n} ${n === 1 ? w.en[0] : w.en[1]}`);
-      hi.push(`${n} ${w.hi}`);
-    }
+    OFFER_KINDS.forEach((w, k) => {
+      const n = counts.get(k);
+      if (!n) return;
+      en.push(`${n === 1 ? 'one' : n} ${n === 1 ? w.en[0] : w.en[1]}`);
+      hi.push(`${n === 1 ? 'एक' : n} ${w.hi}`);
+    });
     const one = what.length === 1;
+    const urgent = what.some((it) => it.priority === 'URGENT');
     const list = en.length > 1 ? `${en.slice(0, -1).join(', ')} and ${en[en.length - 1]}` : en[0] ?? '';
-    // The Hindi is the formal assistant's ("क्या मैं सुनाऊँ?"), his ask, 26 Nov 2026.
-    return { text: `${lead}${list} ${one ? 'has' : 'have'} come. Shall I read ${one ? 'it' : 'them'}?`, textHi: `${leadHi}${hi.join(', ')} आए हैं। क्या मैं सुनाऊँ?` };
+    const listHi = hi.length > 1 ? `${hi.slice(0, -1).join(', ')} और ${hi[hi.length - 1]}` : hi[0] ?? '';
+    const mark = urgent ? (one ? ' (urgent)' : ', one of them urgent') : '';
+    const markHi = urgent ? (one ? ' ज़रूरी' : ', एक ज़रूरी भी') : '';
+    if (when) {
+      return {
+        text: `${lead}${list}${mark} ${one ? 'has' : 'have'} come. Shall I tell you?`,
+        textHi: `${leadHi}${one ? listHi.replace('एक ', `एक${markHi} `) : `${listHi}${markHi}`} ${one ? 'आया है' : 'आए हैं'}। क्या मैं बताऊँ?`,
+      };
+    }
+    return {
+      text: `${lead}${list}${mark}. Shall I tell you?`,
+      textHi: `${leadHi}${one ? listHi.replace('एक ', `एक${markHi} `) : `${listHi}${markHi}`} ${one ? 'है' : 'हैं'}। क्या मैं बताऊँ?`,
+    };
   }
   const n = what;
-  if (n === 1) return { text: `${lead}one update has come. Shall I read it?`, textHi: `${leadHi}एक अपडेट आया है। क्या मैं सुनाऊँ?` };
-  return { text: `${lead}${n} updates have come. Shall I read them?`, textHi: `${leadHi}${n} अपडेट आए हैं। क्या मैं सुनाऊँ?` };
+  if (n === 1) return { text: `${lead}one update has come. Shall I tell you?`, textHi: `${leadHi}एक अपडेट आया है। क्या मैं बताऊँ?` };
+  return { text: `${lead}${n} updates have come. Shall I tell you?`, textHi: `${leadHi}${n} अपडेट आए हैं। क्या मैं बताऊँ?` };
 }
 
 export type { AlertQuestion } from './types';
@@ -190,6 +221,8 @@ interface EngineValue {
   snooze: (item: EngineItem, minutes?: number, until?: string) => Promise<{ until: string; label: string; labelHi: string; note: string; noteHi: string } | null>;
   /** Everything waiting comes back later ("baaki 20 minute baad"); resolves to when, as the server says it. */
   snoozeAll: (minutes?: number, until?: string) => Promise<{ label: string; labelHi: string } | null>;
+  /** "No" to "Shall I tell you?": what was offered comes back at the usual snooze time, announced the same way. */
+  snoozeOffer: () => Promise<{ label: string; labelHi: string } | null>;
   complete: (item: EngineItem) => Promise<void>;
   decideRequest: (item: EngineItem, accept: boolean) => Promise<void>;
   reveal: () => void;
@@ -732,7 +765,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     const items = heldRef.current;
     if (items.length <= announcedHeld.current) return;
     announcedHeld.current = items.length;
-    const words = countOffer(items.length, address, addressHi, heldPhrase(items));
+    const words = countOffer(items, address, addressHi, heldPhrase(items)); // by kind: "2 reminders and 1 message"
     offerSeq.current += 1;
     offerKind.current = 'held';
     setOffer({ id: offerSeq.current, count: items.length, kind: 'held', ...words });
@@ -870,8 +903,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
           setArrived((a) => (a.some((x) => x.key === item.key) ? a : [...a, item])); // the strip on the talk sheet
           return null;
         }
-        // A reminder at its moment is said as it is; news is counted first and read only when he says so.
-        return item.source === 'server' ? 'offer' : 'loud';
+        // Nothing describes itself unasked (his rule, 26 Nov 2026): a reminder at its moment, a message, an update
+        // is announced by kind only ("Sir, ek reminder hai. Kya main bataun?"); a yes reads it, a no leaves it and
+        // brings it back later.
+        return 'offer';
       }
       // A message or a task from one of the three: never kept back. Phone left on the desk: still said and shown;
       // in a meeting, quiet hours or face down: shown and buzzed, flashing until he taps it.
@@ -1314,6 +1349,20 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     [snooze],
   );
 
+  /** "No" to "Shall I tell you?" (his rule, 26 Nov 2026): what was offered is left alone and comes back at the usual
+   *  snooze time, announced again the same way. Resolves to when, for JARVIS's one line. */
+  const snoozeOffer = useCallback(async (): Promise<{ label: string; labelHi: string } | null> => {
+    const items = offerKind.current === 'news' ? newsRef.current : [...heldRef.current];
+    setOffer(null);
+    newsRef.current = [];
+    let back: { label: string; labelHi: string } | null = null;
+    for (const item of items) {
+      const r = await snooze(item);
+      if (r) back = { label: r.label, labelHi: r.labelHi };
+    }
+    return back;
+  }, [snooze]);
+
   const complete = useCallback(
     async (item: EngineItem) => {
       if (!item.ref) return acknowledge(item);
@@ -1633,6 +1682,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     acknowledgeAllHeld,
     snooze,
     snoozeAll,
+    snoozeOffer,
     batchItems,
     offerBatch,
     seenAll,
