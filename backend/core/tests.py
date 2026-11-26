@@ -1334,8 +1334,11 @@ class SchedulingTests(BaseCase):
         self.assertNotIn(SECRET, alert.spoken_text + alert.body + alert.title)
         self.assertFalse(Alert.objects.filter(recipient=self.pa, ref_id__startswith="morning:").exists())
         self.assertEqual(followups.run(now=at + timedelta(minutes=30)), 0)  # once a day
-        self.assertEqual(followups.run(now=at.replace(hour=13)), 0)         # too late to be a morning briefing
-        self.assertEqual(self.md_client.get("/api/v1/alerts/").json()["results"][0]["spoken_text"], alert.spoken_text)
+        # Too late to be a morning briefing (the afternoon's free-time line, "nothing pending, relax", may come: that
+        # is not a second briefing).
+        followups.run(now=at.replace(hour=13))
+        self.assertEqual(Alert.objects.filter(recipient=self.md, ref_id__startswith="morning:").count(), 1)
+        self.assertIn(alert.spoken_text, [a["spoken_text"] for a in self.md_client.get("/api/v1/alerts/").json()["results"]])
 
     def test_pa_hears_only_that_sir_is_busy(self):
         day = _workday()
