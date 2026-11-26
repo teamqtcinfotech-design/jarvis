@@ -476,6 +476,11 @@ function VoiceSection() {
           right={<Switch value={prefs.liveVoice} onValueChange={(v) => update({ liveVoice: v })} trackColor={{ true: colors.gold }} />}
         />
       ) : null}
+      <Row
+        title="Voice mode when JARVIS opens"
+        detail="When the app opens, JARVIS greets you and keeps listening while it is open, so you just speak. Say “suno mat” or tap ✕ to stop it."
+        right={<Switch value={prefs.autoVoice} onValueChange={(v) => update({ autoVoice: v })} trackColor={{ true: colors.gold }} />}
+      />
       <Button title="Test voice" kind="secondary" icon="volume-high-outline" compact onPress={testVoice} style={{ alignSelf: 'flex-start', marginTop: 10 }} />
     </Card>
   );
@@ -650,6 +655,19 @@ function BackgroundSection() {
     }
   };
 
+  // The floating button over other apps needs "Display over other apps"; the switch is kept, and the orb appears by
+  // itself once the permission is given.
+  const toggleBubble = async (on: boolean) => {
+    setNote('');
+    update({ floatingButton: on });
+    if (!on) return;
+    const st = await wakeStatus();
+    if (!st.overlayAllowed) {
+      setNote('Allow “Display over other apps” for JARVIS, then come back: the floating orb appears by itself.');
+      wakeSettings.overlay();
+    }
+  };
+
   return (
     <Card>
       <Row
@@ -665,6 +683,16 @@ function BackgroundSection() {
         title={`Listen for “${wakeWord.phrase}”`}
         detail={wake?.listening ? `On. Say “${wakeWord.phrase}” any time, even with the app closed.` : `Off. Switch on to wake ${wakeWord.name} by voice from anywhere.`}
         right={<Switch value={prefs.wakeWordEnabled && !!wake?.listening} disabled={!wakeSupported || busy} onValueChange={toggleWake} trackColor={{ true: colors.gold }} />}
+      />
+      <Row
+        title="Floating JARVIS button"
+        detail={
+          !wakeSupported ? 'Not available on this phone.'
+            : prefs.floatingButton && wake?.overlayAllowed ? 'On. A small orb floats over other apps: tap it to talk to JARVIS, drag it where you like.'
+            : prefs.floatingButton ? 'Allow “Display over other apps” below, and the orb appears over other apps.'
+            : 'Off. Switch on for a small orb over other apps that talks to JARVIS on a tap.'
+        }
+        right={<Switch value={prefs.floatingButton} disabled={!wakeSupported} onValueChange={toggleBubble} trackColor={{ true: colors.gold }} />}
       />
       <Row
         title="Wake word"
@@ -696,6 +724,7 @@ function BackgroundSection() {
       ) : null}
       <Txt variant="caption" style={{ marginTop: 6 }}>
         Listening happens on the phone; nothing is sent until you say the words. After a phone restart, open JARVIS once.
+        On the lock screen, the JARVIS notification has a “Talk to JARVIS” button.
         {xiaomi ? ' On Xiaomi, allow Autostart, Battery and Pop-ups from background.' : ''}
       </Txt>
     </Card>

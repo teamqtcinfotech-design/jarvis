@@ -59,6 +59,11 @@ export interface Prefs {
   /** The live conversation (Grok's realtime voice as ears and mouth; the server stays the brain): replies in about a
    *  second on one open line. Off: the usual turn by turn. This phone's own switch. */
   liveVoice: boolean;
+  /** Voice mode starts by itself when JARVIS opens (his ask, 26 Nov 2026): the greeting, what has come, then it
+   *  keeps listening until switched off or told "suno mat". This phone's own switch. */
+  autoVoice: boolean;
+  /** The floating JARVIS button over other apps (a tap talks, like "Hey JARVIS"). This phone's own switch. */
+  floatingButton: boolean;
   /** Ring until seen: work and messages from the team ring this phone until Seen is tapped (the receiver's rules). */
   ringUntilSeen: boolean;
   ringEveryMinutes: number;
@@ -108,6 +113,8 @@ const DEFAULTS: Prefs = {
   reminderSound: 'default',
   bargeIn: true,
   liveVoice: true,
+  autoVoice: true,
+  floatingButton: true,
   ringUntilSeen: true,
   ringEveryMinutes: 10,
   ringUrgentEveryMinutes: 1,
@@ -141,7 +148,7 @@ function clean(data: Partial<Prefs> | null | undefined): Partial<Prefs> {
 
 /** Settings that belong to THIS phone, not to the person: never sent to the server, never taken from it.
  *  "Hey JARVIS" is a microphone on one device; switching it on here must not switch it on on the other phone. */
-const DEVICE_ONLY: (keyof Prefs)[] = ['wakeWordEnabled', 'liveVoice'];
+const DEVICE_ONLY: (keyof Prefs)[] = ['wakeWordEnabled', 'liveVoice', 'autoVoice', 'floatingButton'];
 
 function withoutDeviceOnly(patch: Partial<Prefs>): Partial<Prefs> {
   const out = { ...patch };

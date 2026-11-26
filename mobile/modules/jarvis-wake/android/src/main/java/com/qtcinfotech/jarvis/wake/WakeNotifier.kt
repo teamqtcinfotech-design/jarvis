@@ -28,10 +28,15 @@ class WakeNotifier(private val context: Context) {
 
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // The permanent notification carries "Talk to JARVIS", on the lock screen too (his ask, 26 Nov 2026): a
+            // minimised channel never reaches the lock screen, so it moved to a low (silent) one; the old channel goes.
+            manager.deleteNotificationChannel(CHANNEL_SERVICE_OLD)
             manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_SERVICE, "JARVIS is on", NotificationManager.IMPORTANCE_MIN).apply {
-                    description = "Shows while JARVIS watches for reminders and messages (and listens for “Hey JARVIS”)."
+                NotificationChannel(CHANNEL_SERVICE, "JARVIS is on", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Shows while JARVIS watches for reminders and messages (and listens for “Hey JARVIS”); its button talks to JARVIS, on the lock screen too."
                     setShowBadge(false)
+                    setSound(null, null)
+                    enableVibration(false)
                 }
             )
             manager.createNotificationChannel(
@@ -104,6 +109,17 @@ class WakeNotifier(private val context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, channel)
         else @Suppress("DEPRECATION") Notification.Builder(context)
 
+    /** "Talk to JARVIS" on the permanent notification: works from the lock screen without unlocking (it starts the
+     *  voice conversation in the background, exactly as "Hey JARVIS" does). */
+    private fun talkAction(): Notification.Action {
+        // The service is running whenever this notification is up (it is the service's own), so a plain service
+        // intent reaches it; a tap on a notification button is allowed to start one from the background.
+        val intent = Intent(context, WakeService::class.java).setAction(WakeService.ACTION_TALK)
+        val pending = PendingIntent.getService(context, 7101, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val label = if (hindi()) "${WakeBus.assistantNameHi(context)} से बात करें" else "Talk to ${WakeBus.assistantName(context)}"
+        return Notification.Action.Builder(Icon.createWithResource(context, icon()), label, pending).build()
+    }
+
     /** The permanent notification. It stays while someone is signed in; the switch in Settings controls the microphone part. */
     fun serviceNotification(listening: Boolean = WakeBus.listening): Notification {
         return builder(CHANNEL_SERVICE)
@@ -112,6 +128,8 @@ class WakeNotifier(private val context: Context) {
             .setContentText(if (listening) "Nothing is sent until you say the words. Reminders and messages reach you here too."
                             else "Reminders and messages reach you even when the app is closed.")
             .setContentIntent(openApp())
+            .addAction(talkAction())
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
@@ -309,6 +327,8 @@ class WakeNotifier(private val context: Context) {
                 .setContentText(text)
                 .setStyle(Notification.BigTextStyle().bigText(text))
                 .setContentIntent(openApp())
+                .addAction(talkAction())
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .build(),
@@ -337,7 +357,9 @@ class WakeNotifier(private val context: Context) {
     }
 
     companion object {
-        const val CHANNEL_SERVICE = "jarvis-wake-service"
+        /** The minimised channel used until 26 Nov 2026 (deleted on start: it could never reach the lock screen). */
+        private const val CHANNEL_SERVICE_OLD = "jarvis-wake-service"
+        const val CHANNEL_SERVICE = "jarvis-wake-service-2"
         const val CHANNEL_REMINDERS = "jarvis-background"
         const val CHANNEL_REMINDERS_SILENT = "jarvis-background-silent"
         const val CHANNEL_RING = "jarvis-ring"

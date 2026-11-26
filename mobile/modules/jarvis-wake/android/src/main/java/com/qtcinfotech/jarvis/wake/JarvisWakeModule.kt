@@ -191,6 +191,7 @@ class JarvisWakeModule : Module() {
             (config["replyLang"] as? String)?.takeIf { it == "hi" || it == "en" }?.let { more.putString(WakeBus.KEY_REPLY_LANG, it) }
             (config["reminderSound"] as? String)?.takeIf { it == "default" || it == "silent" }?.let { more.putString(WakeBus.KEY_REMINDER_SOUND, it) }
             (config["bargeIn"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_BARGE_IN, it) }
+            (config["floatingButton"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_BUBBLE, it) }
             (config["voiceName"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_VOICE_NAME, it) }
             // The wake word chosen (its listener file, the phrase, the assistant's name that goes with it).
             (config["wakeModel"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_WAKE_MODEL, it) }

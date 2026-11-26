@@ -41,6 +41,8 @@ export interface WakeConfig {
   /** Walkie-talkie: keep the line to the relay open (the person's switch), and where the relay is (from /me/). */
   walkie?: boolean;
   walkieUrl?: string;
+  /** The floating JARVIS button over other apps (a tap talks, like "Hey JARVIS"); needs "Display over other apps". */
+  floatingButton?: boolean;
 }
 
 export interface WakeStatus {

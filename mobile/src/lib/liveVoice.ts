@@ -144,7 +144,7 @@ function handle(e: LiveEvent) {
 
 /** Open the line: the session from the server, then the native line. Resolves false when it could not open
  *  (no live voice on this server or this build, no token, no microphone): the caller uses the usual way. */
-export async function openLine(h: LineHooks, opts: { greet: boolean; bargeIn: boolean; privateOk?: boolean }): Promise<boolean> {
+export async function openLine(h: LineHooks, opts: { greet: boolean; bargeIn: boolean; privateOk?: boolean; greeting?: string; idleSeconds?: number }): Promise<boolean> {
   if (!liveSupported) return false;
   if (state !== 'off') closeLine();
   hooks = h;
@@ -177,9 +177,12 @@ export async function openLine(h: LineHooks, opts: { greet: boolean; bargeIn: bo
     rate: session.rate,
     bargeIn: opts.bargeIn,
     bargeLevel: 1200,
-    idleSeconds: session.idle_seconds,
+    // Voice mode (the line kept open while the app is up) waits longer before closing a quiet line.
+    idleSeconds: opts.idleSeconds ?? session.idle_seconds,
     maxSeconds: session.max_seconds,
-    greeting: opts.greet ? session.greeting : '',
+    // The app's own opening line when it has one (the greeting with what has come, when JARVIS opens); else the
+    // server's "Ji Sir?" after "Hey JARVIS"; nothing when he is already talking.
+    greeting: opts.greeting ?? (opts.greet ? session.greeting : ''),
   });
   if (!ok) {
     state = 'off';

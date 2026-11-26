@@ -16,6 +16,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { Animated, AppState, Platform } from 'react-native';
 
 import { type AlertGroup, type AlertQuestion, type EngineItem, type HeldOffer, GROUP_ORDER, GROUP_WORDS, describeWaiting, groupOf, questionFor, useAlertEngine } from './alertEngine';
+import { lockAvailable, lockEnabled, recentlyUnlocked } from './appLock';
 import { langOfText, replyLang, setReplyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { useDashboard } from './useDashboard';
@@ -23,7 +24,7 @@ import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from '.
 import { dataChanged } from './bus';
 import { downloadCsv, downloadPdf, shareText } from './download';
 import { CONFIRMABLE, SERVER_SAVED, TASK_DRAFTS, describeDraft } from './drafts';
-import { dayLabel, dayLabelHi, timeLabel, timeLabelHi } from './format';
+import { dayLabel, dayLabelHi, greeting, timeLabel, timeLabelHi } from './format';
 import { usePrefs } from './prefs';
 import { WAKE_PHRASE, WAKE_WORDS, wakeWordOf } from './wakeWords';
 import { useSession } from './session';
@@ -200,6 +201,17 @@ function minutesIn(text: string): number | undefined {
 const STOP_WORDS = /\b(stop|ruko|ruk jao|bas karo|bas|chup|mat padho|padhna band|sunana band|nahi padhna|don'?t read|stop reading|stop speaking)\b|रुको|बस|चुप|मत पढ़ो|पढ़ना बंद/i;
 const PREV_WORDS = /\b(pichhla|pichla|previous|pehle wala|pehle wali|isse pehle|iske pehle|usse pehle|go back|peeche wala)\b|पिछला|पहले वाला|इससे पहले|उससे पहले/i;
 const QUIET_WORDS = /\b(bolo mat|mat bolo|bolo hi mat|bolna mat|chup raho|chup ho jao|chup karo|be quiet|don'?t speak|don'?t disturb|disturb mat|suggestions? mat|yaad mat dila|remind mat|mute|silent|silent kar do|silent rehna|inko silent|ye silent)\b|बोलो मत|मत बोलो|चुप रहो|चुप करो|डिस्टर्ब मत|साइलेंट/i;
+// Voice mode off by voice (his ask, 26 Nov 2026): "ab bolo mat" / "suno mat" with no time in it ends the open
+// conversation and keeps it from starting again by itself for a while. With a time ("1 ghante tak bolo mat") the
+// quiet rule above applies instead.
+const VOICE_OFF_WORDS = /\b(suno mat|mat suno|sunna band|sunna bandh|sunna band karo|listening (?:off|band)|mic (?:off|band)|voice (?:mode )?(?:off|band)|bolo mat|mat bolo|chup raho|chup ho jao|stop listening|go to sleep|so jao)\b|सुनो मत|मत सुनो|सुनना बंद|बोलो मत|मत बोलो|चुप रहो|चुप हो जाओ/i;
+/** Voice mode: how long a quiet line stays open before it is closed and opened afresh, how long a line keeps coming
+ *  back with nothing said at all, and how long "suno mat" or the X keeps it from starting by itself. */
+const VOICE_MODE_IDLE_SECONDS = 300;
+const VOICE_MODE_SILENCE_MS = 30 * 60_000;
+const VOICE_OFF_FOR_MS = 10 * 60_000;
+/** He spoke this recently: a conversation is going on, and nothing new is said or shown over it. */
+const EXCHANGE_MS = 20_000;
 /** "5 baje tak": minutes from now till that clock time today (the evening reading when the morning one has gone). */
 function untilMinutes(text: string): number | undefined {
   const m = text.match(/(\d{1,2})(?::(\d{2}))?\s*(?:baje|बजे|pm|am|o'?clock)/i);
@@ -271,6 +283,27 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const answersRef = useRef<Answer[]>([]); // what is on screen, for "is list ka PDF" and "pehla wala"
   const lastQuestion = useRef('');
   const lastCountAt = useRef(0); // when a count was last answered with a card ("20 tasks"): "kaun se?" points at it
+  // Voice mode (his ask, 26 Nov 2026): the line opened by itself when the app came up and stays open; when it was
+  // last heard from; until when he has switched it off ("suno mat", the X, "bas"); and whether he spoke a moment
+  // ago (an exchange), so alerts keep their distance only while a conversation is really going on.
+  const voiceModeRef = useRef(false);
+  const lastHeardAt = useRef(0);
+  const voiceOffUntil = useRef(0);
+  const talkOpenRef = useRef(false);
+  const [exchanging, setExchanging] = useState(false);
+  const exchangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markExchange = (forMs: number = EXCHANGE_MS) => {
+    lastHeardAt.current = nowMs();
+    setExchanging(true);
+    if (exchangeTimer.current) clearTimeout(exchangeTimer.current);
+    exchangeTimer.current = setTimeout(() => {
+      exchangeTimer.current = null;
+      setExchanging(false);
+    }, forMs);
+  };
+  useEffect(() => {
+    talkOpenRef.current = talkOpen;
+  }, [talkOpen]);
 
   const messagesRef = useRef<Msg[]>([]);
   const draftRef = useRef<Draft | null>(null);
@@ -303,8 +336,11 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     barge: () => void;
     liveTool: (name: string, args: Record<string, unknown>) => Promise<string>;
     flushOffline: () => Promise<void>;
+    autoVoice: (greetFirst: boolean) => 'started' | 'later' | 'no';
+    reopenLive: () => void;
   }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, presentAlert: () => undefined,
-    wake: () => undefined, barge: () => undefined, liveTool: async () => '{}', flushOffline: async () => undefined });
+    wake: () => undefined, barge: () => undefined, liveTool: async () => '{}', flushOffline: async () => undefined,
+    autoVoice: () => 'no', reopenLive: () => undefined });
 
   // Which language the recogniser starts in. 'auto' is Indian English (Hinglish included) and, on Android 14+, the
   // phone switches to Hindi by itself. Older phones cannot switch, so there, once the last several turns were all
@@ -423,6 +459,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     questionRef.current = null; // an unanswered alert question stays on its banner, nothing more is asked
     cancelVoice();
     stopSpeaking();
+    // The X is his "switch it off": voice mode does not come back by itself for a while.
+    voiceModeRef.current = false;
+    voiceOffUntil.current = Date.now() + VOICE_OFF_FOR_MS;
     closeLine();
   };
   const history = () =>
@@ -654,6 +693,28 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       sayNow(`Okay, quiet till ${clockIn(mins)}.`, `ठीक है, ${clockIn(mins)} तक चुप रहूँगा।`);
       return true;
     }
+    // "Suno mat" / "ab bolo mat" with no time in it, while the conversation is open: voice mode goes off. JARVIS
+    // says so, the line closes once that is said, and it does not come back by itself for a while (the orb or "Hey
+    // JARVIS" bring it back at once).
+    if (VOICE_OFF_WORDS.test(text) && words <= 8 && (lineOpen() || talkOpenRef.current) && minutesIn(text) === undefined && untilMinutes(text) === undefined) {
+      stopSpeaking();
+      declineOffer();
+      stopReading();
+      voiceModeRef.current = false;
+      voiceOffUntil.current = Date.now() + VOICE_OFF_FOR_MS;
+      expectingRef.current = false;
+      silenceRef.current = 0;
+      questionRef.current = null;
+      const t = twin(`Okay, ${address}.`, `ठीक है, ${addressHi}।`);
+      push('jarvis', t.fallback);
+      if (lineOpen()) {
+        endAfterSpeech.current = true; // the line says it and closes (the same way as after "bas")
+        say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback });
+      } else {
+        say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: closeTalk });
+      }
+      return true;
+    }
     if (QUIET_WORDS.test(text) && words <= 10) {
       stopSpeaking();
       declineOffer();
@@ -688,6 +749,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const heard = (said: string) => {
     Haptics.selectionAsync().catch(() => undefined); // instant "got it" tick
     setHeldVisible(false); // he is talking: nothing should sit on top of the conversation
+    markExchange();
     silenceRef.current = 0;
     expectingRef.current = false;
     // "Hey JARVIS" said while JARVIS was already listening is a call, not an instruction: answer it here, at
@@ -937,6 +999,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const wake = () => {
     if (!user) return;
     setHeldVisible(false);
+    markExchange(); // he called: a conversation is starting
+    voiceOffUntil.current = 0; // "Hey JARVIS" after "suno mat": he wants it back
+    // With voice mode on and the app in front, the line he opens stays open afterwards too.
+    voiceModeRef.current = prefs.autoVoice && liveWanted && AppState.currentState === 'active';
     openTalk();
     try {
       router.navigate('/');
@@ -1009,14 +1075,19 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   // ---------------------------------------------------------------- the live conversation
-  /** Open the live line (greeting first when woken by "Hey JARVIS"). When it cannot open, the usual way takes over. */
-  const startLive = async (greet: boolean) => {
+  /** Open the live line (greeting first when woken by "Hey JARVIS"; the app's own opening line in voice mode).
+   *  When it cannot open, the usual way takes over. */
+  const startLive = async (greet: boolean, opening?: string) => {
     if (!user) return;
     const ok = await openLine({
       onHeard: (text, final) => {
         if (!final || !text.trim()) return;
         Haptics.selectionAsync().catch(() => undefined);
         setHeldVisible(false);
+        markExchange();
+        // In voice mode the line listens behind the home; the moment he speaks, the conversation comes up docked
+        // so he sees what was heard, the answer and any card.
+        if (!talkOpenRef.current) openTalk('dock');
         const last = messagesRef.current[messagesRef.current.length - 1];
         if (last?.role === 'user' && last.text === text) return;
         push('user', text);
@@ -1033,14 +1104,27 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         setLive(s);
         if (s === 'off') {
           setLiveSpeaking(false);
+          const wasEnding = endAfterSpeech.current;
           endAfterSpeech.current = false;
           if (reason === 'failed') push('jarvis', 'The live line dropped. Tap the orb to carry on.', { tone: 'error' });
+          // Voice mode: a line that closed only because it was quiet (or lived its full span) comes straight back,
+          // for as long as the app is in front and he has said something within the last while.
+          if ((reason === 'idle' || reason === 'expired') && !wasEnding && voiceModeRef.current && AppState.currentState === 'active'
+            && Date.now() - lastHeardAt.current < VOICE_MODE_SILENCE_MS) {
+            setTimeout(() => fns.current.reopenLive(), 800);
+          } else if (reason === 'idle' || reason === 'expired') {
+            voiceModeRef.current = false; // it rests now; the orb, a return to the app or "Hey JARVIS" bring it back
+          }
         }
       },
       onSpeaking: (on) => {
         setLiveSpeaking(on);
         if (!on && endAfterSpeech.current) {
+          // "Bas" / "suno mat": the goodbye is said, the line closes, and voice mode waits for him (the orb, a return
+          // to the app or "Hey JARVIS" bring it back).
           endAfterSpeech.current = false;
+          voiceModeRef.current = false;
+          voiceOffUntil.current = Date.now() + VOICE_OFF_FOR_MS;
           closeLine();
           setTalkOpen(false);
         }
@@ -1048,12 +1132,62 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       onListening: () => undefined,
       onLevel: (lvl) => level.setValue(Math.min(1, lvl / 3000)),
       onError: () => undefined,
-    }, { greet, bargeIn: prefs.bargeIn });
+    }, { greet, bargeIn: prefs.bargeIn, greeting: opening, idleSeconds: voiceModeRef.current ? VOICE_MODE_IDLE_SECONDS : undefined });
     if (!ok) {
+      voiceModeRef.current = false;
       // The usual turn-by-turn way: greet and listen with the phone's recogniser.
-      if (greet) greet_();
+      if (greet || opening) greet_(opening);
       else listen();
     }
+  };
+
+  /** Voice mode: the quiet line comes back without a word (he said nothing to answer). */
+  const reopenLive = () => {
+    if (!user || !voiceModeRef.current || lineOpen() || live === 'connecting' || AppState.currentState !== 'active') return;
+    if (!liveWanted) {
+      voiceModeRef.current = false;
+      return;
+    }
+    startLive(false).catch(() => undefined);
+  };
+
+  /**
+   * Voice mode when JARVIS opens (his ask, 26 Nov 2026): the moment the app is up (and unlocked), JARVIS greets him
+   * ("Good morning, Sir") and the line stays open behind the home, listening, so he just speaks. What has come is
+   * counted by the alert engine as always ("2 messages and 1 reminder have come. Shall I read them?") right after
+   * the greeting, so it is never a fixed line and never read out unasked: the few seconds of the greeting count as
+   * a conversation, so the engine keeps what is due until then and offers it as a count. Coming back to the app
+   * after a while reopens the line without a word; after a long while it greets again. Nothing starts when he has
+   * switched it off ("suno mat", the X) a little while ago, while a conversation is open, or in a meeting with
+   * silent replies; while JARVIS is only busy for a moment (speaking a reminder, thinking) the caller tries again.
+   */
+  const autoVoice = (greetFirst: boolean): 'started' | 'later' | 'no' => {
+    if (!user || !prefs.autoVoice || quietReplies) return 'no';
+    if (nowMs() < voiceOffUntil.current || lineOpen() || live === 'connecting' || talkOpen) return 'no';
+    if (nowMs() - wokeAtRef.current < 8000) return 'no'; // "Hey JARVIS" opened the app: that greeting is already on its way
+    if (speaking || liveSpeaking || busy || voice.state === 'listening') return 'later';
+    if (questionRef.current || offerRef.current || draftRef.current) return 'later'; // JARVIS is in the middle of something with him
+    const hour = new Date().getHours();
+    const en = greetFirst ? `${greeting()}, ${address}.` : '';
+    const hi = greetFirst ? `${hour < 12 ? 'सुप्रभात' : 'नमस्ते'}, ${addressHi}।` : '';
+    if (!liveWanted) {
+      // No live line on this phone: only the greeting, the usual way; the recogniser cannot be kept open all day.
+      if (greetFirst) {
+        push('jarvis', en);
+        expectingRef.current = true;
+        calledRef.current = true;
+        silenceRef.current = 0;
+        const t = twin(en, hi);
+        say(t.text, { interrupt: true, lang: t.lang, fallback: t.fallback, onDone: listen });
+      }
+      return 'started';
+    }
+    voiceModeRef.current = true;
+    markExchange(greetFirst ? 6000 : 2500); // the greeting goes first; what is due comes right after, as a count
+    setHeldVisible(false);
+    if (greetFirst) push('jarvis', en);
+    startLive(false, greetFirst ? twin(en, hi).text : '').catch(() => undefined);
+    return 'started';
   };
 
   /** A form the live model filled: run it on the server exactly like a sentence the brain read, let the usual
@@ -1704,6 +1838,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   const micPress = () => {
+    markExchange(); // he reached for JARVIS: a conversation is starting
+    voiceOffUntil.current = 0; // a tap after "suno mat": he wants it back
     if (liveWanted) {
       // On the live line a tap stops the voice mid-sentence; while JARVIS is only listening a tap changes nothing
       // (he is used to tapping before he speaks). The line ends with the X, with "bas", or after a quiet while.
@@ -1717,6 +1853,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       setHeldVisible(false);
       silenceRef.current = 0;
       expectingRef.current = true;
+      voiceModeRef.current = prefs.autoVoice; // the line he opens stays open afterwards, with voice mode on
       startLive(true).catch(() => listen()); // "Ji Sir?" from the line: he hears that it is listening
       return;
     }
@@ -1752,14 +1889,16 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     expectingRef.current = false;
   };
 
-  /** The greeting the usual way: "Ji Sir?" with the phone's voice, then listen with the recogniser. */
-  const greet_ = () => {
-    const show = `Ji ${address}?`;
-    push('jarvis', show);
+  /** The greeting the usual way: "Ji Sir?" with the phone's voice (or the line the app built, when it has one),
+   *  then listen with the recogniser. */
+  const greet_ = (opening?: string) => {
+    const show = opening || `Ji ${address}?`;
+    if (!opening) push('jarvis', show);
     expectingRef.current = true;
     calledRef.current = true; // he called: wait for him through the quiet rounds
     silenceRef.current = 0;
-    say(isMD ? `जी ${addressHi}?` : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
+    if (opening) say(opening, { lang: langOfText(opening), interrupt: true, fallback: opening, onDone: listen });
+    else say(isMD ? `जी ${addressHi}?` : 'जी?', { lang: 'hi', interrupt: true, fallback: show, onDone: listen });
   };
   const greet = () => {
     if (liveWanted && !lineOpen()) {
@@ -1773,6 +1912,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // whatever was still queued and listen at once, as a person would.
   const barge = () => {
     if (!user) return;
+    markExchange();
     stopSpeaking();
     const rest = restOfCutShort();
     cutRef.current = rest ? { ...rest, at: Date.now() } : null;
@@ -1790,7 +1930,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   useEffect(() => {
-    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge, liveTool, flushOffline };
+    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge, liveTool, flushOffline, autoVoice, reopenLive };
   });
   useEffect(() => onBarge(() => fns.current.barge()), []);
   // Said with no connection: tried again every 20 seconds and whenever the app comes back to the front.
@@ -1843,9 +1983,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const speakingAny = speaking || liveSpeaking;
 
   // A held-alerts offer is asked as soon as JARVIS is idle (not mid-sentence, not mid-search). Right after
-  // "Hey JARVIS" the held list may arrive a moment late: if he has not started talking yet, ask it then.
+  // "Hey JARVIS" the held list may arrive a moment late: if he has not started talking yet, ask it then. While the
+  // live line is still connecting it waits (said then, the words would be lost).
   useEffect(() => {
-    if (!offer || offer.id === presentedOffer.current || busy || speakingAny) return;
+    if (!offer || offer.id === presentedOffer.current || busy || speakingAny || live === 'connecting') return;
     const justWoke = Date.now() - wokeAtRef.current < 8000 && !voice.partial;
     if (listening && !justWoke && !liveOn) return;
     presentedOffer.current = offer.id;
@@ -1854,7 +1995,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       fns.current.presentOffer(offer, false);
     }, 0);
     return () => clearTimeout(kick);
-  }, [offer, listening, busy, speakingAny, liveOn, voice.partial, cancelVoice]);
+  }, [offer, listening, busy, speakingAny, liveOn, live, voice.partial, cancelVoice]);
 
   // "Hey JARVIS": the native listener either tells us directly (app open) or brings the app to the front
   // with a pending flag (app was closed). One microphone user at a time: it pauses while JARVIS talks or listens.
@@ -1892,11 +2033,64 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     return undefined;
   }, [listening, busy, prefs.wakeWordEnabled]);
 
-  // A conversation is open while the talk sheet is up or the live line is on, not only while a sentence is being
-  // said: nothing new is said or shown over it, and it is counted once the conversation ends (his rule, 25 Nov 2026).
+  // A conversation is going on while JARVIS speaks, thinks or has the recogniser open, and, with the talk sheet up
+  // or the live line on, while he has spoken within the last moments (an exchange): nothing new is said or shown
+  // over it, and it is counted once the conversation ends (his rule, 25 Nov 2026). In voice mode the line stays
+  // open behind the home all the while (26 Nov 2026), so an open line alone no longer counts: once he has been
+  // quiet for a while, reminders and messages come as they always did.
   useEffect(() => {
-    setTalking(listening || speakingAny || busy !== '' || talkOpen || live !== 'off');
-  }, [listening, speakingAny, busy, talkOpen, live, setTalking]);
+    const micOpen = voice.state === 'listening';
+    setTalking(micOpen || speakingAny || busy !== '' || ((talkOpen || live !== 'off') && exchanging));
+  }, [voice.state, speakingAny, busy, talkOpen, live, exchanging, setTalking]);
+
+  // Voice mode when the app comes up (his ask, 26 Nov 2026): at a cold start, and again whenever the app comes back
+  // to the front (the line is closed while it is away). The fingerprint lock, a tapped notification and "Hey JARVIS"
+  // all get their moment first; a reminder being spoken or a question being asked is waited out, trying again every
+  // few seconds for up to two minutes. A long time away earns a fresh greeting; a short one, only the open ear.
+  const signedInAs = user?.username ?? '';
+  useEffect(() => {
+    if (!signedInAs || !prefs.autoVoice) return undefined;
+    let cancelled = false;
+    let wentBackAt = 0;
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const begin = async (greetFirst: boolean) => {
+      if ((await lockEnabled()) && (await lockAvailable())) {
+        // Never talk over the locked screen: wait for the fingerprint (he may also just leave it locked).
+        const until = Date.now() + 90_000;
+        while (!cancelled && !recentlyUnlocked() && Date.now() < until) await pause(400);
+        if (cancelled || !recentlyUnlocked()) return;
+      }
+      for (let tries = 0; tries < 40 && !cancelled; tries++) {
+        if (AppState.currentState !== 'active') return;
+        if (fns.current.autoVoice(greetFirst) !== 'later') return;
+        await pause(3000);
+      }
+    };
+    const schedule = (greetFirst: boolean) => {
+      if (pending) clearTimeout(pending);
+      pending = setTimeout(() => {
+        pending = null;
+        begin(greetFirst).catch(() => undefined);
+      }, 600);
+    };
+    schedule(true);
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s !== 'active') {
+        if (!wentBackAt) wentBackAt = Date.now();
+        return;
+      }
+      const away = wentBackAt ? Date.now() - wentBackAt : 0;
+      wentBackAt = 0;
+      if (away < 3000) return; // the fingerprint prompt or a permission box, not a real time away
+      schedule(away >= VOICE_MODE_SILENCE_MS);
+    });
+    return () => {
+      cancelled = true;
+      if (pending) clearTimeout(pending);
+      sub.remove();
+    };
+  }, [signedInAs, prefs.autoVoice]);
 
   // The background service runs whenever someone is signed in: it is what brings reminders and messages to a
   // closed app. After a reboot, a reinstall, or Xiaomi stopping it, the app switches it back on whenever it comes
@@ -1943,6 +2137,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               wakeWord: wantListening,
               walkie: prefs.walkieEnabled,
               walkieUrl: user.walkie_url ?? '',
+              floatingButton: prefs.floatingButton,
             });
             configured = true;
             configuredPaName = paName;
@@ -1966,8 +2161,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       clearTimeout(kick);
       sub.remove();
     };
-    // The names, the voice and the listening language go along too, and again whenever they change.
-  }, [prefs.wakeWordEnabled, prefs.wakeWord, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, prefs.walkieEnabled, user, paName, hints, listenLang]);
+    // The names, the voice, the listening language and the floating button go along too, and again whenever they change.
+  }, [prefs.wakeWordEnabled, prefs.wakeWord, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, prefs.walkieEnabled, prefs.floatingButton, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

@@ -7,7 +7,16 @@ import android.content.SharedPreferences
 object WakeBus {
     @Volatile var listener: (() -> Unit)? = null
     @Volatile var pendingWake = false
-    @Volatile var appInForeground = false
+    /** Told whenever the app comes to the front or goes behind, or a voice-only conversation starts or ends (the
+     *  floating button shows and hides on these). */
+    @Volatile var stateListener: (() -> Unit)? = null
+    @Volatile private var foreground = false
+    var appInForeground: Boolean
+        get() = foreground
+        set(value) {
+            foreground = value
+            stateListener?.invoke()
+        }
     /**
      * The app asked the wake-word microphone to step aside (it is listening or speaking itself). The request
      * expires by itself: if the app is closed or killed while paused, "Hey JARVIS" comes back within a minute
@@ -28,7 +37,14 @@ object WakeBus {
     /** Android is feeding the listener silence (it was restarted in the background): the app must restart it. */
     @Volatile var micBlocked = false
     /** A background (voice-only) conversation is going on: the wake-word mic and the reminder watcher stand aside. */
-    @Volatile var inConversation = false
+    @Volatile private var conversing = false
+    var inConversation: Boolean
+        get() = conversing
+        set(value) {
+            val changed = conversing != value
+            conversing = value
+            if (changed) stateListener?.invoke()
+        }
     /** The wake-word service has the microphone open right now (whoever wants to listen next waits for this to clear). */
     @Volatile var micHeld = false
 
@@ -144,4 +160,8 @@ object WakeBus {
     const val KEY_VOICE_NAME = "voice_name"
     /** JARVIS speaks in the Grok voice (default); false = the phone's own voice only. */
     const val KEY_GROK_VOICE = "grok_voice"
+    /** The floating JARVIS button over other apps (his ask, 26 Nov 2026): on or off, and where he last left it. */
+    const val KEY_BUBBLE = "bubble"
+    const val KEY_BUBBLE_X = "bubble_x"
+    const val KEY_BUBBLE_Y = "bubble_y"
 }

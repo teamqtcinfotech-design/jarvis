@@ -59,6 +59,8 @@ class WakeService : Service() {
     @Volatile private var liveLoop: LiveLoop? = null
     /** One beep player for the life of the service (a new one for every wake-up is never given back to Android). */
     private var beep: ToneGenerator? = null
+    /** The floating JARVIS button over other apps (FloatingBubble): a tap talks, like "Hey JARVIS". */
+    private var bubble: FloatingBubble? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -66,6 +68,7 @@ class WakeService : Service() {
         super.onCreate()
         notifier = WakeNotifier(this)
         current = this
+        WakeBus.stateListener = { Handler(Looper.getMainLooper()).post { refreshBubble() } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,6 +77,12 @@ class WakeService : Service() {
             WatchdogReceiver.cancel(this)
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_TALK) {
+            // The notification's "Talk to JARVIS" (the lock screen too) or the floating button: the same as "Hey JARVIS".
+            if (!WakeBus.running) WakeService.start(this)  // the service had died: come up properly first
+            Handler(Looper.getMainLooper()).postDelayed({ onWakeWord() }, if (WakeBus.running) 0L else 600L)
+            return START_STICKY
         }
         val prefs = WakeBus.prefs(this)
         val micAllowed = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -109,7 +118,17 @@ class WakeService : Service() {
             }
         }
         WalkieEngine.start(this)
+        refreshBubble()
         return START_STICKY
+    }
+
+    /** The floating button shows while it is switched on (the app's setting, handed over at every start) and allowed,
+     *  the app is not in front and no voice-only conversation is showing its strip; otherwise it goes. Called at every
+     *  start and on every such change (WakeBus.stateListener). */
+    private fun refreshBubble() {
+        val wanted = !stopped && WakeBus.prefs(this).getBoolean(WakeBus.KEY_BUBBLE, true) && !WakeBus.appInForeground && !WakeBus.inConversation
+        val b = bubble ?: FloatingBubble(this) { onWakeWord() }.also { bubble = it }
+        if (wanted && b.canShow()) b.show() else b.hide()
     }
 
     /** Returns whether the service is now a microphone service. */
@@ -637,6 +656,9 @@ class WakeService : Service() {
     override fun onDestroy() {
         stopped = true
         if (current === this) current = null
+        WakeBus.stateListener = null
+        bubble?.hide()
+        bubble = null
         WakeBus.running = false
         WakeBus.listening = false
         // Stopped by the phone (not by a sign-out): the alarm starts it again in a few minutes.
@@ -664,6 +686,8 @@ class WakeService : Service() {
     companion object {
         private const val TAG = "JarvisWake"
         const val ACTION_STOP = "com.qtcinfotech.jarvis.wake.STOP"
+        /** Talk to JARVIS now (the notification's button, also on the lock screen): the same as "Hey JARVIS". */
+        const val ACTION_TALK = "com.qtcinfotech.jarvis.wake.TALK"
         /** The running service, so a live push (another service) can hand it a question to listen for. */
         @Volatile private var current: WakeService? = null
 
