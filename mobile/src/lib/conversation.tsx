@@ -28,7 +28,7 @@ import { dayLabel, dayLabelHi, greeting, timeLabel, timeLabelHi } from './format
 import { usePrefs } from './prefs';
 import { WAKE_PHRASE, WAKE_WORDS, wakeWordOf } from './wakeWords';
 import { useSession } from './session';
-import { closeLine, hasCollected, type LineState, lineOpen, lineSpeaking, liveAvailable, openLine, takeCollected } from './liveVoice';
+import { closeLine, hasCollected, type LineState, lineOpen, lineSpeaking, lineState, liveAvailable, openLine, takeCollected } from './liveVoice';
 import { enqueue, flush, queued } from './offlineQueue';
 import { onSpeakingChange, say, setSpeechQuiet, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
 import type { AlertAnswer, AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
@@ -292,8 +292,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const talkOpenRef = useRef(false);
   const [exchanging, setExchanging] = useState(false);
   const exchangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const markExchange = (forMs: number = EXCHANGE_MS) => {
-    lastHeardAt.current = nowMs();
+  const markExchange = (forMs: number = EXCHANGE_MS, heard = true) => {
+    if (heard) lastHeardAt.current = nowMs();
     setExchanging(true);
     if (exchangeTimer.current) clearTimeout(exchangeTimer.current);
     exchangeTimer.current = setTimeout(() => {
@@ -923,7 +923,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // "Sir, while you were away: … Shall I read them?" — asked once JARVIS is idle (or right after "Hey JARVIS").
   const presentOffer = (o: HeldOffer, greetFirst: boolean) => {
     offerRef.current = o;
-    openTalk();
+    // With the live line open behind the home (voice mode), the count is asked from where he is and the screen stays
+    // as it was: the conversation comes up the moment he answers (his ask, 26 Nov 2026: "just say Namaste, Sir; the
+    // screen opens when I speak"). Without the line, the conversation comes up so he sees JARVIS listening.
+    if (!lineOpen()) openTalk();
     const hi = replyLang() === 'hi'; // the language JARVIS is using with him now (Hindi right after the opening greeting)
     const show = (greetFirst ? `Ji ${address}? ` : '') + o.text;
     const speak = (greetFirst ? `जी ${isMD ? addressHi : ''}? `.replace(' ?', '?') : '') + (hi ? o.textHi : o.text);
@@ -1077,9 +1080,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
 
   // ---------------------------------------------------------------- the live conversation
   /** Open the live line (greeting first when woken by "Hey JARVIS"; the app's own opening line in voice mode).
-   *  When it cannot open, the usual way takes over. */
-  const startLive = async (greet: boolean, opening?: string) => {
+   *  When it cannot open, the usual way takes over; with `tries` above one (the opening of voice mode) a line that
+   *  would not open is tried again first, so the greeting comes through the line once it is connected (his ask,
+   *  26 Nov 2026: "first make the voice connection, then say Namaste, Sir"). */
+  const startLive = async (greet: boolean, opening?: string, tries = 1) => {
     if (!user) return;
+    let opened = false;
     const ok = await openLine({
       onHeard: (text, final) => {
         if (!final || !text.trim()) return;
@@ -1103,11 +1109,13 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       onTool: (_callId, name, args) => fns.current.liveTool(name, args),
       onState: (s, reason) => {
         setLive(s);
+        if (s === 'open') opened = true;
         if (s === 'off') {
           setLiveSpeaking(false);
           const wasEnding = endAfterSpeech.current;
           endAfterSpeech.current = false;
-          if (reason === 'failed') push('jarvis', 'The live line dropped. Tap the orb to carry on.', { tone: 'error' });
+          // (A line that never opened and is about to be tried again says nothing yet.)
+          if (reason === 'failed' && (opened || tries <= 1)) push('jarvis', 'The live line dropped. Tap the orb to carry on.', { tone: 'error' });
           // Voice mode: a line that closed only because it was quiet (or lived its full span) comes straight back,
           // for as long as the app is in front and he has said something within the last while.
           if ((reason === 'idle' || reason === 'expired') && !wasEnding && voiceModeRef.current && AppState.currentState === 'active'
@@ -1135,6 +1143,15 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       onError: () => undefined,
     }, { greet, bargeIn: prefs.bargeIn, greeting: opening, idleSeconds: voiceModeRef.current ? VOICE_MODE_IDLE_SECONDS : undefined });
     if (!ok) {
+      if (tries > 1 && AppState.currentState === 'active') {
+        // Once more in a moment. Nothing else is said meanwhile (the count of what came waits for the greeting);
+        // the hold does not count as him speaking.
+        markExchange(4500, false);
+        await new Promise((r) => setTimeout(r, 1500));
+        if (lineState() !== 'off' || AppState.currentState !== 'active') return; // opened another way meanwhile, or he left
+        await startLive(greet, opening, tries - 1);
+        return;
+      }
       voiceModeRef.current = false;
       // The usual turn-by-turn way: greet and listen with the phone's recogniser.
       if (greet || opening) greet_(opening);
@@ -1194,7 +1211,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     markExchange(greetFirst ? 4000 : 2500); // the greeting goes first; what is due comes right after, as a count
     setHeldVisible(false);
     if (greetFirst) push('jarvis', en);
-    startLive(false, greetFirst ? twin(en, hi).text : '').catch(() => undefined);
+    // The line first, then the greeting through it (a line that will not open right after launch is tried three
+    // times before the phone's voice steps in). The screen stays as it is: the conversation comes up when he speaks.
+    startLive(false, greetFirst ? twin(en, hi).text : '', 3).catch(() => undefined);
     if (greetFirst) {
       // "Sir, kuch update hai?": when nothing new has been offered a few seconds after the greeting, JARVIS says so.
       const offerAt = presentedOffer.current;
