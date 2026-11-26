@@ -21,10 +21,10 @@ import anthropic
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 
-from . import actions, ai_brain, ai_usage, ask, assistant, datacards, scheduling, services
+from . import actions, ai_brain, ai_usage, ask, assistant, datacards, memory, scheduling, services
 from . import lang as lang_mod
 from . import timeutils as tu
-from .models import AiUsage, BrainThread, Kind, Priority, PrivateTask, Status, User
+from .models import AiUsage, BrainThread, Kind, Memory, Priority, PrivateTask, Status, User
 
 log = logging.getLogger("jarvis.act")
 
@@ -48,16 +48,22 @@ WHAT YOU DO
 - Questions: one exact sentence from the facts (the name for one item, the number for a number, yes or no first and at most one nearby fact); totals in hours and minutes from the diary; never count or add up yourself. "Dikhao" / "list" = also set show.
 - Someone else's personal items are private; the tools already keep them out.
 
+MEMORY
+- <memory> (when present) holds what JARVIS knows about the speaker for good: who people are to them, how they like things done, their habits, and corrections they made before. Use it without being asked: a habit decides a default ("Mehta ji" on a Friday means the usual 4 PM), a preference decides how a thing is done, a correction is binding (that mistake is never made again). Facts about items, counts and times still come from the tools.
+- A turn marked <correction> is the speaker correcting your last reply or action: take back what was wrong (undo, move_item, edit_item, cancel_items, or the right item this time) and do what they meant, in one go; say only what stands now. Never defend, never explain.
+
 THE REPLY
 - One sentence, two at most, specific: what was done and when ("Done: Meeting with Sharma ji, kal 7 PM."), the answer, or the one question. When a tool result carries "said", use that line as it is: it already names who got what.
-- No "Ji Sir", no "Okay Sir", no filler; the address at most once, and only in a question.
+- No "Ji Sir", no "Okay Sir", no filler; the address at most once, and only in a question. Never open two replies in a row the same way (look at your last reply in this thread).
+- A suggestion of your own (a better time, a thing worth moving, a shorter way) is never mixed into the answer: ask first, in one short line ("{address}, ek suggestion dun?"), and give it only after a yes in the next turn.
 - say_en in the speaker's own way (Roman Hinglish when they spoke Hinglish, English when English); say_hi the same sentence in Devanagari.
 
 OUTPUT
 After the tools, reply with ONLY a JSON object, no other text:
-{{"say_en": "...", "say_hi": "...", "about": ["id", ...], "show": "", "show_params": {{}}}}
+{{"say_en": "...", "say_hi": "...", "about": ["id", ...], "show": "", "show_params": {{}}, "learned": ""}}
 - about: the ids of the items you changed or spoke about, first the one "isko" would mean next; empty when none.
 - show: a card kind only when the speaker asked to see something laid out (today, upcoming, tasks, late, pending, alerts, people, person, panel, messages); else "". show_params: its filters ({{"who": "Nikki"}}, {{"group": "partners", "words": "Pune"}}), else {{}}.
+- learned: one short plain sentence worth remembering for good, when this turn taught one: the rule a correction teaches ("'Sharma ji wali' means the GST meeting, not the Sharma Traders call"), a preference the speaker stated, who someone is. Never a one-off item, never a number or time of one item. "" otherwise (almost always).
 When you are not sure what the speaker means and have not changed anything yet, reply with exactly {{"escalate": true}}: a stronger reading of the same thread follows.
 """
 
@@ -478,11 +484,13 @@ def _open_items_text(t: _Turn) -> str:
     return "\n".join(parts) or "nothing open"
 
 
-def _turn_message(t: _Turn, recap: str = "") -> dict:
+def _turn_message(t: _Turn, recap: str = "", correction: bool = False) -> dict:
     now = t.facts.now
     head = [f'<turn now="{now.strftime("%A %d %B %Y, %H:%M")} (India)">']
     if recap:
         head.append(f"<earlier_today>{recap}</earlier_today>")
+    if correction:
+        head.append("<correction>the speaker is correcting your last reply or action</correction>")
     screen = [{"id": i.get("id"), "title": i.get("title")} for i in ((t.screen or {}).get("items") or [])[:12] if isinstance(i, dict)]
     if screen:
         head.append("<on_screen>" + json.dumps(screen, ensure_ascii=False) + "</on_screen>")
@@ -610,8 +618,13 @@ def run(user: User, text: str, *, previous: str = "", history: list | None = Non
     address, address_hi = services.address_of(user), services.address_hi_of(user)
     system = [{"type": "text", "cache_control": {"type": "ephemeral"},
                "text": ACT_SYSTEM_PROMPT.format(reader=services.role_label(user), address=address, address_hi=address_hi)}]
+    # What JARVIS knows about this person for good (core/memory.py), its own cached block: it changes rarely.
+    known = memory.block(user, address)
+    if known:
+        system.append({"type": "text", "cache_control": {"type": "ephemeral"}, "text": known})
     row, thread, recap = _load_thread(user, t.facts.today)
-    first = _turn_message(t, recap)
+    correction = memory.is_correction(t.text) and bool(thread)  # "galat", "nahi, wo wali": the last turn is being corrected
+    first = _turn_message(t, recap, correction)
     models = [settings.JARVIS_AI_ACT_MODEL, settings.JARVIS_AI_ACT_STRONG_MODEL]
     used = models[0]
     data, turn_messages = None, [first]
@@ -635,6 +648,7 @@ def run(user: User, text: str, *, previous: str = "", history: list | None = Non
         else:
             return None
     _save_thread(row, thread, turn_messages, recap)
+    _learn(t, data, correction, thread, turn_messages)
     if t.refs:
         actions.remember_done(user, t.refs, t.label)
     if t.draft is not None:
@@ -649,6 +663,21 @@ def _save_thread(row: BrainThread, thread: list, turn_messages: list, recap: str
     row.messages_json = json.dumps(messages, ensure_ascii=False, default=str)
     row.turns += 1
     row.save(update_fields=["messages_json", "turns", "updated_at"])
+
+
+def _learn(t: _Turn, data: dict, correction: bool, thread: list, turn_messages: list) -> None:
+    """What this turn taught (26 Nov 2026): the rule the model named goes into memory the same minute (a
+    correction's rule as a correction, anything else as a preference), and a correction turn becomes a bank case
+    with the turn it corrected, replayed against the real model by `manage.py bank run`."""
+    learned = " ".join(str(data.get("learned") or "").split())[:memory.NOTE_CHARS] if isinstance(data, dict) else ""
+    try:
+        if learned:
+            memory.note(t.user, learned, kind=Memory.Kind.CORRECTION if correction else Memory.Kind.PREFERENCE)
+        if correction:
+            turns = memory.split_turns(thread)
+            memory.record_correction(t.user, t.facts.today, t.text, turns[-1] if turns else [], turn_messages, learned)
+    except Exception:  # noqa: BLE001 — a note that could not be kept must never cost the turn
+        log.exception("act: what the turn taught could not be kept")
 
 
 def _finish(t: _Turn, data: dict, model: str) -> dict:

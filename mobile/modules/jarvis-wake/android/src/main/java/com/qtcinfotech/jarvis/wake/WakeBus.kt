@@ -48,6 +48,17 @@ object WakeBus {
     /** The wake-word service has the microphone open right now (whoever wants to listen next waits for this to clear). */
     @Volatile var micHeld = false
 
+    /** When he was last known to be with the phone: unlocked it, said "Hey JARVIS", spoke to JARVIS (his rule, 26 Nov
+     *  2026: JARVIS speaks only to someone who is really there; otherwise it shows, and counts when he is back). */
+    @Volatile var lastPresentAt = 0L
+    const val HERE_MS = 3 * 60_000L
+
+    fun notePresent() {
+        lastPresentAt = System.currentTimeMillis()
+    }
+
+    fun presentNow(): Boolean = System.currentTimeMillis() - lastPresentAt < HERE_MS
+
     /** The app's code is loaded (open, or behind another app): it runs the conversation on the live line, whether or
      *  not its screen is showing. Otherwise the app is told when it next comes up. */
     fun onWake() {
@@ -164,4 +175,9 @@ object WakeBus {
     const val KEY_BUBBLE = "bubble"
     const val KEY_BUBBLE_X = "bubble_x"
     const val KEY_BUBBLE_Y = "bubble_y"
+    /** With the app closed: speak only when he is here (HERE_MS), and listen to the room before speaking (RoomSense). */
+    const val KEY_HERE_ONLY = "here_only"
+    const val KEY_ROOM_CHECK = "room_check"
+    /** What came while he was not with the phone (JSON array of items): offered as a count when he is back. */
+    const val KEY_HELD_ITEMS = "held_items"
 }

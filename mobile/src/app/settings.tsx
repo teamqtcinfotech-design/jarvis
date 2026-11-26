@@ -522,6 +522,20 @@ function AlertsSection() {
           ))}
         </View>
       ) : null}
+      <Row
+        title="Speak only when I’m here"
+        detail={prefs.speakOnlyWhenHere
+          ? 'On. A reminder or a count is said only when you touched the screen, spoke, or said “Hey JARVIS” within the last few minutes. Otherwise it is shown with a buzz, and counted when you are back.'
+          : 'Off. JARVIS speaks whenever the app is in front, even to an empty desk.'}
+        right={<Switch value={prefs.speakOnlyWhenHere} onValueChange={(v) => update({ speakOnlyWhenHere: v })} trackColor={{ true: colors.gold }} />}
+      />
+      <Row
+        title="Listen to the room first"
+        detail={prefs.checkRoomBeforeSpeaking
+          ? 'On. Before speaking, JARVIS listens for a moment: several voices or steady noise means you are busy, so everything but the urgent waits. (Needs the phone’s always-on part.)'
+          : 'Off. JARVIS speaks without listening to the room.'}
+        right={<Switch value={prefs.checkRoomBeforeSpeaking} onValueChange={(v) => update({ checkRoomBeforeSpeaking: v })} trackColor={{ true: colors.gold }} />}
+      />
       <Row title="Treat me as away after" detail="If the phone hasn't moved for this long, reminders wait until you pick it up." />
       <View style={s.chips}>
         {[1, 5, 10, 15, 30].map((m) => (
@@ -767,11 +781,14 @@ function MemorySection() {
       <Txt variant="label">Notes</Txt>
       <Card style={s.card}>
         {memories === null ? <Txt variant="small">Loading…</Txt> : null}
-        {memories?.length === 0 ? <Txt variant="small">Nothing yet. Say “yaad rakhna ki…” and JARVIS keeps it here.</Txt> : null}
+        {memories?.length === 0 ? <Txt variant="small">Nothing yet. Say “yaad rakhna ki…” and JARVIS keeps it here. What it learns by itself from your conversations, every night, is listed here too.</Txt> : null}
         {memories?.map((m) => (
           <View key={m.id} style={s.memory}>
-            <Icon name="bookmark-outline" size={16} color={colors.gold} />
-            <Txt variant="body" style={{ flex: 1, marginLeft: 8 }}>{m.text}</Txt>
+            <Icon name={m.source === 'learned' ? 'sparkles-outline' : 'bookmark-outline'} size={16} color={colors.gold} />
+            <View style={{ flex: 1, marginLeft: 8 }}>
+              <Txt variant="body">{m.text}</Txt>
+              {m.source === 'learned' ? <Txt variant="small">Learned{m.kind && m.kind !== 'note' ? ` · ${m.kind}` : ''}</Txt> : null}
+            </View>
             <Pressable onPress={() => forget(m.id)} hitSlop={10} accessibilityLabel="Forget this">
               <Icon name="trash-outline" size={18} color={colors.muted} />
             </Pressable>

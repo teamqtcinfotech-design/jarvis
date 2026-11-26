@@ -17,6 +17,7 @@ import { Animated, AppState, Platform } from 'react-native';
 
 import { type AlertGroup, type AlertQuestion, type EngineItem, type HeldOffer, GROUP_ORDER, GROUP_WORDS, describeWaiting, groupOf, pileOf, questionFor, useAlertEngine } from './alertEngine';
 import { lockAvailable, lockEnabled, recentlyUnlocked } from './appLock';
+import { noteHere } from './presence';
 import { langOfText, pinnedLang, replyLang, setReplyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { useDashboard } from './useDashboard';
@@ -750,6 +751,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const heard = (said: string) => {
     Haptics.selectionAsync().catch(() => undefined); // instant "got it" tick
     setHeldVisible(false); // he is talking: nothing should sit on top of the conversation
+    noteHere('spoke');
     markExchange();
     silenceRef.current = 0;
     expectingRef.current = false;
@@ -1003,6 +1005,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const wake = () => {
     if (!user) return;
     setHeldVisible(false);
+    noteHere('wake');
     markExchange(); // he called: a conversation is starting
     voiceOffUntil.current = 0; // "Hey JARVIS" after "suno mat": he wants it back
     // With voice mode on and the app in front, the line he opens stays open afterwards too.
@@ -1091,6 +1094,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         if (!final || !text.trim()) return;
         Haptics.selectionAsync().catch(() => undefined);
         setHeldVisible(false);
+        noteHere('spoke');
         markExchange();
         // In voice mode the line listens behind the home; the moment he speaks, the conversation comes up docked
         // so he sees what was heard, the answer and any card.
@@ -1227,6 +1231,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
    *  (and how many older ones are still on his list), in the opening's language. */
   const afterGreeting = (offerAt: number, startedAt: number) => {
     if (!user || !lineOpen() || !voiceModeRef.current) return;
+    if (presence.state === 'quiet' || presence.state === 'meeting') return; // quiet hours, a meeting: silent, always
     if (presentedOffer.current !== offerAt || offer || offerRef.current || questionRef.current || draftRef.current) return;
     if (lastHeardAt.current > startedAt || speaking || liveSpeaking || busy) return; // he has spoken, or JARVIS is mid-line
     const n = pileOf(waiting, held).length;
@@ -1892,6 +1897,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   const micPress = () => {
+    noteHere('tap');
     markExchange(); // he reached for JARVIS: a conversation is starting
     voiceOffUntil.current = 0; // a tap after "suno mat": he wants it back
     if (liveWanted) {
@@ -1966,6 +1972,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // whatever was still queued and listen at once, as a person would.
   const barge = () => {
     if (!user) return;
+    noteHere('spoke');
     markExchange();
     stopSpeaking();
     const rest = restOfCutShort();
@@ -2209,6 +2216,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
               walkie: prefs.walkieEnabled,
               walkieUrl: user.walkie_url ?? '',
               floatingButton: prefs.floatingButton,
+              speakOnlyWhenHere: prefs.speakOnlyWhenHere,
+              checkRoom: prefs.checkRoomBeforeSpeaking,
             });
             configured = true;
             configuredPaName = paName;
@@ -2233,7 +2242,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       sub.remove();
     };
     // The names, the voice, the listening language and the floating button go along too, and again whenever they change.
-  }, [prefs.wakeWordEnabled, prefs.wakeWord, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, prefs.walkieEnabled, prefs.floatingButton, user, paName, hints, listenLang]);
+  }, [prefs.wakeWordEnabled, prefs.wakeWord, prefs.privateAloudWhenLocked, prefs.voiceAccent, prefs.replyLanguage, prefs.reminderSound, prefs.bargeIn, prefs.voiceName, prefs.walkieEnabled, prefs.floatingButton, prefs.speakOnlyWhenHere, prefs.checkRoomBeforeSpeaking, user, paName, hints, listenLang]);
 
   // Signing out clears everything.
   const prevUser = useRef(user);

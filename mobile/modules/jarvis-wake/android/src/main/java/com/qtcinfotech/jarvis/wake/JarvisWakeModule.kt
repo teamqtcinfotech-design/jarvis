@@ -192,6 +192,8 @@ class JarvisWakeModule : Module() {
             (config["reminderSound"] as? String)?.takeIf { it == "default" || it == "silent" }?.let { more.putString(WakeBus.KEY_REMINDER_SOUND, it) }
             (config["bargeIn"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_BARGE_IN, it) }
             (config["floatingButton"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_BUBBLE, it) }
+            (config["speakOnlyWhenHere"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_HERE_ONLY, it) }
+            (config["checkRoom"] as? Boolean)?.let { more.putBoolean(WakeBus.KEY_ROOM_CHECK, it) }
             (config["voiceName"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_VOICE_NAME, it) }
             // The wake word chosen (its listener file, the phrase, the assistant's name that goes with it).
             (config["wakeModel"] as? String)?.takeIf { it.isNotBlank() }?.let { more.putString(WakeBus.KEY_WAKE_MODEL, it) }
@@ -231,6 +233,13 @@ class JarvisWakeModule : Module() {
 
         Function("pause") { WakeBus.paused = true }
         Function("resume") { WakeBus.paused = false }
+
+        /** The room right now (RoomSense): busy = several voices or steady noise over the last moment; at most [ms]
+         *  of listening when no microphone is already open. Never throws; "none" when it could not be measured. */
+        AsyncFunction("roomCheck") { ms: Int ->
+            val out = RoomSense.check(context, ms.toLong())
+            mapOf("busy" to out.optBoolean("busy"), "level" to out.optInt("level"), "share" to out.optDouble("share"), "source" to out.optString("source"))
+        }
 
         Function("consumePendingWake") {
             val pending = WakeBus.pendingWake

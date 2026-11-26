@@ -286,4 +286,6 @@ def reminders_for(user: User, hours: int = 48) -> dict:
         if override and datetime.fromisoformat(w["end"]) <= override:
             continue
         meetings.append({"start": w["start"], "end": w["end"]})
-    return {"server_time": now.isoformat(), "reminders": result, "busy_windows": meetings}
+    # Whether the always-on part must keep quiet right now (a meeting, quiet hours): it shows, never speaks.
+    from .services import silence_now  # noqa: PLC0415 — services imports this module
+    return {"server_time": now.isoformat(), "reminders": result, "busy_windows": meetings, "silence": silence_now(user, prefs, now)}

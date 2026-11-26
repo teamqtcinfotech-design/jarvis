@@ -601,6 +601,10 @@ export interface AskAnswer {
 export interface MemoryItem {
   id: string;
   text: string;
+  /** What kind of fact: a note he asked to keep, or what JARVIS learned (person, preference, habit, correction). */
+  kind?: 'note' | 'person' | 'preference' | 'habit' | 'correction';
+  /** "said" = he asked JARVIS to remember it; "learned" = JARVIS worked it out from the day's conversations. */
+  source?: 'said' | 'learned';
   created_at: string;
 }
 

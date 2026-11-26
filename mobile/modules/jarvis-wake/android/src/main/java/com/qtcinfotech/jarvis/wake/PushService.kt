@@ -104,6 +104,7 @@ class PushService : FirebaseMessagingService() {
                 question = question,
                 reminderKey = key,
                 isPrivate = data["is_private"] == "1",
+                silent = data["silent"] == "1",
             )
             return
         }
@@ -119,6 +120,14 @@ class PushService : FirebaseMessagingService() {
             ring = ring,
             quiet = data["quiet"] == "1",
             seenLabel = data["seen_label"] ?: "Seen",
+            silent = data["silent"] == "1",
+            kind = when {
+                data["ref_type"] == "message" -> "message"
+                data["kind"] == "NEW_REQUEST" -> "request"
+                data["ref_type"] == "approval" -> "approval"
+                data["kind"] == "TASK_ASSIGNED" -> "task"
+                else -> "update"
+            },
         )
     }
 

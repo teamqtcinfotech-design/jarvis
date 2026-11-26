@@ -19,7 +19,7 @@ import anthropic
 from django.conf import settings
 from django.utils import timezone
 
-from . import ai_brain, ai_usage, datacards, scheduling, services
+from . import ai_brain, ai_usage, datacards, memory, scheduling, services
 from . import timeutils as tu
 from .taskpanel.client import get_client as tp_client
 from .models import AiUsage, Alert, Contact, Memory, StaffMember, Status
@@ -45,6 +45,7 @@ THE ANSWER
 - The address ("{address}") at most once, and only in a question or a greeting; never "Ji Sir", never "Okay Sir", never filler.
 - A person: who they are (job, department), then only what was asked (their open work, what they sent, leave). Everything a tool returns about them is allowed; nothing is private except the speaker's own personal items, which the tools already handle.
 - "Staff" means the company's staff panel (the staff tool: the whole company, by department); "team" means only the few with JARVIS accounts (in the context). "Kitne staff hain" is answered from the staff tool, never from the team list.
+- <memory> (when present) holds what JARVIS knows about the speaker for good: who people are to them, how they like things done, habits, corrections. Use it to understand the question (who "Mehta ji" is, which "Sharma ji wali" is meant); items, counts and times still come from the tools.
 - NOT A QUESTION: when the speaker is telling you to DO something (give work to someone: "X ko bolo…", "X ko task do", send a message, set or move a meeting, change, complete or cancel an item, set a reminder), or asks whether you can do such a thing, do not answer and never say you cannot: reply with exactly {{"do": true}} and nothing else. JARVIS can give work to anyone on the team or in the staff directory, send messages and change the diary; the part of JARVIS that does it takes over.
 
 OUTPUT
@@ -479,7 +480,11 @@ def try_answer(user, text: str, ctx: dict, include_private: bool, on_screen: dic
         "on_screen": [{"id": i.get("id"), "title": i.get("title")} for i in ((on_screen or {}).get("items") or [])[:15]],
         "phone_unlocked": include_private,
     }
-    system = ASK_SYSTEM_PROMPT.format(reader=services.role_label(user), address=address, address_hi=address_hi)
+    system = [{"type": "text", "text": ASK_SYSTEM_PROMPT.format(reader=services.role_label(user), address=address, address_hi=address_hi),
+               "cache_control": {"type": "ephemeral"}}]
+    known = memory.block(user, address)  # what JARVIS knows about this person for good (core/memory.py)
+    if known:
+        system.append({"type": "text", "text": known, "cache_control": {"type": "ephemeral"}})
     messages = [{"role": "user", "content": f"<context>\n{json.dumps(context, ensure_ascii=False, default=str)}\n</context>\n<question>\n{text[:1000]}\n</question>"}]
     client = ai_brain._get_answer_client()  # noqa: SLF001 — the long-timeout client, shared with web answers
     try:
@@ -487,7 +492,7 @@ def try_answer(user, text: str, ctx: dict, include_private: bool, on_screen: dic
             response = client.messages.create(
                 model=settings.JARVIS_AI_ASK_MODEL,
                 max_tokens=2500,
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                system=system,
                 messages=messages,
                 tools=TOOLS,
                 output_config={"effort": settings.JARVIS_AI_ASK_EFFORT},

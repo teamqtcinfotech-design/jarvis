@@ -21,6 +21,7 @@ import { langOfText, replyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { usePrefs } from './prefs';
 import { PresenceState, usePresence } from './presence';
+import { roomBusy, roomCheckSupported, setRoomCheckEnabled } from './room';
 import { useSession } from './session';
 import { useDashboard } from './useDashboard';
 import { say } from './speech';
@@ -481,7 +482,12 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     quietHoursEnabled: prefs.quietHoursEnabled,
     quietStartHour: prefs.quietStartHour,
     quietEndHour: prefs.quietEndHour,
+    speakOnlyWhenHere: prefs.speakOnlyWhenHere,
   });
+  // The room is listened to before JARVIS speaks (his ask, 26 Nov 2026) when this phone's switch is on.
+  useEffect(() => {
+    setRoomCheckEnabled(prefs.checkRoomBeforeSpeaking);
+  }, [prefs.checkRoomBeforeSpeaking]);
 
   const [current, setCurrentState] = useState<EngineItem | null>(null);
   const [queued, setQueuedCount] = useState(0);
@@ -760,16 +766,26 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   // He is back (picked the phone up, opened the app) and alerts were held: offer to read them, by count only.
   // The engine only builds the offer; the conversation asks it aloud and listens for the answer.
   const offerKind = useRef<'held' | 'news'>('held');
+  const checkingRoom = useRef(false);
   const offerHeldIfBack = useCallback(() => {
-    if (presenceRef.current !== 'present') return;
+    if (presenceRef.current !== 'present' || checkingRoom.current) return;
     const items = heldRef.current;
     if (items.length <= announcedHeld.current) return;
-    announcedHeld.current = items.length;
-    const words = countOffer(items, address, addressHi, heldPhrase(items)); // by kind: "2 reminders and 1 message"
-    offerSeq.current += 1;
-    offerKind.current = 'held';
-    setOffer({ id: offerSeq.current, count: items.length, kind: 'held', ...words });
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
+    // The room first (his ask, 26 Nov 2026): a busy room keeps everything but the urgent for a quieter moment
+    // (tried again on the next tick); the count is said only into a quiet one.
+    checkingRoom.current = true;
+    roomBusy().then((busy) => {
+      checkingRoom.current = false;
+      const now = heldRef.current;
+      if (presenceRef.current !== 'present' || now.length <= announcedHeld.current) return;
+      if (busy && !now.some((i) => i.priority === 'URGENT')) return;
+      announcedHeld.current = now.length;
+      const words = countOffer(now, address, addressHi, heldPhrase(now)); // by kind: "2 reminders and 1 message"
+      offerSeq.current += 1;
+      offerKind.current = 'held';
+      setOffer({ id: offerSeq.current, count: now.length, kind: 'held', ...words });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => undefined);
+    });
   }, [address, addressHi]);
   // "Mujhse abhi bolo mat, 1 ghante tak": held and silent till then; at the end, the count of what came.
   const setQuietFor = useCallback((minutes: number) => {
@@ -799,16 +815,25 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       tell(items);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
       if (newsTimer.current) clearTimeout(newsTimer.current);
-      newsTimer.current = setTimeout(() => {
+      const announce = () => {
         newsTimer.current = null;
         // Only what is still waiting on screen (he may have dealt with one meanwhile).
         const fresh = newsRef.current.filter((n) => currentRef.current?.key === n.key || queueRef.current.some((q) => q.key === n.key));
         newsRef.current = fresh;
         if (!fresh.length) return;
-        offerSeq.current += 1;
-        offerKind.current = 'news';
-        setOffer({ id: offerSeq.current, count: fresh.length, kind: 'news', ...countOffer(fresh, address, addressHi, null) });
-      }, 1500);
+        // The room first (his ask, 26 Nov 2026): several voices or steady noise means he is busy, so the count
+        // waits for a quieter moment (looked at again every few seconds); the urgent does not wait.
+        roomBusy().then((busy) => {
+          if (busy && !fresh.some((i) => i.priority === 'URGENT')) {
+            if (!newsTimer.current) newsTimer.current = setTimeout(announce, 10_000);
+            return;
+          }
+          offerSeq.current += 1;
+          offerKind.current = 'news';
+          setOffer({ id: offerSeq.current, count: fresh.length, kind: 'news', ...countOffer(fresh, address, addressHi, null) });
+        });
+      };
+      newsTimer.current = setTimeout(announce, 1500);
     },
     [show, tell, address, addressHi],
   );
@@ -908,6 +933,15 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         // brings it back later.
         return 'offer';
       }
+      if (state === 'idle') {
+        // JARVIS is open but nothing has come from him for a few minutes (no touch, no word): near, not with the
+        // phone. Shown and buzzed, never said to an empty desk; counted the moment he is back (a touch, a word,
+        // "Hey JARVIS"), as "while you were away" (his ask, 26 Nov 2026).
+        show(item, 'silent');
+        buzzSilently(item.priority === 'URGENT');
+        hold(item, 'away');
+        return null;
+      }
       // A message or a task from one of the three: never kept back. Phone left on the desk: still said and shown;
       // in a meeting, quiet hours or face down: shown and buzzed, flashing until he taps it.
       if (item.personal) {
@@ -924,15 +958,16 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       else hold(item, state);
       return null;
     },
-    [deliver, hold, tell],
+    [deliver, hold, tell, show],
   );
 
-  /** Everything due right now that may be spoken: one voice check for the room, then one sentence. */
+  /** Everything due right now that may be spoken: one check of the room (the always-on part's measurement, else
+   *  the recogniser's word probe), then one sentence. */
   const speakNow = useCallback(
     (items: EngineItem[]) => {
       const probe = voiceProbe.current;
       const go = (voices: boolean) => {
-        if (voices) {
+        if (voices && !items.some((i) => i.priority === 'URGENT')) {
           // Someone is talking in the room: he is here, so it goes on screen with a vibration, just not aloud.
           // (It is NOT "while you were away": he can see it, and it is never offered again.)
           items.forEach((item) => deliver(item, 'silent'));
@@ -940,7 +975,8 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
         }
         deliverTogether(items);
       };
-      if (!probe) go(false);
+      if (roomCheckSupported()) roomBusy().then(go);
+      else if (!probe) go(false);
       else probe().catch(() => false).then(go);
     },
     [deliver, deliverTogether],

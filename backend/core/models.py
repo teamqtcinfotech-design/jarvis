@@ -744,16 +744,33 @@ class AuditLog(models.Model):
 
 
 class Memory(models.Model):
-    """Something the user explicitly asked JARVIS to remember ("I go to the gym at 7").
+    """What JARVIS knows about this person for good: what they asked it to remember ("I go to the gym at 7"), and,
+    since 26 Nov 2026, what it learned by itself from the day's conversations (core/memory.py): who people are to
+    them, how they like things done, their habits, and every correction they made. Every fact is in front of the
+    brain on every turn, so a correction made once is never made twice.
 
-    Owner-only and encrypted: the MD's memories never reach the PA, and the PA's never reach the MD.
-    Only explicit, user-confirmed facts are stored here — JARVIS never saves its own guesses.
+    Owner-only and encrypted: the MD's memories never reach the PA, and the PA's never reach the MD. Learned facts
+    are kept apart from the person's own notes (source) and can be forgotten in Settings like any note.
     """
+
+    class Kind(models.TextChoices):
+        NOTE = "note", "Note"                    # said in so many words: "yaad rakhna ki…"
+        PERSON = "person", "Person"              # who someone is to the speaker
+        PREFERENCE = "preference", "Preference"  # how they like things done
+        HABIT = "habit", "Habit"                 # a regular pattern ("Mehta ji is always Friday 4 PM")
+        CORRECTION = "correction", "Correction"  # a mistake JARVIS made once, and what was wanted instead
+
+    class Source(models.TextChoices):
+        SAID = "said", "Said by the speaker"
+        LEARNED = "learned", "Learned by JARVIS"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="memories")
     text = EncryptedTextField()
+    kind = models.CharField(max_length=12, choices=Kind.choices, default=Kind.NOTE)
+    source = models.CharField(max_length=8, choices=Source.choices, default=Source.SAID)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -827,9 +844,31 @@ class BrainThread(models.Model):
     messages_json = EncryptedTextField(blank=True, default="[]")
     turns = models.PositiveIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
+    # The night after: the thread has been read for lasting facts (core/memory.py); never read for them twice.
+    learned = models.BooleanField(default=False)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "day"], name="unique_brain_thread_day")]
+
+
+class BankCase(models.Model):
+    """One correction the speaker made, kept as a regression case for the brain (26 Nov 2026): the turn as the model
+    saw it (its open items, what it did and said), the words that corrected it, and what the correction turn then
+    did (its tool calls and reply). `manage.py bank run` replays each case against the real model, without touching
+    any data, and reports whether the model still reads the correction the same way. Encrypted: it holds titles."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bank_cases")
+    day = models.DateField()
+    said = EncryptedTextField()                                   # the correction, in the speaker's words
+    before_json = EncryptedTextField(blank=True, default="[]")   # the messages of the turn being corrected, as sent and received
+    turn_json = EncryptedTextField(blank=True, default="{}")     # the correction turn's first message (open items, the words)
+    expected_json = EncryptedTextField(blank=True, default="{}") # {"tools": [{"name", "input"}], "say_en": "..."}
+    learned = EncryptedTextField(blank=True, default="")         # the rule the correction taught, if the brain named one
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class TalkSession(models.Model):

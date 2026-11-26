@@ -125,6 +125,17 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     if event == "wake":
         return _wake(user, state, address, private_ok)
 
+    if event == "ask" and about and about.get("kind") == "offer":
+        # The background part said only how many came ("Sir, ek reminder hai. Kya main bataun?", his rule, 26 Nov
+        # 2026) and listens: a yes reads them, one at a time with their questions; a no leaves them and they come
+        # back at the usual "later" time.
+        items = [{k: str(i.get(k) or "")[:600] for k in ("kind", "key", "id", "title", "spoken")} | {"question": i.get("question") or None}
+                 for i in (about.get("items") or []) if isinstance(i, dict)][:20]
+        state["offer"] = {"question": str(about.get("question") or "")[:300], "items": items, "closed_app": True}
+        state["asked"] = None
+        state["history"].append({"role": "jarvis", "text": str(about.get("question") or "")[:300]})
+        _save(user, state)
+        return _resp("", listen=True, action="asking")
     if event == "ask" and about:
         # The background part has just spoken a reminder or an alert and its question; the next words answer it.
         state["asked"] = {k: str(about.get(k) or "")[:300] for k in ("kind", "key", "id", "title", "question")}
@@ -194,6 +205,8 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
         if asked:
             state["asked"] = None
             resp = _answer_asked(user, asked, True, address, address_hi, said_in)
+        elif offer and offer.get("closed_app"):
+            resp = _read_offered(state, offer, said_in, address, address_hi)
         elif offer:
             state["offer"] = None
             read = " ".join(i["spoken"] for i in offer["items"])
@@ -207,6 +220,10 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     elif action == "cancel_pending" and asked:
         state["asked"] = None
         resp = _answer_asked(user, asked, False, address, address_hi, said_in)
+    elif action == "cancel_pending" and offer and offer.get("closed_app"):
+        # "Nahi": left alone now, and back at the usual "later" time, announced the same way.
+        state["offer"] = None
+        resp = _leave_offered(user, offer, said_in)
     elif action == "cancel_pending":
         state["pending"], state["choices"], state["offer"] = None, None, None
         resp = _resp(show or "Okay, cancelled.", speak, lang, listen=True, action=action)
@@ -251,10 +268,56 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     else:
         resp = _resp(show, speak, lang, listen=True, action=action)  # an answer, small talk; a waiting card stays
 
+    # One read, its question answered: the next of the offered ones is announced the same way (count, never the
+    # item), so he decides again.
+    left = state.get("offer")
+    if asked and action in {"confirm_pending", "cancel_pending", "snooze"} and left and left.get("closed_app") and left.get("items"):
+        n = len(left["items"])
+        more = f"{address}, {n} more. Shall I tell you?" if n > 1 else f"{address}, one more. Shall I tell you?"
+        more_hi = f"{address_hi}, {n} और हैं। क्या मैं बताऊँ?" if n > 1 else f"{address_hi}, एक और है। क्या मैं बताऊँ?"
+        hindi = resp.get("say_lang") == "hi" or said_in == "hi"
+        resp = {**resp, "show": f"{resp['show']} {more}".strip(), "say": f"{resp['say']} {more_hi if hindi else more}".strip(),
+                "say_lang": "hi" if hindi else resp.get("say_lang", "en"), "listen": True}
     state["history"].append({"role": "jarvis", "text": resp["show"]})
     state["history"] = state["history"][-MAX_HISTORY:]
     _save(user, state)
     return resp
+
+
+def _read_offered(state: dict, offer: dict, lang: str, address: str, address_hi: str) -> dict:
+    """"Haan" to the count: the first offered item is read with its question (and becomes the thing asked about);
+    the rest wait for the next count."""
+    items = list(offer.get("items") or [])
+    if not items:
+        state["offer"] = None
+        return _resp(f"{address}, nothing is waiting.", *_twin(lang, f"{address_hi}, कुछ भी बाकी नहीं है।"), listen=True, action="answer")
+    first, rest = items[0], items[1:]
+    state["offer"] = {**offer, "items": rest} if rest else None
+    q = first.get("question") if isinstance(first.get("question"), dict) else None
+    hindi = bool(lang_mod.DEVANAGARI.search(first.get("spoken") or ""))
+    question = (q.get("hi") if hindi else q.get("en")) if q else ""
+    line = f"{first.get('spoken') or first.get('title') or ''} {question or ''}".strip()
+    if q:
+        state["asked"] = {"kind": first.get("kind") or "reminder", "key": first.get("key") or "", "id": first.get("id") or "",
+                          "title": first.get("title") or "", "question": q.get("en") or ""}
+    return _resp(line, line, "hi" if hindi else "en", listen=True, action="asking" if q else "read_missed")
+
+
+def _leave_offered(user: User, offer: dict, lang: str) -> dict:
+    """"Nahi" to the count: the offered reminders and alerts come back at the person's usual "later" time."""
+    minutes = int(services.get_prefs(user).get("snoozeMinutes") or 15)
+    until = timezone.now() + timedelta(minutes=minutes)
+    for i in offer.get("items") or []:
+        try:
+            if i.get("key"):
+                services.snooze_reminder(user, i["key"].split(":s")[0], until)
+            elif i.get("id"):
+                services.snooze_alert(user, i["id"], until)
+        except (ObjectDoesNotExist, ServiceError, ValueError):
+            continue
+    label = tu.minutes_phrase(minutes)
+    label_hi = tu.minutes_phrase_hi(minutes)
+    return _resp(f"Okay, I'll bring it up again in {label}.", *_twin(lang, f"ठीक है, {label_hi} बाद फिर बताऊँगा।"), listen=True, action="snoozed")
 
 
 OFFER_MISSED_ON_WAKE = False  # he asked for "Hey JARVIS" to be listen-only: no reminders, no offers

@@ -9,14 +9,15 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from core.models import (
-    AiUsage, Alert, AuditLog, BrainThread, CommandReceipt, Contact, ConversationState, EventInbox, IntegrationCommand, Memory,
-    Message, MessageReceipt, PrivateTask, ReminderAck, ReminderTold, SharedTask, TaskRequest, UserPrefs,
+    AiUsage, Alert, AuditLog, BankCase, BrainThread, CommandReceipt, Contact, ConversationState, EventInbox, IntegrationCommand,
+    Memory, Message, MessageReceipt, PrivateTask, ReminderAck, ReminderTold, SharedTask, TaskRequest, UserPrefs,
 )
 
 # Children before parents, so nothing is left pointing at a deleted row. Messages (kept for good otherwise) are
-# working data too: a clean slate has none; so is the day's conversation with the brain (BrainThread).
+# working data too: a clean slate has none; so is the day's conversation with the brain (BrainThread), what it
+# learned from those conversations (Memory, learned) and the corrections kept for the bank (BankCase).
 DATA_MODELS = (IntegrationCommand, CommandReceipt, EventInbox, TaskRequest, Alert, MessageReceipt, Message, SharedTask, PrivateTask,
-               ReminderAck, ReminderTold, Memory, Contact, ConversationState, BrainThread, AiUsage, AuditLog)
+               ReminderAck, ReminderTold, Memory, Contact, ConversationState, BrainThread, BankCase, AiUsage, AuditLog)
 
 
 class Command(BaseCommand):

@@ -40,9 +40,14 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
     /** "Which one?" was asked: the items offered and what was to be done with them, so "dono" / "pehla wala" lands. */
     private var choices: JSONObject? = null
     private var about: JSONObject? = null
+    /** The rest of a count-only offer ("Sir, 2 reminders. Shall I tell you?") while the first is being read and answered. */
+    private var pendingOffer: JSONArray? = null
     private val history = ArrayList<JSONObject>()
     private var endAfterSpeech = false
     private var privateOk = true
+    private val address: String get() = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
+    private val addressHi: String get() = prefs.getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
+    private val DEVANAGARI = Regex("[\\u0900-\\u097F]")
 
     fun start() = begin(greet = true, about = null)
 
@@ -57,6 +62,7 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
         active = true
         WakeBus.inConversation = true
         this.about = about
+        pendingOffer = null
         previous = ""
         pending = null
         choices = null
@@ -135,6 +141,7 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
             "heard" -> if (data.optBoolean("final")) {
                 val text = data.optString("text").trim()
                 if (text.isNotEmpty()) {
+                    WakeBus.notePresent()  // he spoke to JARVIS: he is here
                     history.add(JSONObject().put("role", "user").put("text", text))
                     notifier.showConversation("You: $text")
                     overlay.update("“$text”", "thinking")
@@ -177,6 +184,19 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
     private fun runTool(name: String, args: JSONObject): String {
         val said = args.optString("said").trim()
         val ab = about
+        if (ab != null && ab.optString("kind") == "offer" && said.isNotEmpty()) {
+            // The count was asked ("Sir, ek reminder hai. Kya main bataun?"): a yes reads the first one with its
+            // question, a no brings them all back at the usual "later" time; anything else is a sentence of its own.
+            when (yesOrNo(said)) {
+                true -> return readOffered(ab)
+                false -> return leaveOffered(ab)
+                null -> {
+                    about = null
+                    pendingOffer = null
+                    awaiting = ""
+                }
+            }
+        }
         if (ab != null && ab.optString("id").isNotEmpty() && ab.optString("qkind") in FREE_ANSWERS && said.isNotEmpty()) {
             // "Kal shaam tak" / "Sunil ko de do": free words for a question about work between people; the server
             // reads them as before and what it answers is what the voice says.
@@ -249,8 +269,94 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
         }
         if (action != "answer" && action != "ask") about = null
         if (action == "end") endAfterSpeech = true
-        val say = draft.optString("say").trim()
+        var say = draft.optString("say").trim()
+        // One of the offered read and answered: the next is counted again (never read unasked).
+        val more = pendingOffer
+        if (about == null && more != null && more.length() > 0 && action != "end") {
+            val line = moreLine(more.length())
+            about = JSONObject().put("kind", "offer").put("question", line).put("title", "").put("items", more)
+            pendingOffer = null
+            awaiting = "JARVIS asked: \"$line\""
+            say = "$say $line".trim()
+        }
         return (if (say.isNotEmpty()) JSONObject().put("say", say) else JSONObject().put("ok", true)).toString()
+    }
+
+    // ------------------------------------------------------------------ the count-only offer (his rule, 26 Nov 2026)
+    private fun yesOrNo(said: String): Boolean? {
+        val s = said.lowercase()
+        if (NO.containsMatchIn(s)) return false
+        if (YES.containsMatchIn(s)) return true
+        return null
+    }
+
+    private fun hindiNow(): Boolean = prefs.getString(WakeBus.KEY_REPLY_LANG, "") == "hi"
+
+    private fun moreLine(n: Int): String = if (hindiNow()) {
+        if (n > 1) "$addressHi, $n और हैं। क्या मैं बताऊँ?" else "$addressHi, एक और है। क्या मैं बताऊँ?"
+    } else {
+        if (n > 1) "$address, $n more. Shall I tell you?" else "$address, one more. Shall I tell you?"
+    }
+
+    /** "Haan": the first offered item is read with its question (the next words answer it); the rest wait. */
+    private fun readOffered(offer: JSONObject): String {
+        val items = offer.optJSONArray("items") ?: JSONArray()
+        val first = items.optJSONObject(0)
+        if (first == null) {
+            about = null
+            pendingOffer = null
+            awaiting = ""
+            return JSONObject().put("say", if (hindiNow()) "$addressHi, कुछ भी बाकी नहीं है।" else "$address, nothing is waiting.").toString()
+        }
+        val rest = JSONArray()
+        for (i in 1 until items.length()) items.optJSONObject(i)?.let { rest.put(it) }
+        pendingOffer = if (rest.length() > 0) rest else null
+        val q = first.optJSONObject("question")
+        val spoken = first.optString("spoken").ifBlank { first.optString("title") }
+        val hindi = DEVANAGARI.containsMatchIn(spoken)
+        val question = if (q != null) (if (hindi) q.optString("hi") else q.optString("en")) else ""
+        if (q != null) {
+            about = JSONObject(first.toString()).put("question", q.optString("en")).put("qkind", q.optString("kind"))
+            awaiting = "JARVIS asked: \"${q.optString("en")}\" about \"${first.optString("title")}\""
+        } else {
+            about = null
+            awaiting = ""
+            // Nothing to answer on this one: the next is counted straight after it.
+            val more = pendingOffer
+            if (more != null) {
+                val line = moreLine(more.length())
+                about = JSONObject().put("kind", "offer").put("question", line).put("title", "").put("items", more)
+                pendingOffer = null
+                awaiting = "JARVIS asked: \"$line\""
+                return JSONObject().put("say", "$spoken $line".trim()).toString()
+            }
+        }
+        return JSONObject().put("say", "$spoken $question".trim()).toString()
+    }
+
+    /** "Nahi": left alone now, and back at the usual "later" time, announced the same way. */
+    private fun leaveOffered(offer: JSONObject): String {
+        val items = offer.optJSONArray("items") ?: JSONArray()
+        var until = ""
+        var untilHi = ""
+        for (i in 0 until items.length()) {
+            val it = items.optJSONObject(i) ?: continue
+            val body = JSONObject()
+            if (it.optString("key").isNotEmpty()) body.put("key", it.optString("key").substringBefore(":s"))
+            else if (it.optString("id").isNotEmpty()) body.put("alert_id", it.optString("id"))
+            else continue
+            val r = Api.post(context, "/reminders/snooze/", body, 15000) ?: continue
+            if (until.isEmpty()) {
+                until = r.optString("until_label")
+                untilHi = r.optString("until_label_hi")
+            }
+        }
+        about = null
+        pendingOffer = null
+        awaiting = ""
+        val say = if (hindiNow()) (if (untilHi.isNotBlank()) "ठीक है, $untilHi फिर बताऊँगा।" else "ठीक है, बाद में फिर बताऊँगा।")
+                  else (if (until.isNotBlank()) "Okay, I'll bring it up again $until." else "Okay, I'll bring it up again later.")
+        return JSONObject().put("say", say).toString()
     }
 
     /** The waiting card without its long option lists (the server only needs what it says and when). */
@@ -264,6 +370,9 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
         private const val TAG = "JarvisWake"
         /** Questions answered with free words (core/promises.py), not a yes or a no. */
         private val FREE_ANSWERS = setOf("promise", "unseen", "reassign")
+        /** A yes or a no to the count-only offer (Hinglish, English, Hindi); anything else is a sentence of its own. */
+        private val YES = Regex("^\\W*(haan|han|ha|haanji|hanji|ji|yes|yeah|ok|okay|sure|batao|bataiye|bata do|bolo|boliye|sunao|sunaiye|padho|padhiye|theek hai|thik hai|हाँ|हां|जी|बताओ|बताइए|बता दो|बोलो|सुनाओ|सुनाइए|पढ़ो|ठीक है)\\b")
+        private val NO = Regex("^\\W*(nahi|nhi|nahin|no|nope|not now|baad mein|baad me|rehne do|rahne do|chhodo|chhod do|abhi nahi|नहीं|नही|बाद में|रहने दो|छोड़ो|अभी नहीं)\\b")
         /** Drafts that become a card waiting for a yes (src/lib/drafts.ts CONFIRMABLE). */
         private val CONFIRMABLE = setOf("private_task", "md_request", "delegation", "team_delegation", "pa_task", "pa_meeting",
             "pa_self_task", "mg_task", "person_task", "person_meeting", "own_task",

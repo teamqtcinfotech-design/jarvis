@@ -128,6 +128,8 @@ def payload_for(alert: Alert) -> dict[str, str]:
     title = services.alert_title_hi(alert) if hindi else alert.title
     question = services.alert_question(alert)
     ringing = services.ringing_now(alert)
+    prefs = services.get_prefs(alert.recipient)
+    silence = services.silence_now(alert.recipient, prefs)  # a meeting, quiet hours: shown, never spoken
     # A long message (minutes of speaking) does not fit in one push: the push carries as much as fits (Hindi letters
     # take three bytes each) and the phone reads the whole message from the alert list when it is opened.
     return {
@@ -148,7 +150,9 @@ def payload_for(alert: Alert) -> dict[str, str]:
         # Ring until seen (see core/ringing.py): this delivery is the first ring, with the Seen button.
         "ring": "1" if ringing else "",
         "ring_no": str(alert.rings) if ringing else "",
-        "quiet": "1" if ringing and services.get_prefs(alert.recipient).get("meetingMode") else "",
+        "quiet": "1" if ringing and silence["silent"] else "",
+        # The always-on part must not speak this now (his rule, 26 Nov 2026: in a meeting, in quiet hours, silent).
+        "silent": "1" if silence["silent"] else "",
         "seen_label": ("देख लिया" if hindi else "Seen") if ringing else "",
     }
 

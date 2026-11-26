@@ -64,6 +64,12 @@ export interface Prefs {
   autoVoice: boolean;
   /** The floating JARVIS button over other apps (a tap talks, like "Hey JARVIS"). This phone's own switch. */
   floatingButton: boolean;
+  /** Speak reminders and counts only when he is really here (a touch, a word, "Hey JARVIS" within the last few
+   *  minutes); otherwise show and buzz, and count them when he is back (his ask, 26 Nov 2026). This phone's switch. */
+  speakOnlyWhenHere: boolean;
+  /** Listen to the room for a moment before speaking: several voices or steady noise means busy, so everything but
+   *  the urgent waits (needs the phone's always-on part). This phone's switch. */
+  checkRoomBeforeSpeaking: boolean;
   /** Ring until seen: work and messages from the team ring this phone until Seen is tapped (the receiver's rules). */
   ringUntilSeen: boolean;
   ringEveryMinutes: number;
@@ -115,6 +121,8 @@ const DEFAULTS: Prefs = {
   liveVoice: true,
   autoVoice: true,
   floatingButton: true,
+  speakOnlyWhenHere: true,
+  checkRoomBeforeSpeaking: true,
   ringUntilSeen: true,
   ringEveryMinutes: 10,
   ringUrgentEveryMinutes: 1,
@@ -148,7 +156,7 @@ function clean(data: Partial<Prefs> | null | undefined): Partial<Prefs> {
 
 /** Settings that belong to THIS phone, not to the person: never sent to the server, never taken from it.
  *  "Hey JARVIS" is a microphone on one device; switching it on here must not switch it on on the other phone. */
-const DEVICE_ONLY: (keyof Prefs)[] = ['wakeWordEnabled', 'liveVoice', 'autoVoice', 'floatingButton'];
+const DEVICE_ONLY: (keyof Prefs)[] = ['wakeWordEnabled', 'liveVoice', 'autoVoice', 'floatingButton', 'speakOnlyWhenHere', 'checkRoomBeforeSpeaking'];
 
 function withoutDeviceOnly(patch: Partial<Prefs>): Partial<Prefs> {
   const out = { ...patch };

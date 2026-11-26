@@ -6,6 +6,8 @@
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as SecureStore from 'expo-secure-store';
 
+import { noteHere } from './presence';
+
 const K_LOCK = 'jarvis.lock';            // "on" | "off"
 export const LOCK_AFTER_MS = 5 * 60_000;  // away this long -> ask again
 
@@ -45,6 +47,7 @@ export function recentlyUnlocked(): boolean {
 
 export function markUnlocked() {
   lastUnlockAt = Date.now();
+  noteHere('unlock'); // his fingerprint: he is here
 }
 
 export function markLocked() {

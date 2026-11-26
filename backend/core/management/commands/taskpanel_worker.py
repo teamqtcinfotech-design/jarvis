@@ -10,19 +10,33 @@
 """
 import logging
 import signal
+import threading
 import time
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from django.db import close_old_connections
+from django.db import close_old_connections, connection
 
-from core import followups, recurrence, reminderpush, ringing, services
+from core import followups, memory, recurrence, reminderpush, ringing, services
 from core import timeutils as tu
 from core.taskpanel import dispatcher, sync
 
 log = logging.getLogger("jarvis.taskpanel")
 FOLLOWUP_EVERY_SECONDS = 10 * 60
 FREE_EVERY_SECONDS = 60  # the free-time suggestion comes within a minute of his becoming free (a meeting ends, is cancelled)
+LEARN_FROM_HOUR = 2      # the night's reading of the finished day (core/memory.py): from 2 AM, once a day
+
+
+def _learn_in_background() -> None:
+    """The night's reading in its own thread: a model call must never hold up a reminder or a ring."""
+    try:
+        read = memory.learn_pending()
+        if read:
+            log.info("the night's reading: %d day(s) read for lasting facts", read)
+    except Exception:  # noqa: BLE001 — the worker's loop goes on regardless
+        log.exception("the night's reading failed")
+    finally:
+        connection.close()
 
 
 class Command(BaseCommand):
@@ -47,6 +61,7 @@ class Command(BaseCommand):
         last_follow = -1e9  # first cycle runs the follow-up check straight away
         last_free = -1e9
         cleaned_on = None   # the local date the alert cleanup last ran (once a day, in the small hours)
+        learned_on = None   # the local date the night's reading last started (once a day, from LEARN_FROM_HOUR)
         while not stop["flag"]:
             close_old_connections()
             now = time.monotonic()
@@ -58,6 +73,11 @@ class Command(BaseCommand):
                     gone = services.cleanup_alerts()
                     if gone:
                         self.stdout.write(f"{local:%H:%M:%S}  alert cleanup: {gone} old entr{'y' if gone == 1 else 'ies'} deleted")
+                # The night's reading: every finished day's thread not yet read for lasting facts (people,
+                # preferences, habits, corrections), once a day from 2 AM (or on the first cycle after a day down).
+                if learned_on != local.date() and local.hour >= LEARN_FROM_HOUR and memory.enabled():
+                    learned_on = local.date()
+                    threading.Thread(target=_learn_in_background, name="jarvis-night-reading", daemon=True).start()
                 # Reminders at their exact moment: pushed to the phones as soon as they come due (every cycle).
                 pushed = reminderpush.run()
                 if pushed:

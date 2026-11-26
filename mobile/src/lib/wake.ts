@@ -43,6 +43,22 @@ export interface WakeConfig {
   walkieUrl?: string;
   /** The floating JARVIS button over other apps (a tap talks, like "Hey JARVIS"); needs "Display over other apps". */
   floatingButton?: boolean;
+  /** With the app closed: speak only when he is here (the screen unlocked within the last few minutes, or a word to
+   *  JARVIS); otherwise a notification, and the count when he is back. */
+  speakOnlyWhenHere?: boolean;
+  /** With the app closed: listen to the room for a moment before speaking; busy means everything but urgent waits. */
+  checkRoom?: boolean;
+}
+
+/** What the room sounds like right now: busy = several voices or steady noise over the last moment. */
+export interface RoomCheck {
+  busy: boolean;
+  /** Average sound level (0 = silence, ~3000 = speech at the phone). */
+  level: number;
+  /** The share of the moment with sound at a speaking level (0..1). */
+  share: number;
+  /** Where the sound was measured: the wake-word microphone, the live line, or a short recording of its own. */
+  source: string;
 }
 
 export interface WakeStatus {
@@ -104,6 +120,8 @@ type Native = {
   otpConfirm?: (code: string) => Promise<OtpResult>;
   otpAwaitAuto?: () => Promise<OtpResult>;
   otpCancel?: () => void;
+  // the room check before speaking (2.11.0 and later)
+  roomCheck?: (ms: number) => Promise<RoomCheck>;
   // the live voice line (2.8.0 and later)
   liveSupported?: () => boolean;
   liveStart?: (config: LiveConfig) => Promise<boolean>;
@@ -163,6 +181,21 @@ export async function wakeStatus(): Promise<WakeStatus> {
     return { ...NO_STATUS, ...(await native.getStatus()) };
   } catch {
     return NO_STATUS;
+  }
+}
+
+/** The always-on part can measure the room (a build with roomCheck). */
+export function wakeRoomCheckSupported(): boolean {
+  return typeof native?.roomCheck === 'function';
+}
+
+/** What the room sounds like over the last moment (at most `ms` of listening when nothing is already open). */
+export async function wakeRoomCheck(ms = 1500): Promise<RoomCheck | null> {
+  if (!native?.roomCheck) return null;
+  try {
+    return await native.roomCheck(ms);
+  } catch {
+    return null;
   }
 }
 

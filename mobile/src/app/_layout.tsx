@@ -17,6 +17,7 @@ import { startUpdates } from '@/lib/appUpdates';
 import { ConversationProvider } from '@/lib/conversation';
 import * as diag from '@/lib/diag';
 import { PrefsProvider } from '@/lib/prefs';
+import { noteHere } from '@/lib/presence';
 import { SessionProvider, useSession } from '@/lib/session';
 import { colors } from '@/lib/theme';
 import { DashboardProvider } from '@/lib/useDashboard';
@@ -39,7 +40,8 @@ function Shell() {
       <AlertEngineProvider>
         <ConversationProvider>
           <WalkieProvider>
-            <View style={{ flex: 1 }}>
+            {/* Every touch anywhere marks him "here": JARVIS speaks only to someone who is really with the phone. */}
+            <View style={{ flex: 1 }} onTouchStart={() => noteHere('touch')}>
               {stack}
               <AlertBanner />
               <AlertPopup />

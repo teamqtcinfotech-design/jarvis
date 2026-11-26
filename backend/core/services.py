@@ -3409,6 +3409,25 @@ def meeting_override_until(prefs: dict) -> datetime | None:
         return None
 
 
+def silence_now(user: User, prefs: dict | None = None, now: datetime | None = None) -> dict:
+    """Whether JARVIS must keep quiet for this person right now (his rule, 26 Nov 2026: in a meeting and in quiet
+    hours, silent, always), for the phone's always-on part, which speaks with the app closed: meeting mode, a diary
+    meeting running now (unless he switched meeting mode off during it), or quiet hours.
+    Returns {"silent": bool, "why": "meeting" | "quiet_hours" | ""}."""
+    prefs = prefs if prefs is not None else get_prefs(user)
+    now = now or timezone.now()
+    if prefs.get("meetingMode"):
+        return {"silent": True, "why": "meeting"}
+    override = meeting_override_until(prefs)
+    for w in busy_windows(now.astimezone(tu.IST).date(), person=user):
+        start, end = datetime.fromisoformat(w["start"]), datetime.fromisoformat(w["end"])
+        if start <= now < end and not (override and end <= override):
+            return {"silent": True, "why": "meeting"}
+    if quiet_until(prefs, now) is not None:
+        return {"silent": True, "why": "quiet_hours"}
+    return {"silent": False, "why": ""}
+
+
 def set_pref_quiet(user: User, key: str, value) -> None:
     """One setting JARVIS keeps for itself (what it has noticed), stored without an audit line."""
     if key not in PREF_SCHEMA:
@@ -3631,22 +3650,27 @@ def set_prefs(user: User, patch: dict) -> dict:
 
 
 # ------------------------------------------------------------------ memory (explicit "remember this")
-MEMORY_LIMIT = 50
+MEMORY_LIMIT = 50  # notes the speaker asked to keep; what JARVIS learns by itself has its own shelf (core/memory.py)
 
 
 def memory_item(m: Memory) -> dict:
-    return {"id": str(m.id), "text": m.text, "created_at": m.created_at.isoformat()}
+    return {"id": str(m.id), "text": m.text, "kind": m.kind, "source": m.source, "created_at": m.created_at.isoformat()}
 
 
 def list_memories(user: User) -> list[dict]:
-    return [memory_item(m) for m in Memory.objects.filter(owner=user)[:MEMORY_LIMIT]]
+    """The speaker's own notes first, then what JARVIS learned (both can be forgotten in Settings)."""
+    rows = list(Memory.objects.filter(owner=user))
+    rows.sort(key=lambda m: (m.source != Memory.Source.SAID, m.created_at), reverse=False)
+    said = [m for m in rows if m.source == Memory.Source.SAID][-MEMORY_LIMIT:]
+    learned = [m for m in rows if m.source != Memory.Source.SAID]
+    return [memory_item(m) for m in reversed(said)] + [memory_item(m) for m in reversed(learned)]
 
 
 def add_memory(user: User, text: str) -> dict:
     text = " ".join((text or "").split())[:300]
     if not text:
         raise ServiceError("invalid", "Tell me what to remember.", 422)
-    if Memory.objects.filter(owner=user).count() >= MEMORY_LIMIT:
+    if Memory.objects.filter(owner=user, source=Memory.Source.SAID).count() >= MEMORY_LIMIT:
         raise ServiceError("memory_full", "My notes are full. Please delete an old one in Settings first.", 409)
     m = Memory.objects.create(owner=user, text=text)
     audit(user, "memory.add", "memory", m.id)

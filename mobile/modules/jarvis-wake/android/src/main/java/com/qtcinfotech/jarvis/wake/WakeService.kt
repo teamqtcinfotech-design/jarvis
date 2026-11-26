@@ -2,8 +2,10 @@ package com.qtcinfotech.jarvis.wake
 
 import android.Manifest
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
@@ -69,6 +71,22 @@ class WakeService : Service() {
         notifier = WakeNotifier(this)
         current = this
         WakeBus.stateListener = { Handler(Looper.getMainLooper()).post { refreshBubble() } }
+        // He unlocked the phone: he is here (his rule, 26 Nov 2026), and what was held while he was away is counted.
+        try {
+            // (A system broadcast still reaches a receiver that is not exported, which Android 14 insists on.)
+            ContextCompat.registerReceiver(this, presentReceiver, IntentFilter(Intent.ACTION_USER_PRESENT), ContextCompat.RECEIVER_NOT_EXPORTED)
+        } catch (e: Throwable) {
+            Log.w(TAG, "could not watch for unlocks: ${e.message}")
+        }
+    }
+
+    private val presentReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_USER_PRESENT) return
+            WakeBus.notePresent()
+            val w = watcher ?: return
+            watcherThread?.looper?.let { Handler(it).postDelayed({ if (!stopped) w.onBack() }, 1_500) }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -377,6 +395,7 @@ class WakeService : Service() {
                         if (a > peak) peak = a
                     }
                     val rms = sqrt(sum / chunk.size)
+                    if (peak > 0) RoomSense.feed(rms, TtsEngine.speaking, "wake")  // the room's sound, for the check before speaking
                     if (peak == 0) silentChunks += 1 else silentChunks = 0
                     if (silentChunks >= SILENT_CHUNKS_LIMIT) {
                         silentChunks = 0
@@ -490,6 +509,7 @@ class WakeService : Service() {
                         Log.i(TAG, String.format("%s detected (score %.3f, previous %.3f, streak %d, level %.0f, gain %.1f)",
                             phrase, score, was, run, envelope, gain))
                         WakeBus.countWake(this)
+                        WakeBus.notePresent()  // he called: he is here
                         onWakeWord()
                     }
                 }
@@ -683,6 +703,10 @@ class WakeService : Service() {
         stopped = true
         if (current === this) current = null
         WakeBus.stateListener = null
+        try {
+            unregisterReceiver(presentReceiver)
+        } catch (_: Throwable) {
+        }
         bubble?.hide()
         bubble = null
         WakeBus.running = false

@@ -325,6 +325,7 @@ object LiveVoice {
                     }
                     if (got < frameBytes) continue
                     val level = rms(pcm)
+                    RoomSense.feed(level.toDouble(), speaking, "live")  // the room's sound, for the check before speaking
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastLevelAt > 150) {
                         lastLevelAt = now

@@ -215,6 +215,12 @@ def free_time(now=None) -> int:
         pool = list(dash.get("overdue") or []) + list(dash.get("today") or []) + list(dash.get("anytime") or [])
         plan = scheduling.fit_into_free_time(pool, start, end, now)
         if not plan["placed"]:
+            # Nothing late or pending at all (not merely nothing that fits): said once a day, at the first free
+            # stretch, so he knows the quiet is real (his ask, 26 Nov 2026) — "aap relax kar sakte hain". Only to
+            # someone who keeps a list at all: an empty account has nothing to relax from.
+            keeps_a_list = any(dash.get(k) for k in ("overdue", "today", "upcoming", "anytime", "given_tasks", "delegated"))
+            if not plan["left"] and keeps_a_list:
+                raised += relax_line(user, tu.to_local(now).date())
             continue
         names = [p["title"] for p in plan["placed"]]
         n = len(names)
@@ -242,6 +248,19 @@ def free_time(now=None) -> int:
         raised += _raise(user, key, f"Free till {till}: {n} {what} item{'s' if n > 1 else ''} could be done", listed, spoken,
                          spoken_hi=spoken_hi, question=question)
     return raised
+
+
+def relax_line(user: User, day) -> int:
+    """"Sir, aaj kuch pending nahi hai, aap relax kar sakte hain." Once a day, when a free stretch begins and
+    nothing is late or pending; a quiet line (LOW: never rung), no question."""
+    key = f"free-none:{day.isoformat()}"
+    if Alert.objects.filter(recipient=user, ref_type="followup", ref_id=f"{key}@{user.id}").exists():
+        return 0
+    address, address_hi = services.address_of(user), services.address_hi_of(user)
+    spoken = f"{address}, nothing is pending today. You can relax."
+    spoken_hi = f"{address_hi}, आज कुछ पेंडिंग नहीं है, आप रिलैक्स कर सकते हैं।"
+    return _raise(user, key, "Nothing pending today", "Nothing late, nothing waiting: a free stretch with nothing to fill.",
+                  spoken, Priority.LOW, spoken_hi=spoken_hi)
 
 
 def evening_late(now=None) -> int:
