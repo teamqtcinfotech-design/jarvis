@@ -23,9 +23,9 @@ import kotlin.math.sin
 
 /**
  * The floating JARVIS button (his ask, 26 Nov 2026): a small orb that sits over whatever app is open, like a chat
- * head. A tap talks to JARVIS exactly as "Hey JARVIS" does; a drag moves it, and it settles on the nearest edge,
- * where he last left it. It is hidden while the JARVIS app itself is in front (the app has its own orb) and while
- * a voice-only conversation shows its strip.
+ * head. A tap opens JARVIS on the conversation, listening (WakeService.onBubbleTap); a drag moves it, and it
+ * settles on the nearest edge, where he last left it. It is hidden while the JARVIS app itself is in front (the app
+ * has its own orb) and while a voice-only conversation shows its strip.
  *
  * Needs "Display over other apps". Android never draws it over the lock screen: there the notification's
  * "Talk to JARVIS" button and the wake word do the same job.

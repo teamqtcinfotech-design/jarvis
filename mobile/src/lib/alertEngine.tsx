@@ -118,11 +118,12 @@ function countOffer(what: number | EngineItem[], address: string, addressHi: str
     }
     const one = what.length === 1;
     const list = en.length > 1 ? `${en.slice(0, -1).join(', ')} and ${en[en.length - 1]}` : en[0] ?? '';
-    return { text: `${lead}${list} ${one ? 'has' : 'have'} come. Shall I read ${one ? 'it' : 'them'}?`, textHi: `${leadHi}${hi.join(', ')} आए हैं। पढ़ूँ?` };
+    // The Hindi is the formal assistant's ("क्या मैं सुनाऊँ?"), his ask, 26 Nov 2026.
+    return { text: `${lead}${list} ${one ? 'has' : 'have'} come. Shall I read ${one ? 'it' : 'them'}?`, textHi: `${leadHi}${hi.join(', ')} आए हैं। क्या मैं सुनाऊँ?` };
   }
   const n = what;
-  if (n === 1) return { text: `${lead}one update has come. Shall I read it?`, textHi: `${leadHi}एक अपडेट आया है। पढ़ूँ?` };
-  return { text: `${lead}${n} updates have come. Shall I read them?`, textHi: `${leadHi}${n} अपडेट आए हैं। पढ़ूँ?` };
+  if (n === 1) return { text: `${lead}one update has come. Shall I read it?`, textHi: `${leadHi}एक अपडेट आया है। क्या मैं सुनाऊँ?` };
+  return { text: `${lead}${n} updates have come. Shall I read them?`, textHi: `${leadHi}${n} अपडेट आए हैं। क्या मैं सुनाऊँ?` };
 }
 
 export type { AlertQuestion } from './types';
@@ -575,17 +576,21 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   // A reminder at its moment, or the free-time suggestion, comes up as a popup card as well as being said (his ask,
   // 25 Nov 2026: "give the pop up for upcoming task"); it goes by itself after a while, or with its buttons.
   const [popup, setPopup] = useState<EngineItem | null>(null);
+  const popupRef = useRef<EngineItem | null>(null);
   const popupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dismissPopup = useCallback(() => {
     if (popupTimer.current) clearTimeout(popupTimer.current);
     popupTimer.current = null;
+    popupRef.current = null;
     setPopup(null);
   }, []);
   const showPopup = useCallback((item: EngineItem) => {
     if (popupTimer.current) clearTimeout(popupTimer.current);
+    popupRef.current = item;
     setPopup(item);
     popupTimer.current = setTimeout(() => {
       popupTimer.current = null;
+      popupRef.current = null;
       setPopup(null);
     }, 45_000);
   }, []);
@@ -1174,13 +1179,14 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       setHeld(remaining);
       announcedHeld.current = Math.min(announcedHeld.current, remaining.length);
       if (currentRef.current?.key === item.key) advance();
+      if (popupRef.current?.key === item.key) dismissPopup(); // Done / Later / Got it: its popup card goes with it
       toPresent.current = toPresent.current.filter((t) => t.key !== item.key);
       scheduleNext(); // one settled: the next of several that came together is said now
       const id = osId(item.key);
       Notifications.cancelScheduledNotificationAsync(id).catch(() => undefined);
       Notifications.dismissNotificationAsync(id).catch(() => undefined);
     },
-    [advance, setHeld, setQueued, scheduleNext],
+    [advance, setHeld, setQueued, scheduleNext, dismissPopup],
   );
 
   const acknowledge = useCallback(

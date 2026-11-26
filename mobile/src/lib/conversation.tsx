@@ -15,9 +15,9 @@ import { router } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Animated, AppState, Platform } from 'react-native';
 
-import { type AlertGroup, type AlertQuestion, type EngineItem, type HeldOffer, GROUP_ORDER, GROUP_WORDS, describeWaiting, groupOf, questionFor, useAlertEngine } from './alertEngine';
+import { type AlertGroup, type AlertQuestion, type EngineItem, type HeldOffer, GROUP_ORDER, GROUP_WORDS, describeWaiting, groupOf, pileOf, questionFor, useAlertEngine } from './alertEngine';
 import { lockAvailable, lockEnabled, recentlyUnlocked } from './appLock';
-import { langOfText, replyLang, setReplyLang, twin } from './lang';
+import { langOfText, pinnedLang, replyLang, setReplyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
 import { useDashboard } from './useDashboard';
 import { ApiError, api, currentServer, deviceTokens, newIdempotencyKey } from './api';
@@ -338,9 +338,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     flushOffline: () => Promise<void>;
     autoVoice: (greetFirst: boolean) => 'started' | 'later' | 'no';
     reopenLive: () => void;
+    afterGreeting: (offerAt: number, startedAt: number) => void;
   }>({ heard: () => undefined, voiceError: () => undefined, presentOffer: () => undefined, presentAlert: () => undefined,
     wake: () => undefined, barge: () => undefined, liveTool: async () => '{}', flushOffline: async () => undefined,
-    autoVoice: () => 'no', reopenLive: () => undefined });
+    autoVoice: () => 'no', reopenLive: () => undefined, afterGreeting: () => undefined });
 
   // Which language the recogniser starts in. 'auto' is Indian English (Hinglish included) and, on Android 14+, the
   // phone switches to Hindi by itself. Older phones cannot switch, so there, once the last several turns were all
@@ -923,7 +924,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const presentOffer = (o: HeldOffer, greetFirst: boolean) => {
     offerRef.current = o;
     openTalk();
-    const hi = langRef.current === 'hi';
+    const hi = replyLang() === 'hi'; // the language JARVIS is using with him now (Hindi right after the opening greeting)
     const show = (greetFirst ? `Ji ${address}? ` : '') + o.text;
     const speak = (greetFirst ? `जी ${isMD ? addressHi : ''}? `.replace(' ?', '?') : '') + (hi ? o.textHi : o.text);
     push('jarvis', show);
@@ -1167,6 +1168,13 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (nowMs() - wokeAtRef.current < 8000) return 'no'; // "Hey JARVIS" opened the app: that greeting is already on its way
     if (speaking || liveSpeaking || busy || voice.state === 'listening') return 'later';
     if (questionRef.current || offerRef.current || draftRef.current) return 'later'; // JARVIS is in the middle of something with him
+    // The opening is in Hindi, the formal assistant's way (his ask, 26 Nov 2026), unless he has pinned English:
+    // every line that follows it (the count of what came, a reminder) is Hindi too, until he speaks and the server
+    // matches him again.
+    if (greetFirst && pinnedLang() !== 'en') {
+      setReplyLang('hi');
+      langRef.current = 'hi';
+    }
     const hour = new Date().getHours();
     const en = greetFirst ? `${greeting()}, ${address}.` : '';
     const hi = greetFirst ? `${hour < 12 ? 'सुप्रभात' : 'नमस्ते'}, ${addressHi}।` : '';
@@ -1183,11 +1191,31 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       return 'started';
     }
     voiceModeRef.current = true;
-    markExchange(greetFirst ? 6000 : 2500); // the greeting goes first; what is due comes right after, as a count
+    markExchange(greetFirst ? 4000 : 2500); // the greeting goes first; what is due comes right after, as a count
     setHeldVisible(false);
     if (greetFirst) push('jarvis', en);
     startLive(false, greetFirst ? twin(en, hi).text : '').catch(() => undefined);
+    if (greetFirst) {
+      // "Sir, kuch update hai?": when nothing new has been offered a few seconds after the greeting, JARVIS says so.
+      const offerAt = presentedOffer.current;
+      const startedAt = nowMs();
+      setTimeout(() => fns.current.afterGreeting(offerAt, startedAt), 12_000);
+    }
     return 'started';
+  };
+
+  /** After the opening greeting: nothing new came and nothing is being asked, so JARVIS says there is no new update
+   *  (and how many older ones are still on his list), in the opening's language. */
+  const afterGreeting = (offerAt: number, startedAt: number) => {
+    if (!user || !lineOpen() || !voiceModeRef.current) return;
+    if (presentedOffer.current !== offerAt || offer || offerRef.current || questionRef.current || draftRef.current) return;
+    if (lastHeardAt.current > startedAt || speaking || liveSpeaking || busy) return; // he has spoken, or JARVIS is mid-line
+    const n = pileOf(waiting, held).length;
+    const en = n ? `${address}, no new update. ${n} from before ${n === 1 ? 'is' : 'are'} still on your list.` : `${address}, no new update right now.`;
+    const hi = n ? `${addressHi}, कोई नया अपडेट नहीं है। पहले के ${n} अभी भी आपकी लिस्ट में हैं।` : `${addressHi}, अभी कोई नया अपडेट नहीं है।`;
+    push('jarvis', en);
+    const t = twin(en, hi);
+    say(t.text, { lang: t.lang, fallback: t.fallback });
   };
 
   /** A form the live model filled: run it on the server exactly like a sentence the brain read, let the usual
@@ -1930,7 +1958,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   };
 
   useEffect(() => {
-    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge, liveTool, flushOffline, autoVoice, reopenLive };
+    fns.current = { heard, voiceError, presentOffer, presentAlert, wake, barge, liveTool, flushOffline, autoVoice, reopenLive, afterGreeting };
   });
   useEffect(() => onBarge(() => fns.current.barge()), []);
   // Said with no connection: tried again every 20 seconds and whenever the app comes back to the front.
@@ -2046,7 +2074,8 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // Voice mode when the app comes up (his ask, 26 Nov 2026): at a cold start, and again whenever the app comes back
   // to the front (the line is closed while it is away). The fingerprint lock, a tapped notification and "Hey JARVIS"
   // all get their moment first; a reminder being spoken or a question being asked is waited out, trying again every
-  // few seconds for up to two minutes. A long time away earns a fresh greeting; a short one, only the open ear.
+  // few seconds for up to two minutes. Opening the app again after a minute or more away earns a fresh greeting (his
+  // ask, 26 Nov 2026); a quick switch to another app and back, only the open ear.
   const signedInAs = user?.username ?? '';
   useEffect(() => {
     if (!signedInAs || !prefs.autoVoice) return undefined;
@@ -2083,7 +2112,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const away = wentBackAt ? Date.now() - wentBackAt : 0;
       wentBackAt = 0;
       if (away < 3000) return; // the fingerprint prompt or a permission box, not a real time away
-      schedule(away >= VOICE_MODE_SILENCE_MS);
+      schedule(away >= 60_000);
     });
     return () => {
       cancelled = true;

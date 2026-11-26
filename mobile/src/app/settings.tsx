@@ -688,9 +688,9 @@ function BackgroundSection() {
         title="Floating JARVIS button"
         detail={
           !wakeSupported ? 'Not available on this phone.'
-            : prefs.floatingButton && wake?.overlayAllowed ? 'On. A small orb floats over other apps: tap it to talk to JARVIS, drag it where you like.'
+            : prefs.floatingButton && wake?.overlayAllowed ? 'On. A small orb floats over other apps: tap it and JARVIS opens, listening. Drag it where you like.'
             : prefs.floatingButton ? 'Allow “Display over other apps” below, and the orb appears over other apps.'
-            : 'Off. Switch on for a small orb over other apps that talks to JARVIS on a tap.'
+            : 'Off. Switch on for a small orb over other apps that opens JARVIS, listening, on a tap.'
         }
         right={<Switch value={prefs.floatingButton} disabled={!wakeSupported} onValueChange={toggleBubble} trackColor={{ true: colors.gold }} />}
       />

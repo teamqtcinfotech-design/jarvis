@@ -289,6 +289,7 @@ export function PhoneHome({ user }: { user: SessionUser }) {
         {/* Today's real numbers (his ask, 25 Nov 2026: a number means what its word says): meetings and tasks due
             today, and what is late from before. A tap opens that list. */}
         <View style={s.today}>
+          <Txt variant="label" style={{ marginRight: 10 }}>Today</Txt>
           {[
             { n: todayMeetings, word: todayMeetings === 1 ? 'meeting' : 'meetings', list: 'today_meetings', tone: colors.ink },
             { n: todayTasks, word: todayTasks === 1 ? 'task' : 'tasks', list: 'today_tasks', tone: colors.ink },
@@ -382,39 +383,66 @@ export function PhoneHome({ user }: { user: SessionUser }) {
           );
         })()}
 
-        {/* The Waiting card: what is waiting for him, counted by kind, and the latest one. A tap opens the pile; the
-            speaker icon says the counts, never a title (his rule). */}
+        {/* The Waiting card: the reminders and messages that came and are not done yet, counted by kind, and the
+            latest one. It says what it is (his ask, 26 Nov 2026: "are these meetings upcoming or late? what is
+            this?"): meeting reminders are split into passed and upcoming by the meeting's time, task reminders
+            are told apart from new tasks given to him. A tap opens the pile; the speaker icon says the counts,
+            never a title (his rule). */}
         {(() => {
-          const piles = new Map<AlertGroup, number>();
-          for (const it of pile) piles.set(groupOf(it), (piles.get(groupOf(it)) ?? 0) + 1);
+          const byId = new Map<string, TaskItem>();
+          if (data) for (const t of [...data.overdue, ...data.today, ...data.upcoming, ...data.anytime]) byId.set(t.id, t);
+          const startOf = (it: EngineItem): number | null => {
+            const t = it.ref?.id ? byId.get(it.ref.id) : undefined;
+            const iso = t?.scheduled_start ?? t?.due_at ?? (t?.due_date ? `${t.due_date}T23:59:59` : null);
+            const ms = iso ? Date.parse(iso) : NaN;
+            return Number.isNaN(ms) ? null : ms;
+          };
+          const piles = new Map<AlertGroup, EngineItem[]>();
+          for (const it of pile) piles.set(groupOf(it), [...(piles.get(groupOf(it)) ?? []), it]);
           const counts: string[] = [];
           for (const g of GROUP_ORDER) {
-            const n = piles.get(g);
+            const items = piles.get(g) ?? [];
+            const n = items.length;
             if (!n) continue;
+            if (g === 'meeting') {
+              const known = items.map(startOf).filter((ms): ms is number => ms !== null);
+              const passed = known.filter((ms) => ms < now).length;
+              const detail = known.length ? ` (${passed} passed, ${known.length - passed} upcoming${known.length < n ? `, ${n - known.length} other` : ''})` : '';
+              counts.push(`${n} meeting ${n === 1 ? 'reminder' : 'reminders'}${detail}`);
+              continue;
+            }
+            if (g === 'task') {
+              const reminders = items.filter((it) => it.source === 'reminder').length;
+              const fresh = n - reminders;
+              if (reminders) counts.push(`${reminders} task ${reminders === 1 ? 'reminder' : 'reminders'}`);
+              if (fresh) counts.push(`${fresh} new ${fresh === 1 ? 'task' : 'tasks'}`);
+              continue;
+            }
             const w = GROUP_WORDS[g];
             counts.push(`${n} ${n === 1 ? w.en[0] : w.en[1]}`);
           }
           const said = describeWaiting(pile, address, addressHi);
           return (
-            <Pressable onPress={() => { tick(); if (pile.length) openPile(null, latest ?? undefined); }} style={s.card} accessibilityLabel="Waiting for you">
+            <Pressable onPress={() => { tick(); if (pile.length) openPile(null, latest ?? undefined); }} style={s.card} accessibilityLabel="Came for you, not done yet">
               <View style={s.cardHead}>
                 <Icon name="notifications-outline" size={16} color={colors.accent} />
-                <Txt variant="label" style={{ marginLeft: 8, flex: 1 }}>Waiting for you</Txt>
+                <Txt variant="label" style={{ marginLeft: 8, flex: 1 }}>Came for you · not done yet</Txt>
                 <Pressable onPress={() => { tick(); speakTwin(said.en, said.hi); }} hitSlop={10} style={s.cardSpeak} accessibilityLabel="Say it">
                   <Icon name="volume-high-outline" size={15} color={colors.accent} />
                 </Pressable>
               </View>
               {pile.length ? (
                 <>
-                  <Txt variant="title" numberOfLines={2} style={{ marginTop: 8 }}>{counts.join(' · ')}</Txt>
+                  <Txt variant="title" numberOfLines={3} style={{ marginTop: 8 }}>{counts.join(' · ')}</Txt>
                   {latest ? (
                     <Txt variant="small" numberOfLines={1} style={{ color: colors.inkSoft, marginTop: 4 }}>
                       Latest: {latest.concealed ? 'Private reminder' : latest.title} · {relativeAgo(latest.fireAt)}
                     </Txt>
                   ) : null}
+                  <Txt variant="caption" style={{ marginTop: 6 }}>Reminders and messages that reached you and are still open. Tap to go through them; today’s own meetings and tasks are in the Today line above.</Txt>
                 </>
               ) : (
-                <Txt variant="small" style={{ color: colors.muted, marginTop: 8 }}>Nothing waiting for you</Txt>
+                <Txt variant="small" style={{ color: colors.muted, marginTop: 8 }}>Nothing new has come. Today’s meetings and tasks are in the Today line above.</Txt>
               )}
             </Pressable>
           );

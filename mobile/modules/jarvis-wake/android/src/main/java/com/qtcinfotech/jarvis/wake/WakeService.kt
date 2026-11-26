@@ -127,7 +127,7 @@ class WakeService : Service() {
      *  start and on every such change (WakeBus.stateListener). */
     private fun refreshBubble() {
         val wanted = !stopped && WakeBus.prefs(this).getBoolean(WakeBus.KEY_BUBBLE, true) && !WakeBus.appInForeground && !WakeBus.inConversation
-        val b = bubble ?: FloatingBubble(this) { onWakeWord() }.also { bubble = it }
+        val b = bubble ?: FloatingBubble(this) { onBubbleTap() }.also { bubble = it }
         if (wanted && b.canShow()) b.show() else b.hide()
     }
 
@@ -568,15 +568,7 @@ class WakeService : Service() {
             return
         }
         // No speech recognition service on this phone: fall back to bringing the app up.
-        WakeBus.pendingWake = true
-        val launch = packageManager.getLaunchIntentForPackage(packageName) ?: return
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-        launch.putExtra(EXTRA_WAKE, true)
-        try {
-            startActivity(launch)
-        } catch (e: Throwable) {
-            Log.w(TAG, "Could not open the app from the background: ${e.message}")
-        }
+        openApp()
         // Xiaomi (MIUI) silently aborts pop-ups from the background unless its own switch is on.
         // If the app is still not in front after a moment: answer by voice and offer one tap to continue.
         Handler(Looper.getMainLooper()).postDelayed({
@@ -588,6 +580,40 @@ class WakeService : Service() {
                     "जी $sir? ${WakeBus.assistantNameHi(this)} खोलने के लिए नोटिफ़िकेशन दबाइए।",
                     "Ji $address? Tap the notification to open ${WakeBus.assistantName(this)}.", "hi-IN", 0.95f))
                 notifier.showWakeFallback(address)
+            }
+        }, 1500)
+    }
+
+    /** Bring the app up on the conversation (the app greets and listens when it comes to the front: pendingWake).
+     *  False when Android refused to start it from the background. */
+    private fun openApp(): Boolean {
+        WakeBus.pendingWake = true
+        val launch = packageManager.getLaunchIntentForPackage(packageName) ?: return false
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        launch.putExtra(EXTRA_WAKE, true)
+        return try {
+            startActivity(launch)
+            true
+        } catch (e: Throwable) {
+            Log.w(TAG, "Could not open the app from the background: ${e.message}")
+            false
+        }
+    }
+
+    /** The floating button (his ask, 26 Nov 2026): JARVIS opens on the conversation, listening, so he sees what was
+     *  heard, the answer and any card. If the phone keeps the app from coming up (MIUI's pop-up switch), the
+     *  conversation runs by voice right here instead, like "Hey JARVIS". */
+    private fun onBubbleTap() {
+        if (!openApp()) {
+            WakeBus.pendingWake = false
+            onWakeWord()
+            return
+        }
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!WakeBus.appInForeground && WakeBus.pendingWake) {
+                Log.w(TAG, "App did not come to the front from the floating button: talking by voice instead")
+                WakeBus.pendingWake = false
+                onWakeWord()
             }
         }, 1500)
     }
