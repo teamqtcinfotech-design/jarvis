@@ -693,7 +693,7 @@ def session_config(user: User, include_private: bool = True) -> dict:
 # ---------------------------------------------------------------------------------------------- a filled form
 def run_tool(user: User, name: str, arguments, *, previous: str = "", history: list | None = None, awaiting: str = "",
              choices: dict | None = None, pending: dict | None = None, screen: dict | None = None,
-             include_private: bool = True) -> dict:
+             include_private: bool = True, asked: dict | None = None) -> dict:
     """The form the voice model filled -> the brain's draft (exactly what /assistant/interpret/ returns), plus
     "say": the line the voice reads back, and "say_lang"."""
     if name not in TOOL_NAMES:
@@ -705,11 +705,12 @@ def run_tool(user: User, name: str, arguments, *, previous: str = "", history: l
             arguments = {}
     arguments = arguments if isinstance(arguments, dict) else {}
     said = " ".join(str(arguments.get("said") or "").split())[:1000]
-    if name == "talk" or (name in BRAIN_TOOL_NAMES and said and act.enabled() and not awaiting and not (choices or {}).get("items")):
-        # The sentence itself goes to the brain (core/act.py through build_draft); a card waiting on the phone keeps
-        # the fixed engine, which owns that card.
+    if name == "talk" or (name in BRAIN_TOOL_NAMES and said and act.enabled() and (asked or (not awaiting and not (choices or {}).get("items")))):
+        # The sentence itself goes to the brain (core/act.py through build_draft), the answer to what JARVIS asked
+        # too when the phone says what that was; a card waiting on the phone with nothing said about it keeps the
+        # fixed engine, which owns that card.
         draft = assistant.build_draft(user, said or name, previous, history, awaiting, choices, include_private=include_private,
-                                      pending=pending, screen=screen)
+                                      pending=pending, screen=screen, asked=asked)
     else:
         cmd = cmd_for(user, name, arguments)
         text = cmd.pop("_said") or name

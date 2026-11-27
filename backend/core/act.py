@@ -15,7 +15,7 @@ caching, so each turn costs only its new words.
 import json
 import logging
 import re
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 import anthropic
 from django.conf import settings
@@ -49,6 +49,9 @@ WHAT YOU DO
 - A card on the phone (a tool result with "card"): the details are on the screen, so say ONE line and never the items one by one: the one question the card needs (a name nobody knows, a clash), or "bhej dun?" with the people's names. Say "sent" or "done" only when the result says done.
 - Questions: one exact sentence from the facts (the name for one item, the number for a number, yes or no first and at most one nearby fact); totals in hours and minutes from the diary; never count or add up yourself. "Dikhao" / "list" = also set show.
 - Someone else's personal items are private; the tools already keep them out.
+
+ASKED
+- <asked> (when present) is what JARVIS asked a moment ago and is waiting on: the count of what came ("Sir, ek reminder hai. Kya main bataun?"), a reminder's own question ("Done, or remind you later?", "Shall I put them in?"), or a card on the phone waiting for a yes. The speaker's words are most likely the answer to it: a yes in any words (haan, ji, batao, sunao, padho, bolo, theek hai, "read them", "go ahead") → answer_asked yes; a no (nahi, rehne do, abhi nahi, not now, chhodo) → no; a time ("10 minute baad", "baad mein", "after lunch") → later with the minutes; part of the offered ones ("sirf meetings wale", "Nikki wala pehle", "pehla") → yes with which = those ids. Something else entirely (a question, an instruction) → do that instead with the tools; the asked thing stays as it is. Never answer the asked question in words yourself: answer_asked does it, and the phone then reads or acts. After answer_asked reply with one short word or line ("Ji.", "Theek hai, 10 minute baad.").
 
 MEMORY
 - <memory> (when present) holds what JARVIS knows about the speaker for good: who people are to them, how they like things done, their habits, and corrections they made before. Use it without being asked: a habit decides a default ("Mehta ji" on a Friday means the usual 4 PM), a preference decides how a thing is done, a correction is binding (that mistake is never made again). Facts about items, counts and times still come from the tools.
@@ -135,8 +138,15 @@ WRITE_TOOLS = [
     {"name": "remember", "description": "A fact the speaker wants JARVIS to remember.",
      "input_schema": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]}},
     {"name": "old_engine",
-     "description": "Hand the sentence to the fixed engine for what has no tool here: a JARVIS setting, a screen action (PDF, share, open an item, settings, the walkie-talkie, home), the briefing, an approval decision, a checklist step, an update on an item for the other side, organising departments.",
+     "description": "Hand the sentence to the fixed engine for what has no tool here: a JARVIS setting, a screen action (PDF, share, open an item, settings, the walkie-talkie, home), the briefing, an approval decision, a checklist step, an update on an item for the other side, organising departments, or a change to the card waiting on the phone (a new time for it).",
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "answer_asked",
+     "description": "The speaker's answer to what JARVIS just asked (<asked>): yes (read them / do it / send it), no (leave it), or later (bring it back after some minutes). For a count of several, which = the ids to read first or alone.",
+     "input_schema": {"type": "object", "properties": {
+         "decision": {"type": "string", "enum": ["yes", "no", "later"]},
+         "minutes": {"type": "integer", "description": "later: after how many minutes (left out = the speaker's usual)"},
+         "which": {"type": "array", "items": {"type": "string"}, "description": "yes to a count: only these ids (as listed in <asked>), in the order to read them"}},
+         "required": ["decision"]}},
 ]
 TOOLS = ask.TOOLS + WRITE_TOOLS
 WRITE_NAMES = {t["name"] for t in WRITE_TOOLS}
@@ -160,9 +170,13 @@ def _client() -> anthropic.Anthropic:
 class _Turn:
     """What one sentence does: the facts it fetched, the writes it made (for undo), a card the fixed engine built."""
 
-    def __init__(self, user: User, text: str, include_private: bool, screen: dict | None, history: list | None, previous: str):
+    def __init__(self, user: User, text: str, include_private: bool, screen: dict | None, history: list | None, previous: str,
+                 asked: dict | None = None, pending: dict | None = None):
         self.user, self.text, self.include_private = user, text, include_private
         self.screen, self.history, self.previous = screen, history, previous
+        self.asked = asked if isinstance(asked, dict) and asked.get("kind") else None  # what JARVIS just asked (an offer, a question, a card)
+        self.pending = pending if isinstance(pending, dict) else None                # the card on the phone, when one waits
+        self.answered: dict | None = None                                             # the speaker's answer to it (answer_asked)
         self.facts = ask._Facts(user, include_private)  # noqa: SLF001 — the answer path's facts and lookups
         self.writes = 0
         self.refs: list[dict] = []
@@ -519,6 +533,38 @@ def _remember(t: _Turn, a: dict) -> dict:
     return _engine_draft(t, "remember", {"fact": str(a.get("fact") or "")})
 
 
+def _answer_asked(t: _Turn, a: dict) -> dict:
+    """The speaker's yes / no / later to what JARVIS asked: recorded here; the phone (or the closed-app conversation)
+    then reads, acts or snoozes exactly as it does for a yes it understood itself."""
+    if not t.asked:
+        return {"error": "nothing was asked"}
+    decision = str(a.get("decision") or "").lower()
+    if decision not in ("yes", "no", "later"):
+        return {"error": "decision must be yes, no or later"}
+    out: dict = {"decision": decision, "kind": t.asked.get("kind")}
+    if decision == "later":
+        prefs = services.get_prefs(t.user)
+        minutes = a.get("minutes") if isinstance(a.get("minutes"), int) and 0 < a["minutes"] <= 24 * 60 else int(prefs.get("snoozeMinutes") or 15)
+        until = (t.facts.now + timedelta(minutes=minutes)).replace(microsecond=0)
+        out["minutes"], out["until"] = minutes, until.isoformat()
+    which = [str(x) for x in (a.get("which") or []) if str(x)]
+    if which and t.asked.get("kind") == "offer" and decision == "yes":
+        known = {str(i.get("id")) for i in (t.asked.get("items") or []) if isinstance(i, dict)}
+        picked = [x for x in which if x in known]
+        if not picked:
+            return {"error": "none of those ids is in the count: use the ids as listed in <asked>"}
+        out["which"] = picked
+    t.answered = out
+    fact = {"done": True, "decision": decision}
+    if "until" in out:
+        fact["until"] = tu.fmt_time(datetime.fromisoformat(out["until"]))
+        fact["until_hi"] = tu.fmt_time_hi(datetime.fromisoformat(out["until"]))
+    if "which" in out:
+        fact["reading"] = out["which"]
+    fact["note"] = "say one short word or line; the phone reads or acts now"
+    return fact
+
+
 def _old_engine(t: _Turn, _a: dict) -> dict:
     draft = assistant.build_draft(t.user, t.text, t.previous, t.history, "", None, include_private=t.include_private,
                                   pending=None, screen=t.screen, engine_only=True)
@@ -529,7 +575,8 @@ def _old_engine(t: _Turn, _a: dict) -> dict:
 
 _WRITES = {"create_item": _create_item, "move_item": _move_item, "edit_item": _edit_item, "cancel_items": _cancel_items,
            "complete_item": _complete_item, "make_room": _make_room, "free_slot": _free_slot, "give_work": _give_work,
-           "send_message": _send_message, "set_reminder": _set_reminder, "undo": _undo, "remember": _remember, "old_engine": _old_engine}
+           "send_message": _send_message, "set_reminder": _set_reminder, "undo": _undo, "remember": _remember, "old_engine": _old_engine,
+           "answer_asked": _answer_asked}
 
 
 def run_tool(t: _Turn, name: str, args: dict) -> dict:
@@ -571,6 +618,40 @@ def _open_items_text(t: _Turn) -> str:
     return "\n".join(parts) or "nothing open"
 
 
+def _asked_text(t: _Turn) -> str:
+    """What JARVIS just asked and is waiting on, for the turn: the count with its items and their ids, a
+    reminder's question, or the card on the phone."""
+    a = t.asked or {}
+    kind = str(a.get("kind") or "")
+    if kind == "offer":
+        rows = []
+        for i in (a.get("items") or [])[:20]:
+            if not isinstance(i, dict):
+                continue
+            q = i.get("question") if isinstance(i.get("question"), dict) else None
+            bits = [str(i.get("what") or i.get("kind") or "item")]
+            if i.get("from"):
+                bits.append("from " + str(i["from"]))
+            line = f"[{i.get('id')}] {' '.join(bits)}: \"{str(i.get('title') or '')[:80]}\""
+            if q and q.get("en"):
+                line += f" (its question: {q['en']})"
+            rows.append(line)
+        text = str(a.get("text") or "")
+        return f'<asked kind="count">JARVIS asked: "{text}" — waiting: ' + "; ".join(rows) + "</asked>"
+    if kind == "question":
+        q = a.get("question") if isinstance(a.get("question"), dict) else {}
+        return (f'<asked kind="question">JARVIS asked: "{q.get("en") or a.get("text") or ""}" about "{str(a.get("title") or "")[:80]}"'
+                f' (a {q.get("kind") or "yes or no"} question)</asked>')
+    if kind == "card":
+        from . import conversation  # noqa: PLC0415 — conversation imports this module
+        try:
+            about = conversation._describe(t.pending) if t.pending else ""  # noqa: SLF001
+        except Exception:  # noqa: BLE001 — a card shape it cannot describe
+            about = ""
+        return f'<asked kind="card">A card waits on the phone for a yes: {about or str(a.get("text") or "")}</asked>'
+    return ""
+
+
 def _turn_message(t: _Turn, recap: str = "", correction: bool = False) -> dict:
     now = t.facts.now
     head = [f'<turn now="{now.strftime("%A %d %B %Y, %H:%M")} (India)">']
@@ -578,6 +659,8 @@ def _turn_message(t: _Turn, recap: str = "", correction: bool = False) -> dict:
         head.append(f"<earlier_today>{recap}</earlier_today>")
     if correction:
         head.append("<correction>the speaker is correcting your last reply or action</correction>")
+    if t.asked:
+        head.append(_asked_text(t))
     screen = [{"id": i.get("id"), "title": i.get("title")} for i in ((t.screen or {}).get("items") or [])[:12] if isinstance(i, dict)]
     if screen:
         head.append("<on_screen>" + json.dumps(screen, ensure_ascii=False) + "</on_screen>")
@@ -696,12 +779,13 @@ def _model_turn(t: _Turn, model: str, system: list, thread: list, first: dict) -
 
 
 def run(user: User, text: str, *, previous: str = "", history: list | None = None, include_private: bool = True,
-        screen: dict | None = None) -> dict | None:
+        screen: dict | None = None, asked: dict | None = None, pending: dict | None = None) -> dict | None:
     """The sentence, understood and done: the draft the phone expects (exactly as /assistant/interpret/ returns),
-    or None when the model could not be reached (the fixed engine then reads the sentence as before)."""
+    or None when the model could not be reached (the fixed engine then reads the sentence as before). With `asked`
+    (what JARVIS just asked: a count, a reminder's question, a card) the words are read as its answer first."""
     if not enabled() or not (text or "").strip():
         return None
-    t = _Turn(user, " ".join(text.split()), include_private, screen, history, previous)
+    t = _Turn(user, " ".join(text.split()), include_private, screen, history, previous, asked=asked, pending=pending)
     address, address_hi = services.address_of(user), services.address_hi_of(user)
     system = [{"type": "text", "cache_control": {"type": "ephemeral"},
                "text": ACT_SYSTEM_PROMPT.format(reader=services.role_label(user), address=address, address_hi=address_hi)}]
@@ -811,7 +895,7 @@ def _finish(t: _Turn, data: dict, model: str) -> dict:
     services.remember_last_view(t.user, {"kind": "act", "question": t.text[:120]}, en,
                                 has_private=any(a.get("scope") == "private" for a in about), items=about, about=t.facts.person_named or "",
                                 cursor=0 if about else None)
-    return {
+    out = {
         "action": "answer", "intent": "act", "engine": "act", "model": model, "transcript": t.text,
         "title": "", "kind": "TASK", "priority": "NORMAL", "due_date": "", "due_time": "", "due_label": "",
         "spoken_reply": en, "reply_en": en, "reply_hi": hi, "speak_text": hi if speak_hi else en, "speak_lang": "hi" if speak_hi else "en",
@@ -819,3 +903,18 @@ def _finish(t: _Turn, data: dict, model: str) -> dict:
         "booked": t.writes > 0, "saved_now": t.writes > 0, "undo": bool(t.refs) or t.undo, "card_done": True,
         "view": view, "targets": [], "target": None, "batch": [],
     }
+    if t.answered:
+        # The answer to what JARVIS asked, in the shape the phone and the closed-app conversation already act on:
+        # a yes reads / does / sends, a no leaves it, later brings it back, "which" reads only those.
+        d = t.answered["decision"]
+        out["card_done"] = False  # the card waiting on the phone is settled by the phone's own yes / no handling
+        if d == "later":
+            out["action"], out["snooze_until"] = "snooze", t.answered["until"]
+        elif d == "no":
+            out["action"] = "cancel_pending"
+        elif t.answered.get("which"):
+            out["action"], out["read_keys"] = "read_some", t.answered["which"]
+        else:
+            out["action"] = "confirm_pending"
+        out["asked_kind"] = t.answered.get("kind") or ""
+    return out

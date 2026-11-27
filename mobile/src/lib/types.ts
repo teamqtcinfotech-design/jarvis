@@ -372,6 +372,7 @@ export interface CategoryOption {
 }
 
 export type DraftAction =
+  | 'read_some'
   | 'private_task'
   | 'md_request'
   | 'delegation'
@@ -516,6 +517,10 @@ export interface Draft {
   amount_label?: string;
   /** snooze: when the reminder or alert JARVIS just spoke comes back. */
   snooze_until?: string;
+  /** read_some (the brain picked part of a count): the keys of the items to read now; the rest stay on the list. */
+  read_keys?: string[];
+  /** What the brain's answer was to: offer / question / card (set when answer_asked decided the turn). */
+  asked_kind?: string;
   /** More than one thing in one breath: every further item (its own kind, time, person, destination). One yes saves all. */
   batch?: Draft[];
   staff: StaffOption | null;
@@ -596,6 +601,18 @@ export interface AskAnswer {
   speak_lang: 'en' | 'hi';
   sources: { title: string; url: string }[];
   engine: string;
+}
+
+/** What JARVIS just asked and is waiting on, sent with the next words so the brain reads them as the answer. */
+export interface AskedNow {
+  kind: 'offer' | 'question' | 'card';
+  /** The question as it was said. */
+  text: string;
+  /** A count: the items behind it (id = the engine's key), what each is, who it is from, its own question if any. */
+  items?: { id: string; what: string; title: string; from: string; question: { kind: string; en: string } | null }[];
+  /** A reminder's or an alert's question: what it is about. */
+  title?: string;
+  question?: { kind: string; en: string };
 }
 
 export interface MemoryItem {

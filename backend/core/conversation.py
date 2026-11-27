@@ -200,22 +200,45 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
             previous = pending.get("transcript", "")
         else:
             awaiting = _describe(pending)
+    # What JARVIS asked, as facts for the brain (27 Nov 2026): the count with its items, or the reminder's question.
+    asked_ctx = None
+    if offer and offer.get("closed_app"):
+        asked_ctx = {"kind": "offer", "text": offer.get("question") or "",
+                     "items": [{"id": (i.get("key") or ("alert:" + str(i.get("id") or ""))), "what": i.get("kind") or "reminder",
+                                "title": i.get("title") or "", "question": i.get("question") if isinstance(i.get("question"), dict) else None}
+                               for i in (offer.get("items") or []) if isinstance(i, dict)]}
+    elif asked:
+        asked_ctx = {"kind": "question", "text": asked.get("question") or "", "title": asked.get("title") or "",
+                     "question": {"kind": "", "en": asked.get("question") or "Done, or remind you later?"}}
     draft = assistant.build_draft(user, text, previous, state["history"][:-1], awaiting, choices,
-                                  include_private=private_ok, pending=pending if awaiting and not (offer or asked) else None)
+                                  include_private=private_ok, pending=pending if awaiting and not (offer or asked) else None,
+                                  asked=asked_ctx)
     action = draft["action"]
     lang = draft.get("speak_lang", "en")
     speak = draft.get("speak_text") or draft["spoken_reply"]
     show = draft["spoken_reply"]
     said_in = draft.get("reply_language", "en")  # the language of this sentence: every line below follows it
-    if offer and action != "confirm_pending" and not (offer.get("closed_app") and asked and action in {"cancel_pending", "snooze"}):
+    settles_offer = action in {"confirm_pending", "cancel_pending", "snooze", "read_some"}
+    if offer and action != "confirm_pending" and not (offer.get("closed_app") and settles_offer):
         state["offer"] = None  # he asked for something else: the reminders stay in his list (a no to ONE read item keeps the rest)
     if asked and action not in {"confirm_pending", "cancel_pending", "snooze"}:
         state["asked"] = None  # he asked for something else: the reminder stays where it is
 
-    if action == "snooze":
+    if action == "snooze" and offer and offer.get("closed_app") and not asked:
+        # "Baad mein" / "10 minute baad" to the count: all of them come back then.
+        state["offer"] = None
+        resp = _leave_offered(user, offer, said_in, until=datetime.fromisoformat(draft["snooze_until"]) if draft.get("snooze_until") else None)
+    elif action == "snooze":
         until = datetime.fromisoformat(draft["snooze_until"])
         state["asked"] = None
         resp = _snooze(user, asked, until, show, speak, lang, said_in, address, address_hi)
+    elif action == "read_some" and offer and offer.get("closed_app"):
+        # "Sirf meetings wale" / "Nikki wala pehle": those first, the rest keep waiting.
+        keys = [str(k) for k in (draft.get("read_keys") or [])]
+        items = list(offer.get("items") or [])
+        chosen = [i for k in keys for i in items if (i.get("key") or ("alert:" + str(i.get("id") or ""))) == k]
+        rest = [i for i in items if i not in chosen]
+        resp = _read_offered(state, {**offer, "items": chosen + rest}, said_in, address, address_hi)
     elif action == "confirm_pending":
         if asked:
             state["asked"] = None
@@ -348,9 +371,12 @@ def _read_offered(state: dict, offer: dict, lang: str, address: str, address_hi:
     return _resp(line, line, "hi" if hindi else "en", listen=True, action="read_missed")
 
 
-def _leave_offered(user: User, offer: dict, lang: str) -> dict:
-    """"Nahi" to the count: the offered reminders and alerts come back at the person's usual "later" time."""
+def _leave_offered(user: User, offer: dict, lang: str, until: datetime | None = None) -> dict:
+    """"Nahi" to the count: the offered reminders and alerts come back at the person's usual "later" time (or the
+    time he said)."""
     minutes = int(services.get_prefs(user).get("snoozeMinutes") or 15)
+    if until is not None and until > timezone.now():
+        minutes = max(1, int((until - timezone.now()).total_seconds() // 60))
     until = timezone.now() + timedelta(minutes=minutes)
     for i in offer.get("items") or []:
         try:

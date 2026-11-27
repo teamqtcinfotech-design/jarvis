@@ -734,7 +734,7 @@ class InterpretView(APIView):
         draft = assistant.build_draft(request.user, s.validated_data["text"], s.validated_data["previous"],
                                       s.validated_data["history"], s.validated_data["awaiting"],
                                       s.validated_data.get("choices"), pending=s.validated_data.get("pending"),
-                                      screen=s.validated_data.get("screen"))
+                                      screen=s.validated_data.get("screen"), asked=s.validated_data.get("asked"))
         return Response(draft)
 
 
@@ -777,7 +777,7 @@ class LiveToolView(APIView):
                 awaiting = ""
         draft = livevoice.run_tool(request.user, d["name"], d["arguments"], previous=d["previous"], history=d["history"],
                                    awaiting=awaiting, choices=d.get("choices"), pending=d.get("pending"),
-                                   screen=d.get("screen"), include_private=d["private_ok"])
+                                   screen=d.get("screen"), include_private=d["private_ok"], asked=d.get("asked"))
         return Response(draft)
 
 

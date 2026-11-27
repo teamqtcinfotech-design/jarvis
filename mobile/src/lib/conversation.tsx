@@ -32,7 +32,7 @@ import { useSession } from './session';
 import { closeLine, hasCollected, type LineState, lineOpen, lineSpeaking, lineState, liveAvailable, openLine, takeCollected } from './liveVoice';
 import { enqueue, flush, queued } from './offlineQueue';
 import { onSpeakingChange, say, setSpeechQuiet, stopSpeaking, type SpeakLang, restOfCutShort } from './speech';
-import type { AlertAnswer, AskAnswer, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
+import type { AlertAnswer, AskAnswer, AskedNow, ContactItem, DataView, Draft, DraftAction, StaffOption } from './types';
 import { SILENCE_CODES, useVoiceCapture } from './voice';
 import { onBarge, onWake, pushToken, wakeConsumePending, wakeNoteEmpty, wakePause, wakeResume, wakeSetListening, wakeStart, wakeStatus, wakeSupported } from './wake';
 
@@ -261,7 +261,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const { prefs, applyServerPrefs, update: updatePrefs } = usePrefs();
   const { setVoiceProbe, setTalking, acknowledgeByRef, acknowledge, current: currentAlert, offer, acceptOffer, declineOffer,
     setHeldVisible, held, setPresenter, answerQuestion, snooze, snoozeAll, snoozeOffer, dismiss, presence, presentNext, skip: skipAlert, setAllVisible,
-    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems, spotlight,
+    allVisible, waiting, batchItems, offerBatch, seenAll, completeAll, approveAll, dismissAll, readItems, offeredItems, spotlight,
     stopReading, pendingReads, previous: previousAlert, setQuietFor } = useAlertEngine();
   const inMeeting = presence.inMeeting;
   const { data: dash } = useDashboard();
@@ -1085,6 +1085,25 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     greet_();
   };
 
+  /** What JARVIS just asked and is waiting on, as facts for the brain (27 Nov 2026): the count with its items, the
+   *  reminder's question, or the card. The brain reads the next words as the answer with this in front of it. */
+  const askedNow = (card: Draft | null = null): AskedNow | null => {
+    const o = offerRef.current;
+    if (o) {
+      return {
+        kind: 'offer', text: o.text,
+        items: offeredItems().slice(0, 20).map((i) => ({
+          id: i.key, what: i.source === 'reminder' ? 'reminder' : (i.alertKind || i.kind || 'update').toLowerCase(), title: i.title,
+          from: i.from || '', question: i.question ? { kind: i.question.kind, en: i.question.en } : null,
+        })),
+      };
+    }
+    const pq = questionRef.current;
+    if (pq) return { kind: 'question', text: pq.q.en || pq.spoken, title: pq.item.title, question: { kind: pq.q.kind, en: pq.q.en || pq.spoken } };
+    if (card) return { kind: 'card', text: describeDraft(card) };
+    return null;
+  };
+
   const interpret = async (text: string, previous: string, awaiting: string, choices: typeof choicesRef.current = null,
     pending: Draft | null = null) => {
     setBusy('thinking');
@@ -1093,7 +1112,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const slim = pending ? { ...pending, categories: [], staff_candidates: [], target_candidates: [] } : null;
       const res = await api<Draft>('/assistant/interpret/', {
         method: 'POST',
-        body: { text, previous, awaiting, choices, pending: slim, history: history().slice(0, -1), screen: onScreen() },
+        body: { text, previous, awaiting, choices, pending: slim, history: history().slice(0, -1), screen: onScreen(), asked: askedNow(pending) },
         timeoutMs: 30000,
       });
       setBusy('');
@@ -1333,7 +1352,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       const res = await api<Draft & { say: string }>('/assistant/live/tool/', {
         method: 'POST',
         body: { name, arguments: args, previous: card ? card.transcript : previousRef.current, awaiting,
-          choices: card ? null : choicesRef.current, pending: slim, history: history(), screen: onScreen() },
+          choices: card ? null : choicesRef.current, pending: slim, history: history(), screen: onScreen(), asked: askedNow(card) },
         timeoutMs: 30000,
       });
       setBusy('');
@@ -1395,6 +1414,17 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
         expectingRef.current = true;
         silenceRef.current = 0;
         acceptOffer();
+        return;
+      }
+      if (d.action === 'read_some' && d.read_keys?.length) {
+        // "Sirf meetings wale" / "Nikki wala pehle": the brain picked them out of the count; those are read now, the
+        // rest stay on the list.
+        const keys = new Set(d.read_keys);
+        const chosen = offeredItems().filter((i) => keys.has(i.key));
+        declineOffer();
+        expectingRef.current = chosen.length > 0;
+        silenceRef.current = 0;
+        if (chosen.length) readItems(chosen);
         return;
       }
       if (d.action === 'snooze') {

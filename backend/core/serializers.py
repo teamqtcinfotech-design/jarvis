@@ -212,6 +212,9 @@ class InterpretSerializer(serializers.Serializer):
     choices = ChoicesSerializer(required=False, allow_null=True, default=None)
     # The waiting card itself, so a "yes" can take the time JARVIS offered, or a new time can be checked again.
     pending = serializers.JSONField(required=False, allow_null=True, default=None)
+    # What JARVIS just asked and is waiting on (a count of what came with its items, a reminder's question, the
+    # card), so the brain reads the words as its answer (27 Nov 2026).
+    asked = serializers.JSONField(required=False, allow_null=True, default=None)
     # The data card on the phone's screen right now (kind, title, first items), so "is list ka PDF" or
     # "pehla wala kholo" can be understood. Only short plain fields are used (see assistant._clean_screen).
     screen = serializers.JSONField(required=False, allow_null=True, default=None)

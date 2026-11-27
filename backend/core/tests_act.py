@@ -217,6 +217,73 @@ class ActPathTests(BaseCase):
         self.assertFalse(SharedTask.objects.filter(title="File the return").exists())
         self.assertEqual(d["spoken_reply"], "Aman kaun hai? Team mein nahi mila.")
 
+    def say_asked(self, text, model, asked, pending=None):
+        with mock.patch("core.ai_brain.ai_available", return_value=True), mock.patch("core.act._client", return_value=model), \
+                mock.patch("core.ai_brain.interpret", mock.Mock(side_effect=AssertionError("the fixed engine must not read this"))):
+            body = {"text": text, "awaiting": 'JARVIS asked: "Sir, 2 reminders. Shall I tell you?"', "asked": asked, "pending": pending}
+            r = self.md_client.post("/api/v1/assistant/interpret/", body, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def test_the_answer_to_a_count_is_read_by_the_brain_with_the_count_in_front_of_it(self):
+        # 27 Nov 2026: "batao batao" used to go to the old classifier, which asked "kya bataun?". The brain now sees
+        # what was asked and answers through answer_asked; the phone acts on the same draft shapes as before.
+        asked = {"kind": "offer", "text": "Sir, 2 reminders. Shall I tell you?",
+                 "items": [{"id": "rem:1", "what": "reminder", "title": "Call the bank", "from": "", "question": {"kind": "done", "en": "Done, or remind you later?"}},
+                           {"id": "alert:7", "what": "message", "title": "Papers ready", "from": "Nikki", "question": None}]}
+        model = _FakeModel([("answer_asked", {"decision": "yes"})], lambda r: {"say_en": "Ji.", "say_hi": "जी।", "about": []})
+        d = self.say_asked("batao batao", model, asked)
+        self.assertEqual((d["action"], d["engine"], d["asked_kind"]), ("confirm_pending", "act", "offer"))
+        turn = model.requests[0]["messages"][-1]["content"][0]["text"]
+        self.assertIn('<asked kind="count">JARVIS asked: "Sir, 2 reminders. Shall I tell you?"', turn)
+        self.assertIn('[rem:1] reminder: "Call the bank" (its question: Done, or remind you later?)', turn)
+        self.assertIn('[alert:7] message from Nikki: "Papers ready"', turn)
+        self.assertIn("answer_asked", {t["name"] for t in model.requests[0]["tools"]})
+        # Part of them: "sirf Nikki wala" → read_some with those keys; "20 minute baad" → snooze with the moment; no → cancel.
+        d = self.say_asked("sirf Nikki wala", _FakeModel([("answer_asked", {"decision": "yes", "which": ["alert:7", "nope"]})]), asked)
+        self.assertEqual((d["action"], d["read_keys"]), ("read_some", ["alert:7"]))
+        d = self.say_asked("20 minute baad", _FakeModel([("answer_asked", {"decision": "later", "minutes": 20})],
+                                                        lambda r: {"say_en": f"Theek hai, {r['t1_0']['until']}.", "say_hi": "", "about": []}), asked)
+        self.assertEqual(d["action"], "snooze")
+        until = tu.to_local(__import__("datetime").datetime.fromisoformat(d["snooze_until"]))
+        self.assertAlmostEqual((until - tu.now_local()).total_seconds(), 20 * 60, delta=90)
+        self.assertIn("Theek hai,", d["spoken_reply"])
+        d = self.say_asked("nahi rehne do", _FakeModel([("answer_asked", {"decision": "no"})]), asked)
+        self.assertEqual(d["action"], "cancel_pending")
+
+    def test_an_instruction_said_over_a_count_is_done_and_the_count_stays(self):
+        sid = str(self.sharma.id)
+        asked = {"kind": "offer", "text": "Sir, one reminder. Shall I tell you?",
+                 "items": [{"id": "rem:1", "what": "reminder", "title": "Call the bank", "from": "", "question": None}]}
+        model = _FakeModel([("edit_item", {"id": sid, "priority": "URGENT"})], lambda r: {"say_en": "Done: Meeting with Sharma ji, urgent.", "say_hi": "", "about": [sid]})
+        d = self.say_asked("Sharma ji wali ko urgent kar do", model, asked)
+        self.assertEqual(d["action"], "answer")  # not an answer to the count: the phone leaves the count where it is
+        self.sharma.refresh_from_db()
+        self.assertEqual(self.sharma.priority, "URGENT")
+
+    def test_a_reminders_question_and_a_card_are_answered_the_same_way(self):
+        asked = {"kind": "question", "text": "Done, or remind you later?", "title": "Call the bank", "question": {"kind": "done", "en": "Done, or remind you later?"}}
+        d = self.say_asked("ho gaya", _FakeModel([("answer_asked", {"decision": "yes"})]), asked)
+        self.assertEqual((d["action"], d["asked_kind"]), ("confirm_pending", "question"))
+        card = {"action": "private_task", "title": "Call Mehta ji", "transcript": "Mehta ji ko call karna hai", "due_label": "tomorrow 11 AM"}
+        model = _FakeModel([("answer_asked", {"decision": "yes"})])
+        d = self.say_asked("haan save karo", model, {"kind": "card", "text": "save it?"}, pending=card)
+        self.assertEqual(d["action"], "confirm_pending")
+        self.assertIn('<asked kind="card">A card waits on the phone for a yes: Personal task: Call Mehta ji, tomorrow 11 AM', model.requests[0]["messages"][-1]["content"][0]["text"])
+
+    def test_the_closed_app_count_goes_to_the_brain_too(self):
+        from core import conversation
+        conversation.turn(self.md, "", event="ask", about={"kind": "offer", "question": "Sir, 2 reminders. Shall I tell you?",
+                                                           "items": [{"kind": "reminder", "key": "k1", "title": "Call the bank", "spoken": "Sir, call the bank.", "question": None},
+                                                                     {"kind": "reminder", "key": "k2", "title": "Pay the vendor", "spoken": "Sir, pay the vendor.", "question": None}]})
+        model = _FakeModel([("answer_asked", {"decision": "yes", "which": ["k2"]})], lambda r: {"say_en": "Ji.", "say_hi": "", "about": []})
+        with mock.patch("core.ai_brain.ai_available", return_value=True), mock.patch("core.act._client", return_value=model), \
+                mock.patch("core.ai_brain.interpret", mock.Mock(side_effect=AssertionError("the fixed engine must not read this"))):
+            r = conversation.turn(self.md, "vendor wala pehle sunao")
+        self.assertTrue(r["show"].startswith("Sir, pay the vendor."), r)
+        self.assertIn("one more. Shall I tell you?", r["show"])
+        self.assertIn('[k1] reminder: "Call the bank"', model.requests[0]["messages"][-1]["content"][0]["text"])
+
     def test_unsure_hands_the_same_turn_fresh_to_the_strong_model(self):
         sid = str(self.sharma.id)
         model = _FakeModel({"escalate": True}, [("edit_item", {"id": sid, "priority": "URGENT"})],

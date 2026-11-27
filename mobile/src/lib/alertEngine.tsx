@@ -249,6 +249,8 @@ interface EngineValue {
   approveAll: (items: EngineItem[], yes: boolean) => Promise<number>;
   dismissAll: (items: EngineItem[]) => Promise<number>;
   readItems: (items: EngineItem[]) => void;
+  /** The items behind the count being offered right now (news, or what was held), so the brain can be told. */
+  offeredItems: () => EngineItem[];
   /** Every unseen server message (news, decisions, nudges), newest first, for the Updates screen. */
   news: ServerAlert[];
   /** The Updates screen was opened: the small news on it counts as seen. */
@@ -1314,6 +1316,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
 
   // "Yes, read them": one at a time, the latest first, each with its question; the next comes once he has answered
   // (presentNext). Held ones move onto the banner's stack for this.
+  const offeredItems = useCallback(() => (offerKind.current === 'news' ? newsRef.current : heldRef.current), []);
   const acceptOffer = useCallback(() => {
     setOffer(null);
     const items = offerKind.current === 'news' ? newsRef.current : [...heldRef.current];
@@ -1743,6 +1746,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     approveAll,
     dismissAll,
     readItems,
+    offeredItems,
     complete,
     decideRequest,
     reveal,

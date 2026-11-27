@@ -2342,19 +2342,23 @@ def _clean_screen(screen) -> dict | None:
 def build_draft(user: User, text: str, previous: str = "", history: list | None = None,
                 awaiting: str = "", choices: dict | None = None, include_private: bool = True,
                 pending: dict | None = None, screen: dict | None = None, cmd: dict | None = None,
-                engine_only: bool = False) -> dict:
+                engine_only: bool = False, asked: dict | None = None) -> dict:
     """awaiting: short description of a draft JARVIS has just read back and is waiting to have confirmed.
     choices: {"intent": ..., "items": [{"id", "title"}]} when JARVIS just asked "which one?" — the text is the answer.
     include_private=False: phone locked; the MD's private items are kept out of the model's view.
     pending: the waiting card itself (so a yes can take the time JARVIS offered, or a new time can be checked).
     cmd: the command already read (the live voice line fills the form itself, core/livevoice.py): no model is
     asked; everything after the reading runs exactly as it does for a sentence the brain read.
-    engine_only: the fixed engine reads it even when the act path is on (the act path hands over what it has no tool for)."""
+    engine_only: the fixed engine reads it even when the act path is on (the act path hands over what it has no tool for).
+    asked: what JARVIS just asked and is waiting on (a count of what came, a reminder's question, the card), as
+    plain facts: the act path reads the words as its answer with the thread in front of it (27 Nov 2026)."""
     # The act path (core/act.py, 25 Nov 2026): a sentence with no card waiting on the phone is read and done by the
-    # model with the day's thread; this engine reads it only when the model cannot be reached (or a card is open).
+    # model with the day's thread, and so is the answer to what JARVIS asked when the phone says what that was
+    # (`asked`); this engine reads it only when the model cannot be reached (or a card is open and nothing says so).
     from . import act  # noqa: PLC0415 — act builds on this module
-    if cmd is None and not engine_only and not awaiting and not (choices or {}).get("items") and act.enabled():
-        done = act.run(user, text, previous=previous, history=history, include_private=include_private, screen=screen)
+    if cmd is None and not engine_only and act.enabled() and (asked or (not awaiting and not (choices or {}).get("items"))):
+        done = act.run(user, text, previous=previous, history=history, include_private=include_private, screen=screen,
+                       asked=asked, pending=pending if asked else None)
         if done is not None:
             return done
     full_text = f"{previous}. {text}".strip(". ") if previous else text
