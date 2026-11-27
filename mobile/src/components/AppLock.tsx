@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, type AppStateStatus, Pressable, StyleSheet, View } from 'react-native';
 
-import { lockEnabled, markLocked, recentlyUnlocked, unlock } from '@/lib/appLock';
+import { lockEnabled, markLocked, recentlyUnlocked, setCovered, unlock } from '@/lib/appLock';
 import { useSession } from '@/lib/session';
 import { colors, fonts } from '@/lib/theme';
 
@@ -59,7 +59,14 @@ export function AppLock() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- ask is stable enough; re-arming on it would re-prompt
   }, [user]);
 
-  if (!user || !locked) return null;
+  // The rest of the app is told while the cover is up (nothing opens, nothing is said until the unlock).
+  const covering = !!user && locked;
+  useEffect(() => {
+    setCovered(covering);
+    return () => setCovered(false);
+  }, [covering]);
+
+  if (!covering) return null;
   return (
     <View style={s.cover} pointerEvents="auto">
       <View style={s.crest}>

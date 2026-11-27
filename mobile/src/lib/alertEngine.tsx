@@ -16,6 +16,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { AppState, Platform } from 'react-native';
 
 import { ApiError, api, newIdempotencyKey } from './api';
+import { isLockedNow, onLockChange, onceUnlocked } from './appLock';
 import { dataChanged } from './bus';
 import { langOfText, replyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
@@ -672,8 +673,12 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       setQueued(queueRef.current.length);
       if (currentRef.current && currentRef.current.key !== item.key) queueRef.current.unshift(currentRef.current);
       setCurrent({ ...item, mode: 'silent' });
-      const presenter = presenterRef.current;
-      if (!presenter || !presenter(item, spokenFor(item))) speakLine(spokenFor(item), { interrupt: true });
+      const speakIt = () => {
+        const presenter = presenterRef.current;
+        if (!presenter || !presenter(item, spokenFor(item))) speakLine(spokenFor(item), { interrupt: true });
+      };
+      // A tapped notification brings the app up behind the fingerprint cover: it is on screen now, said after the unlock.
+      onceUnlocked(speakIt);
       tell([item]);
     },
     [setCurrent, setHeld, setQueued, spokenFor, tell],
@@ -768,7 +773,7 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
   const offerKind = useRef<'held' | 'news'>('held');
   const checkingRoom = useRef(false);
   const offerHeldIfBack = useCallback(() => {
-    if (presenceRef.current !== 'present' || checkingRoom.current) return;
+    if (presenceRef.current !== 'present' || checkingRoom.current || isLockedNow()) return;
     const items = heldRef.current;
     if (items.length <= announcedHeld.current) return;
     // The room first (his ask, 26 Nov 2026): a busy room keeps everything but the urgent for a quieter moment
@@ -918,6 +923,14 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
       if (item.priority === 'LOW' && item.source === 'server' && !item.ring) {
         // Small news ("Mansi started a task"): never spoken, never vibrates, never offered; it is in the lists.
         tell([item]);
+        return null;
+      }
+      if (isLockedNow()) {
+        // The fingerprint cover is up (his rule, 27 Nov 2026): shown and buzzed, never said over the cover; counted
+        // as "while you were away" the moment he unlocks.
+        show(item, 'silent');
+        buzzSilently(item.priority === 'URGENT');
+        hold(item, 'away');
         return null;
       }
       if (state === 'present') {
@@ -1182,6 +1195,10 @@ export function AlertEngineProvider({ children }: { children: React.ReactNode })
     presenceRef.current = presence.state;
     if (prev !== 'present' && presence.state === 'present') offerHeldIfBack();
   }, [presence.state, offerHeldIfBack]);
+  // The lock cover going: what was held under it is counted now.
+  useEffect(() => onLockChange((on) => {
+    if (!on) setTimeout(offerHeldIfBack, 400);
+  }), [offerHeldIfBack]);
 
   // Tapping a notification opens the app on that alert, and JARVIS starts talking about it at once.
   const markActive = presence.markActive;

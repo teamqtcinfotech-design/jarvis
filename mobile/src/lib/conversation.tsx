@@ -16,7 +16,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { Animated, AppState, Platform } from 'react-native';
 
 import { type AlertGroup, type AlertQuestion, type EngineItem, type HeldOffer, GROUP_ORDER, GROUP_WORDS, describeWaiting, groupOf, pileOf, questionFor, useAlertEngine } from './alertEngine';
-import { lockAvailable, lockEnabled, recentlyUnlocked } from './appLock';
+import { isLockedNow, lockAvailable, lockEnabled, onLockChange, onceUnlocked, recentlyUnlocked } from './appLock';
 import { noteHere } from './presence';
 import { langOfText, pinnedLang, replyLang, setReplyLang, twin } from './lang';
 import { addressHiOf, addressOf, mdWord, mdWordHi } from './names';
@@ -293,6 +293,10 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const talkOpenRef = useRef(false);
   const [exchanging, setExchanging] = useState(false);
   const exchangeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The lock cover (AppLock): while it is up nothing opens and nothing is said; a wake waits for the unlock.
+  const [locked, setLockedState] = useState(isLockedNow());
+  const wakeWaiting = useRef(false);
+  useEffect(() => onLockChange(setLockedState), []);
   const markExchange = (forMs: number = EXCHANGE_MS, heard = true) => {
     if (heard) lastHeardAt.current = nowMs();
     setExchanging(true);
@@ -447,6 +451,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
   };
   const openTalk = (mode: 'voice' | 'type' | 'dock' = 'voice') => {
+    if (isLockedNow()) return; // the lock cover is up: the conversation (a modal, drawn over it) never opens on top of it
     setTalkOpen(true);
     setTalkMode(mode);
     setTalkOpenedAt(Date.now());
@@ -1004,6 +1009,18 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // Woken by "Hey JARVIS": come to the orb screen, greet (and offer held alerts in the same breath), listen.
   const wake = () => {
     if (!user) return;
+    if (isLockedNow()) {
+      // The floating button, "Hey JARVIS" or the lock-screen button while the fingerprint cover is up: the greeting
+      // waits for the unlock (his rule, 27 Nov 2026) instead of opening the conversation over the cover.
+      if (!wakeWaiting.current) {
+        wakeWaiting.current = true;
+        onceUnlocked(() => {
+          wakeWaiting.current = false;
+          fns.current.wake();
+        });
+      }
+      return;
+    }
     setHeldVisible(false);
     noteHere('wake');
     markExchange(); // he called: a conversation is starting
@@ -2047,8 +2064,9 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   // "Hey JARVIS" the held list may arrive a moment late: if he has not started talking yet, ask it then. While the
   // live line is still connecting it waits (said then, the words would be lost).
   useEffect(() => {
-    // While he has just spoken, or the opening greeting is on its way (an exchange), the offer waits its turn.
-    if (!offer || offer.id === presentedOffer.current || busy || speakingAny || live === 'connecting' || exchanging) return;
+    // While he has just spoken, or the opening greeting is on its way (an exchange), or the lock cover is up, the
+    // offer waits its turn.
+    if (!offer || offer.id === presentedOffer.current || busy || speakingAny || live === 'connecting' || exchanging || locked) return;
     const justWoke = Date.now() - wokeAtRef.current < 8000 && !voice.partial;
     if (listening && !justWoke && !liveOn) return;
     presentedOffer.current = offer.id;
@@ -2057,7 +2075,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
       fns.current.presentOffer(offer, false);
     }, 0);
     return () => clearTimeout(kick);
-  }, [offer, listening, busy, speakingAny, liveOn, live, exchanging, voice.partial, cancelVoice]);
+  }, [offer, listening, busy, speakingAny, liveOn, live, exchanging, locked, voice.partial, cancelVoice]);
 
   // "Hey JARVIS": the native listener either tells us directly (app open) or brings the app to the front
   // with a pending flag (app was closed). One microphone user at a time: it pauses while JARVIS talks or listens.

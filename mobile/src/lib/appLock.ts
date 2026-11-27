@@ -13,6 +13,54 @@ export const LOCK_AFTER_MS = 5 * 60_000;  // away this long -> ask again
 
 let lastUnlockAt = 0;
 
+// The cover itself (AppLock.tsx): while it is up, nothing opens and nothing is said (his rule, 27 Nov 2026); what
+// was about to happen waits here and runs the moment he unlocks.
+let covered = false;
+const waiters: (() => void)[] = [];
+const listeners = new Set<(on: boolean) => void>();
+
+/** The lock cover is on the screen right now. */
+export function isLockedNow(): boolean {
+  return covered;
+}
+
+/** Told by the cover when it shows and when it goes. */
+export function setCovered(on: boolean) {
+  if (covered === on) return;
+  covered = on;
+  for (const l of Array.from(listeners)) {
+    try {
+      l(on);
+    } catch {
+      // one listener must not stop the others
+    }
+  }
+  if (!on) {
+    const due = waiters.splice(0);
+    for (const fn of due) {
+      try {
+        fn();
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+/** Run now, or the moment the cover goes. */
+export function onceUnlocked(fn: () => void) {
+  if (!covered) fn();
+  else waiters.push(fn);
+}
+
+/** Every change of the cover (true = shown, false = gone). Returns the unsubscribe. */
+export function onLockChange(listener: (on: boolean) => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 export async function lockAvailable(): Promise<boolean> {
   try {
     return (await LocalAuthentication.hasHardwareAsync()) && (await LocalAuthentication.isEnrolledAsync());
