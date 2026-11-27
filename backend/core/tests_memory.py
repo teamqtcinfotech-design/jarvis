@@ -324,8 +324,12 @@ class SilenceNowTests(BaseCase):
 
 class ClosedAppOfferTests(BaseCase):
     def offer(self, items):
+        # Through the endpoint the phone uses, so the request validator is part of the test (27 Nov 2026: it refused
+        # the count, "offer" was not a kind it knew, and "batao" then arrived with nothing waiting).
         about = {"kind": "offer", "question": "Sir, 2 reminders. Shall I tell you?", "items": items}
-        return conversation.turn(self.md, "", event="ask", about=about)
+        r = self.md_client.post("/api/v1/assistant/turn/", {"text": "", "event": "ask", "about": about}, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
 
     def test_yes_reads_the_first_with_its_question_and_counts_the_rest(self):
         when = tu.now_local() + timedelta(minutes=20)

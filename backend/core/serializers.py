@@ -267,12 +267,30 @@ class LiveUsageSerializer(serializers.Serializer):
 
 
 class AboutSerializer(serializers.Serializer):
-    """The reminder or alert the phone's background part has just spoken and asked about; the words are the answer."""
-    kind = serializers.ChoiceField(choices=[("reminder", "reminder"), ("alert", "alert")])
+    """The reminder or alert the phone's background part has just spoken and asked about; the words are the answer.
+    Or (26 Nov 2026) the count it said instead ("Sir, ek reminder hai. Kya main bataun?"): kind "offer" with the
+    items behind it, so a yes reads them one at a time and a no brings them back later."""
+    kind = serializers.ChoiceField(choices=[("reminder", "reminder"), ("alert", "alert"), ("offer", "offer")])
     key = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")   # reminder key
     id = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")      # alert id
     title = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
     question = serializers.CharField(max_length=300, required=False, allow_blank=True, default="")
+    # offer: the items behind the count [{kind, key, id, title, spoken, question}], at most 20.
+    items = serializers.JSONField(required=False, allow_null=True, default=None)
+
+    def validate_items(self, value):
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise serializers.ValidationError("items must be a list")
+        out = []
+        for it in value[:20]:
+            if not isinstance(it, dict):
+                continue
+            clean = {k: str(it.get(k) or "")[:600] for k in ("kind", "key", "id", "title", "spoken")}
+            clean["question"] = it.get("question") if isinstance(it.get("question"), dict) else None
+            out.append(clean)
+        return out
 
 
 class TurnSerializer(serializers.Serializer):
