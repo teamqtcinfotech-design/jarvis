@@ -5,10 +5,14 @@ staff in the directory (through the TaskPanel gateway, so they reach the staff's
 
     python manage.py seed_tasks /srv/jarvis/tasks.json --staff "Nikki:6,Gauri:5" --me 14 --dry-run   # the plan only
     python manage.py seed_tasks /srv/jarvis/tasks.json --staff "Nikki:6,Gauri:5" --me 14             # do it
+    python manage.py seed_tasks --demo farmhouse --driver "Driver" --dry-run    # his farmhouse / car sheet (27 Nov 2026)
+    python manage.py seed_tasks --demo farmhouse --driver "Driver"
 
 The file is the phpMyAdmin export of the `tasks` table (a list whose "table" entry holds the rows), or a plain list
 of rows / titles. Only open rows are used, demo and test rows are skipped, every title once. The same --seed gives
-the same choice of titles. Nothing is deleted; run clear_data first for a clean slate.
+the same choice of titles. The demo list is built in: the car work goes to the staff member named with --driver
+(through the panel), the farmhouse and office work to the MD's own list under their sections, late and ahead.
+Nothing is deleted; run clear_data first for a clean slate.
 """
 import json
 import random
@@ -29,6 +33,43 @@ OFFSETS = (-1, 0, 1, 2, 30, -3, 0, 1, -7, 2, 31, 0)
 # The MD's meetings: a couple a day on the near days, one next month (hour, minutes, day offset); past hours today
 # move to the next day so nothing is born already over.
 MEETINGS = ((0, 11, 30, 30), (0, 16, 0, 45), (1, 11, 0, 30), (1, 15, 30, 45), (2, 12, 0, 30), (30, 11, 0, 60))
+
+
+# His sheets (27 Nov 2026): the V Class car work for the driver, the farmhouse tracker and a few office items for
+# himself. (to, section, priority, day offset from today, title): the late ones are what "pending" looks like.
+DEMO = {
+    "farmhouse": [
+        ("driver", "", Priority.HIGH, -3, "V Class car ke WiFi mein SIM lagwani hai"),
+        ("driver", "", Priority.NORMAL, 0, "V Class door cleaning"),
+        ("driver", "", Priority.HIGH, -1, "V Class ka mic kaam nahi kar raha"),
+        ("driver", "", Priority.HIGH, 1, "V Class ka wireless kaam nahi kar raha"),
+        ("driver", "", Priority.NORMAL, 5, "V Class ki servicing book karni hai"),
+        ("driver", "", Priority.HIGH, 10, "Car insurance renewal ke papers lene hain"),
+        ("driver", "", Priority.NORMAL, 2, "Fuel card activate karwana hai"),
+        ("driver", "", Priority.NORMAL, 30, "V Class ke tyre pressure aur alignment check karwana hai"),
+        ("me", "Farmhouse", Priority.NORMAL, -7, "Buddha murti theek karwani hai"),
+        ("me", "Farmhouse", Priority.HIGH, -3, "Sir ke office mein extension lagwana hai"),
+        ("me", "Farmhouse", Priority.NORMAL, -1, "Sir ke bedroom mein extension board lagwana hai"),
+        ("me", "Farmhouse", Priority.NORMAL, 0, "Khane ki SOP banni hai"),
+        ("me", "Farmhouse", Priority.NORMAL, 1, "Farm par kitne drivers chahiye, tay karna hai"),
+        ("me", "Farmhouse", Priority.HIGH, -2, "Fountain mein problem aa rahi hai"),
+        ("me", "Farmhouse", Priority.HIGH, 0, "Swimming pool mein light problem aur hot water"),
+        ("me", "Farmhouse", Priority.URGENT, -1, "Chimney kaam nahi kar rahi"),
+        ("me", "Farmhouse", Priority.NORMAL, 3, "Main gate ke liye original flowers mangwane hain"),
+        ("me", "Farmhouse", Priority.NORMAL, 1, "Farmhouse ke liye electrician bulana hai"),
+        ("me", "Farmhouse", Priority.LOW, 7, "Farmhouse ke liye chairs leni hain"),
+        ("me", "Farmhouse", Priority.LOW, 5, "Farmhouse ke sweets order karne hain"),
+        ("me", "Farmhouse", Priority.NORMAL, 14, "Garden ki pump motor service karwani hai"),
+        ("me", "Farmhouse", Priority.HIGH, 2, "Farmhouse ke CCTV cameras check karwane hain"),
+        ("me", "Farmhouse", Priority.NORMAL, 10, "Water tank ki safai karwani hai"),
+        ("me", "Farmhouse", Priority.HIGH, 30, "Generator ki servicing book karni hai"),
+        ("me", "Farmhouse", Priority.NORMAL, 4, "Staff quarters ka AC theek karwana hai"),
+        ("me", "Farmhouse", Priority.LOW, 20, "Solar panel ka quotation lena hai"),
+        ("me", "Farmhouse", Priority.NORMAL, 6, "Lawn ke liye mali rakhna hai"),
+        ("me", "Office", Priority.NORMAL, -2, "Office ke printer ka toner mangwana hai"),
+        ("me", "Office", Priority.HIGH, 1, "Conference room ka projector theek karwana hai"),
+    ],
+}
 
 
 def load_rows(path: str) -> list[dict]:
@@ -86,17 +127,23 @@ class Command(BaseCommand):
     help = "Lay demo work from a task export over the test days, to named staff and to the MD."
 
     def add_arguments(self, parser):
-        parser.add_argument("file", help="the task export (JSON)")
+        parser.add_argument("file", nargs="?", default="", help="the task export (JSON); not needed with --demo")
         parser.add_argument("--staff", default="", help='who gets how many: "Nikki:6,Gauri:5" (names from the staff directory)')
         parser.add_argument("--me", type=int, default=0, help="how many tasks for the MD's own list (plus a few meetings)")
         parser.add_argument("--no-meetings", action="store_true", help="tasks only for the MD, no meetings")
         parser.add_argument("--seed", type=int, default=26, help="the same seed picks the same titles")
+        parser.add_argument("--demo", default="", choices=["", *DEMO], help="a built-in list instead of a file (farmhouse)")
+        parser.add_argument("--driver", default="Driver", help="--demo: the staff member who gets the car work (a name from the directory)")
         parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
 
     def handle(self, *args, **opts):
         md = User.objects.filter(role=User.Role.MD, is_active=True).first()
         if md is None:
             raise CommandError("no MD account in this database")
+        if opts["demo"]:
+            return self._demo(md, opts)
+        if not opts["file"]:
+            raise CommandError("give the task export file, or --demo farmhouse")
         rows = load_rows(opts["file"])
         if not rows:
             raise CommandError("no rows in the file")
@@ -138,20 +185,42 @@ class Command(BaseCommand):
                 plan.append((None, md.spoken_name, Kind.MEETING, day, time(hour, minute), length,
                              Priority.HIGH if k == 0 else Priority.NORMAL, f"Meeting: {subject[:70]}"))
 
-        self.stdout.write(f"{'(plan only) ' if opts['dry_run'] else ''}{len(plan)} items over {today - timedelta(days=7)} … {today + timedelta(days=31)}:")
-        for who, label, kind, day, when, minutes, priority, title in plan:
+        staff_n = sum(n for _n, n in wants)
+        self._run(md, [(*p, "") for p in plan], staff_n, opts["dry_run"])
+
+    def _demo(self, md: User, opts: dict):
+        """The built-in list: the car work to the driver (the panel), the rest to the MD's own list under its section."""
+        rows = DEMO[opts["demo"]]
+        driver = self._staff(opts["driver"]) if any(r[0] == "driver" for r in rows) else None
+        today = tu.today_local()
+        plan = []
+        for to, section, priority, offset, title in rows:
+            day = today + timedelta(days=offset)
+            if to == "driver":
+                plan.append((driver, driver.name, Kind.TASK, day, None, None, priority, title, ""))
+            else:
+                plan.append((None, md.spoken_name, Kind.TASK, day, None, None, priority, title, section))
+        self._run(md, plan, sum(1 for r in rows if r[0] == "driver"), opts["dry_run"])
+
+    def _run(self, md: User, plan: list, staff_n: int, dry_run: bool):
+        today = tu.today_local()
+        self.stdout.write(f"{'(plan only) ' if dry_run else ''}{len(plan)} items:")
+        for who, label, kind, day, when, minutes, priority, title, section in plan:
             late = " LATE" if day < today else ""
             at_s = f" {when.strftime('%H:%M')}" if when else ""
-            self.stdout.write(f"  {label:<14} {day}{at_s:<6} {kind:<8} {priority:<7}{late:<5} {title[:70]}")
-        if opts["dry_run"]:
+            sec = f" [{section}]" if section else ""
+            self.stdout.write(f"  {label:<14} {day}{at_s:<6} {kind:<8} {priority:<7}{late:<5} {title[:70]}{sec}")
+        if dry_run:
             return
         made = sent = failed = 0
-        for who, label, kind, day, when, minutes, priority, title in plan:
+        for who, label, kind, day, when, minutes, priority, title, section in plan:
             data = {"title": title, "kind": kind, "priority": priority, "due_date": day}
             if when:
                 data["due_time"] = when
             if minutes:
                 data["duration_minutes"] = minutes
+            if section:
+                data["section"] = section
             try:
                 if who is None:
                     services.create_private_task(md, data)
@@ -167,7 +236,6 @@ class Command(BaseCommand):
             except Exception as err:  # noqa: BLE001 — one bad item must not stop the rest
                 failed += 1
                 self.stdout.write(self.style.WARNING(f"  skipped '{title[:60]}' for {label}: {err}"))
-        staff_n = sum(n for _n, n in wants)
         self.stdout.write(self.style.SUCCESS(
             f"{made} created ({staff_n} for staff, of which {sent} already in the panel; the rest are delivered by the worker), {failed} failed."))
 

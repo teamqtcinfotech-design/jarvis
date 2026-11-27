@@ -76,6 +76,28 @@ class SeedTasksTests(BaseCase):
         for bad in ("demo", "test meeting", "short", "Done already once"):
             self.assertNotIn(bad, titles)
 
+    def test_the_built_in_farmhouse_list_goes_to_the_driver_and_to_his_own_list_under_its_sections(self):
+        today = tu.today_local()
+        out = StringIO()
+        call_command("seed_tasks", "--demo", "farmhouse", "--driver", "Ramesh Kumar", "--dry-run", stdout=out)
+        self.assertIn("(plan only) 29 items", out.getvalue())
+        self.assertIn("[Farmhouse]", out.getvalue())
+        self.assertFalse(SharedTask.objects.filter(assignee_type=SharedTask.Assignee.STAFF).exists())
+        out = StringIO()
+        call_command("seed_tasks", "--demo", "farmhouse", "--driver", "Ramesh Kumar", stdout=out)
+        staff = SharedTask.objects.filter(assignee_type=SharedTask.Assignee.STAFF).select_related("staff")
+        self.assertEqual(staff.count(), 8)
+        self.assertTrue(all(t.staff.name == "Ramesh Kumar" for t in staff))
+        self.assertTrue(any(t.due_date < today for t in staff) and any(t.due_date > today for t in staff))  # late and ahead
+        mine = list(PrivateTask.objects.filter(owner=self.md).exclude(id=self.private.id).select_related("section"))
+        self.assertEqual(len(mine), 21)
+        chimney = next(t for t in mine if t.title == "Chimney kaam nahi kar rahi")  # the title is encrypted: look in Python
+        self.assertEqual(chimney.priority, "URGENT")
+        self.assertEqual(chimney.section.name, "Farmhouse")
+        self.assertEqual(sorted({t.section.name for t in mine if t.section}), ["Farmhouse", "Office"])
+        self.assertEqual(sum(1 for t in mine if t.due_date < today), 6)  # Buddha, office extension, bedroom board, fountain, chimney, toner
+        self.assertIn("8 for staff", out.getvalue())
+
     def test_an_unknown_or_ambiguous_name_is_refused_with_the_directory(self):
         with self.assertRaises(CommandError) as err:
             self.run_seed("--staff", "Nobody:2")
