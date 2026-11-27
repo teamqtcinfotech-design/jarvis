@@ -284,6 +284,30 @@ class ActPathTests(BaseCase):
         self.assertIn("one more. Shall I tell you?", r["show"])
         self.assertIn('[k1] reminder: "Call the bank"', model.requests[0]["messages"][-1]["content"][0]["text"])
 
+    def test_work_in_the_staff_panel_cannot_be_taken_back_from_here_and_jarvis_says_so(self):
+        # 27 Nov 2026: undo said "Undone" and the panel still had the tasks (its gateway has no cancel). Now the
+        # record stays, and the line says where the work is.
+        from core.models import StaffMember
+        staff = StaffMember.objects.filter(active=True).first()
+        task, _cmd = services.delegate_to_staff(self.md, {"title": "Send the GST file"}, staff, description="Send the GST file")
+        actions_mod = __import__("core.actions", fromlist=["undo_last"])
+        actions_mod.remember_done(self.md, [{"type": "shared", "id": str(task.id)}], task.title)
+        out = actions_mod.undo_last(self.md)
+        self.assertEqual(out["undone"], 0)
+        self.assertEqual(out["kept"], ["Send the GST file"])
+        self.assertIn(f"Send the GST file stays with {staff.name}: I can't take a panel task back from here", out["en"])
+        self.assertTrue(SharedTask.objects.filter(id=task.id).exists())  # JARVIS's record stays: the lists never disagree
+        # "Nikki ka wo task hata do": the brain is told the same, and the task stays open.
+        def line(results):
+            fact = results["t1_0"]
+            self.assertEqual(fact["cancelled"], [])
+            self.assertEqual(fact["in_panel"][0]["title"], "Send the GST file")
+            return {"say_en": f"Wo {staff.name} ke panel mein hai, yahan se cancel nahi hota.", "say_hi": "", "about": []}
+        d = self.say("GST wala task hata do", _FakeModel([("cancel_items", {"ids": [str(task.id)]})], line))
+        self.assertFalse(d["booked"])
+        self.assertEqual(SharedTask.objects.get(id=task.id).status, "OPEN")
+        self.assertIn("panel", d["spoken_reply"])
+
     def test_unsure_hands_the_same_turn_fresh_to_the_strong_model(self):
         sid = str(self.sharma.id)
         model = _FakeModel({"escalate": True}, [("edit_item", {"id": sid, "priority": "URGENT"})],

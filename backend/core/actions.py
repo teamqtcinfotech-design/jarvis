@@ -312,8 +312,13 @@ def undo_last(user: User) -> dict:
     if not last:
         raise ServiceError("nothing", "there is nothing to undo now.", 422)
     undone = 0
+    kept: list[tuple[str, str]] = []  # (title, staff name): work in the staff panel, which cannot be taken back from here
     for ref in last.get("refs") or []:
         try:
+            panel = _panel_task(user, ref)
+            if panel is not None:
+                kept.append(panel)
+                continue
             undone += _undo_one(user, ref)
         except (ObjectDoesNotExist, ValueError, ServiceError) as err:
             log.info("undo skipped one item: %s", type(err).__name__)
@@ -322,10 +327,38 @@ def undo_last(user: User) -> dict:
     if row:
         row.state_json = json.dumps(data, ensure_ascii=False, default=str)
         row.save(update_fields=["state_json", "updated_at"])
-    services.audit(user, "undo", "user", user.id, f"{undone} item(s)")
+    services.audit(user, "undo", "user", user.id, f"{undone} item(s), {len(kept)} kept in the panel")
+    if kept:
+        # Honest about the panel (27 Nov 2026): its gateway has no cancel, so a task given to staff stays with them
+        # until it is cancelled in the panel itself; JARVIS keeps its record too, so the lists never disagree.
+        stays, stays_hi = _stays_line(kept)
+        en = (f"Undone, {address}. But {stays}" if undone else f"{address}, {stays}")
+        hi = (f"वापस ले लिया, {address_hi}। लेकिन {stays_hi}" if undone else f"{address_hi}, {stays_hi}")
+        return {"en": en, "hi": hi, "undone": undone, "kept": [t for t, _s in kept]}
     return {"en": f"Undone, {address}." if undone else f"{address}, that was already changed, so nothing was undone.",
             "hi": f"वापस ले लिया, {address_hi}।" if undone else f"{address_hi}, वो पहले ही बदल चुका था, कुछ वापस नहीं हुआ।",
             "undone": undone}
+
+
+def _panel_task(user: User, ref: dict) -> tuple[str, str] | None:
+    """(title, staff name) when the ref is work given to someone in the staff panel; None otherwise."""
+    if ref.get("type") != "shared":
+        return None
+    task = SharedTask.objects.filter(id=ref.get("id"), created_by=user).select_related("staff").first()
+    if task is None or task.assignee_type != SharedTask.Assignee.STAFF:
+        return None
+    return task.title, task.staff.name if task.staff_id else "the staff"
+
+
+def _stays_line(kept: list[tuple[str, str]]) -> tuple[str, str]:
+    """"X stays with Nikki: I can't take a panel task back from here; it has to be cancelled in the panel." (+ Hindi)."""
+    if len(kept) == 1:
+        title, who = kept[0]
+        return (f"{title} stays with {who}: I can't take a panel task back from here; it has to be cancelled in the panel.",
+                f"{title} {who} के पास ही रहेगा: पैनल का टास्क यहाँ से वापस नहीं लिया जा सकता, उसे पैनल में ही कैंसल करना होगा।")
+    names = "; ".join(f"{t} ({w})" for t, w in kept[:4])
+    return (f"these stay in the panel: {names}. I can't take a panel task back from here; they have to be cancelled in the panel.",
+            f"ये पैनल में ही रहेंगे: {names}। पैनल का टास्क यहाँ से वापस नहीं लिया जा सकता, उन्हें पैनल में ही कैंसल करना होगा।")
 
 
 def _withdrawn_note(user: User, person: User, title: str) -> None:

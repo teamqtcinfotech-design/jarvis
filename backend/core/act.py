@@ -331,7 +331,13 @@ def _cancel_items(t: _Turn, a: dict) -> dict:
         t.refs.extend(last.get("refs") or [])
         t.writes += len(done)
         t.label = t.label or done[0]["title"]
-    return {"cancelled": [d["title"] for d in done], "failed": [f["title"] for f in failed], "asked_md": requests}
+    out = {"cancelled": [d["title"] for d in done], "failed": [f["title"] for f in failed if f.get("why") != "panel"], "asked_md": requests}
+    panel = [f for f in failed if f.get("why") == "panel"]
+    if panel:
+        out["in_panel"] = [{"title": f["title"], "with": f.get("who") or "the staff"} for f in panel]
+        out["note"] = ("these are with the staff panel, which has no cancel: they cannot be taken back from here and stay with the "
+                       "person until cancelled in the panel; say so plainly")
+    return out
 
 
 def _complete_item(t: _Turn, a: dict) -> dict:

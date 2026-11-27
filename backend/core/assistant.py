@@ -499,6 +499,12 @@ def _cancel_now(user: User, targets: list[dict]) -> tuple[list[dict], list[dict]
             if t.get("scope") == "private":
                 services.update_private_task(user, t["id"], {"status": Status.CANCELLED}, t.get("version") or 1)
             else:
+                staffed = SharedTask.objects.filter(id=t["id"], assignee_type=SharedTask.Assignee.STAFF).select_related("staff").first()
+                if staffed is not None:
+                    # Work in the staff panel: its gateway has no cancel (27 Nov 2026), so it cannot be taken back
+                    # from here; said plainly, never pretended.
+                    failed.append({**t, "why": "panel", "who": staffed.staff.name if staffed.staff_id else "the staff"})
+                    continue
                 _task, req = services.change_shared_task(user, t["id"], {"status": Status.CANCELLED}, t.get("version") or 1, "")
                 if req is not None:
                     requests += 1
@@ -3163,10 +3169,14 @@ def _draft_for(user: User, cmd: dict, intent: str, full_text: str, reply_languag
                 _say(draft, f"{address}, that is {sir}'s own work: I've asked {sir} to cancel it.",
                      f"{address_hi}, ये {sir_hi} का अपना काम है: {sir_hi} से कैंसल करने को कहा है।")
             else:
-                left = _named(failed, 5)
-                _say(draft, ((f"Deleted {names}." if done else "") + (f" Could not delete {left}: it has changed, try again." if failed else "")
+                panel = [f for f in failed if f.get("why") == "panel"]
+                other = [f for f in failed if f.get("why") != "panel"]
+                left, in_panel = _named(other, 5), "; ".join(f"{f['title']} ({f.get('who') or 'staff'})" for f in panel[:4])
+                _say(draft, ((f"Deleted {names}." if done else "") + (f" Could not delete {left}: it has changed, try again." if other else "")
+                             + (f" {in_panel} stays in the staff panel: I can't take a panel task back from here; it has to be cancelled in the panel." if panel else "")
                              + (f" {requests} asked of {sir}." if requests else "")).strip(),
-                     ((f"{names} हटा दिया।" if done else "") + (f" {left} नहीं हटा: वो बदल गया है, फिर कहिए।" if failed else "")).strip())
+                     ((f"{names} हटा दिया।" if done else "") + (f" {left} नहीं हटा: वो बदल गया है, फिर कहिए।" if other else "")
+                      + (f" {in_panel} पैनल में ही रहेगा: पैनल का टास्क यहाँ से वापस नहीं लिया जा सकता, उसे पैनल में ही कैंसल करना होगा।" if panel else "")).strip())
         elif chosen or len(matches) == 1:
             draft["targets"] = matches
             draft["target"] = matches[0]
