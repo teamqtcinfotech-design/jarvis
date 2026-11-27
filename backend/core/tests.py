@@ -2621,8 +2621,9 @@ class TwoThingsInOneBreathTests(BaseCase):
         self.assertEqual(r["action"], "private_task", r)   # a rough (offline) reading still waits for the yes
         r = self.turn(self.md_client, "haan", _cmd(intent="confirm_pending"))
         self.assertEqual(r["action"], "saved", r)
-        self.assertIn("Saved: Call Mehta ji.", r["show"])
-        self.assertIn("Priya has it for tomorrow: Book the Pune hotel.", r["show"])
+        # The yes on a list names the people it went to and counts his own, never the items one by one (his rule, 27 Nov 2026).
+        self.assertEqual(r["show"], "Sent to Priya. And 1 saved on your list.")
+        self.assertEqual(r["say"], "Priya को भेज दिया। और 1 आपकी लिस्ट में सेव हो गए।")
         self.assertIn("Call Mehta ji", list(PrivateTask.objects.filter(owner=self.md).values_list("title", flat=True)))  # (encrypted title: read, not filtered)
         self.assertTrue(SharedTask.objects.filter(title="Book the Pune hotel", assignee_type="USER", assignee_user=self.pa).exists())
 
@@ -2651,8 +2652,8 @@ class TwoThingsInOneBreathTests(BaseCase):
         self.turn(self.md_client, text, cmd)
         r = self.turn(self.md_client, "haan, sab bhej do", _cmd(intent="confirm_pending"))
         self.assertEqual(r["action"], "saved", r)
-        self.assertIn("Sunil has it for tomorrow: Bank Statement for October.", r["show"])
-        self.assertIn("The message has gone to Priya.", r["show"])
+        # "In sabko bhej diya": the people, each named once, never the four items read out (his rule, 27 Nov 2026).
+        self.assertEqual(r["show"], "Sent to Sunil, Mansi and Priya.")
         self.assertTrue(SharedTask.objects.filter(title="Bank Statement for October", assignee_user=sunil, created_by=self.md).exists())
         self.assertTrue(SharedTask.objects.filter(title="Send the GST File", assignee_user=mg).exists())
         self.assertEqual(SharedTask.objects.filter(title="Monthly Report").count(), 2)          # one each for Sunil and Mansi
@@ -3082,7 +3083,8 @@ class MeetingJugglingTests(BaseCase):
     def test_a_name_with_two_meetings_asks_once_with_only_those_and_kal_wali_answers_it(self):
         # "Sharma ji wali ko 7 baje kar do": two Sharma ji meetings, so one short question with those two (never an item
         # that merely has "kar" in its title); "kal wali" picks by the day and the move is done.
-        day1, day2 = _workday(1), _workday(3)
+        day1 = _workday(1)
+        day2 = _workday((day1 - tu.today_local()).days + 1)  # a later workday: on a Friday both would otherwise be Monday
         sharma1 = self._meeting("Meeting with Sharma ji", day1, time(16, 0))
         sharma2 = self._meeting("Sharma ji site visit", day2, time(11, 0))
         services.create_private_task(self.md, {"title": "Karigar payment kar dena", "due_date": day1})

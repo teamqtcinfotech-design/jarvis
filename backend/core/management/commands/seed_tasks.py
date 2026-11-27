@@ -155,7 +155,7 @@ class Command(BaseCommand):
             except ValueError:
                 raise CommandError(f"'{part}': say NAME:COUNT") from None
             wants.append((name.strip(), max(1, n)))
-        people = [(self._staff(name), n) for name, n in wants]
+        people = [(self._staff(name, md), n) for name, n in wants]
         total = sum(n for _n, n in wants) + max(0, opts["me"])
         if not total:
             raise CommandError("nothing to do: give --staff and/or --me")
@@ -191,7 +191,7 @@ class Command(BaseCommand):
     def _demo(self, md: User, opts: dict):
         """The built-in list: the car work to the driver (the panel), the rest to the MD's own list under its section."""
         rows = DEMO[opts["demo"]]
-        driver = self._staff(opts["driver"]) if any(r[0] == "driver" for r in rows) else None
+        driver = self._staff(opts["driver"], md) if any(r[0] == "driver" for r in rows) else None
         today = tu.today_local()
         plan = []
         for to, section, priority, offset, title in rows:
@@ -239,15 +239,26 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"{made} created ({staff_n} for staff, of which {sent} already in the panel; the rest are delivered by the worker), {failed} failed."))
 
-    def _staff(self, name: str) -> StaffMember:
-        own = services.own_actor_keys()
-        active = [s for s in StaffMember.objects.filter(active=True) if s.external_id not in own]
-        low = name.lower()
-        exact = [s for s in active if s.name.lower() == low]
-        hits = exact or [s for s in active if low in s.name.lower()]
+    def _staff(self, name: str, md: User | None = None) -> StaffMember:
+        hits, active = self._lookup(name)
+        if not hits and md is not None:
+            # Someone added to the panel since the directory was last read (a new "Driver" row): read it again once.
+            try:
+                services.sync_staff(md)
+            except Exception as err:  # noqa: BLE001 — the panel being away only means the old directory decides
+                self.stdout.write(self.style.WARNING(f"  could not refresh the staff directory from the panel: {err}"))
+            hits, active = self._lookup(name)
         if len(hits) == 1:
             return hits[0]
         names = ", ".join(sorted(s.name for s in active))
         if not hits:
             raise CommandError(f"no staff member called '{name}'. The directory has: {names}")
         raise CommandError(f"'{name}' fits several: {', '.join(s.name for s in hits)}. Say the full name.")
+
+    @staticmethod
+    def _lookup(name: str) -> tuple[list[StaffMember], list[StaffMember]]:
+        own = services.own_actor_keys()
+        active = [s for s in StaffMember.objects.filter(active=True) if s.external_id not in own]
+        low = name.lower()
+        exact = [s for s in active if s.name.lower() == low]
+        return (exact or [s for s in active if low in s.name.lower()]), active

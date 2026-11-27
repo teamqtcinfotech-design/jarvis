@@ -217,8 +217,10 @@ def item_name(item: dict) -> str:
 
 
 def _sent_line(lines: list[dict]) -> tuple[str, str]:
-    """"Sent to Nikki, Priya and Gauri." / "Nikki, Priya और Gauri को भेज दिया।" for a list done together; the speaker's
-    own items among them are counted ("and 1 saved on your list")."""
+    """"Sent to Nikki, Priya and Gauri." / "Nikki, Priya और Gauri को भेज दिया।" for a list done together (his rule, 27 Nov
+    2026: the people, never the items one by one); the speaker's own items among them are counted ("and 1 saved on
+    your list"). A list that is all his own keeps each one said as it was done, never a bare "all saved" (his rule,
+    24 Nov 2026)."""
     people: list[str] = []
     for r in lines:
         for name in r.get("people") or []:
@@ -226,7 +228,7 @@ def _sent_line(lines: list[dict]) -> tuple[str, str]:
                 people.append(name)
     own = sum(1 for r in lines if not r.get("people"))
     if not people:
-        return f"All {len(lines)} saved.", f"सभी {len(lines)} सेव हो गए।"
+        return " ".join(r["en"] for r in lines), " ".join(r["hi"] for r in lines)
     who = people[0] if len(people) == 1 else ", ".join(people[:-1]) + " and " + people[-1]
     who_hi = people[0] if len(people) == 1 else ", ".join(people[:-1]) + " और " + people[-1]
     en = f"Sent to {who}." + (f" And {own} saved on your list." if own else "")
@@ -263,7 +265,7 @@ def run_card(user: User, card: dict) -> dict:
         en, hi = lines[0]["en"], lines[0]["hi"]
     elif not failed:
         # A list he has already seen and sent: one line naming the people it went to, never the items one by one
-        # (his rule, 27 Nov 2026); what was his own is counted.
+        # (his rule, 27 Nov 2026); what was his own is counted, and a list all his own says each as it was done.
         en, hi = _sent_line(lines)
     else:
         names = "; ".join(f"{t} ({m.rstrip('.')})" for t, m in failed)
