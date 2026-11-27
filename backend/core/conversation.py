@@ -175,6 +175,21 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
             _save(user, state)
             return resp
 
+    # A plain yes or no to the count ("batao", "haan", "nahi", "baad mein") is taken here, never read by the model
+    # (27 Nov 2026: "batao batao" came back as "kya bataun, mausam ke baare mein?").
+    if offer and offer.get("closed_app") and not asked:
+        yn = offer_answer(text)
+        if yn == "yes":
+            resp = _read_offered(state, offer, lang_mod.current(user), address, address_hi)
+        elif yn == "no":
+            state["offer"] = None
+            resp = _leave_offered(user, offer, lang_mod.current(user))
+        if yn:
+            state["history"].append({"role": "jarvis", "text": resp["show"]})
+            state["history"] = state["history"][-MAX_HISTORY:]
+            _save(user, state)
+            return resp
+
     previous, awaiting = "", ""
     if asked:
         awaiting = f'JARVIS asked: "{asked.get("question") or "Done, or remind you later?"}" about "{asked.get("title", "")}"'
@@ -280,6 +295,26 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     state["history"] = state["history"][-MAX_HISTORY:]
     _save(user, state)
     return resp
+
+
+OFFER_YES = {"haan", "han", "ha", "haanji", "hanji", "ji", "yes", "yeah", "ok", "okay", "sure", "batao", "bataiye", "bata", "do",
+             "bolo", "boliye", "sunao", "sunaiye", "suna", "padho", "padhiye", "padh", "theek", "thik", "hai", "sir", "please",
+             "हाँ", "हां", "जी", "बताओ", "बताइए", "बता", "दो", "बोलो", "बोलिए", "सुनाओ", "सुनाइए", "सुना", "पढ़ो", "पढ़िए", "ठीक", "है", "सर"}
+OFFER_NO = {"nahi", "nahin", "nhi", "na", "no", "nope", "not", "now", "abhi", "baad", "mein", "me", "rehne", "rahne", "do",
+            "chhodo", "chhod", "chodo", "mat", "ji", "sir", "later", "नहीं", "नही", "ना", "बाद", "में", "रहने", "दो", "छोड़ो", "अभी", "मत", "जी", "सर"}
+
+
+def offer_answer(text: str) -> str | None:
+    """"yes" / "no" to "Sir, ek reminder hai. Kya main bataun?" in a few plain words ("batao batao", "haan ji", "nahi
+    abhi nahi", "baad mein"); None for anything else (a sentence of its own)."""
+    words = [w for w in re.sub(r"[.,!?।]", " ", (text or "").lower()).split() if w]
+    if not words or len(words) > 5:
+        return None
+    if all(w in OFFER_NO for w in words) and any(w not in {"ji", "sir", "do"} for w in words):
+        return "no"
+    if all(w in OFFER_YES for w in words) and any(w not in {"ji", "sir", "do", "hai"} for w in words):
+        return "yes"
+    return None
 
 
 def _more_line(n: int, address: str, address_hi: str) -> tuple[str, str]:

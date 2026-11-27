@@ -174,6 +174,21 @@ const DONE_WORDS = /\b(done|ho gaya|ho gaye|hogaya|complete|completed|poora|poor
 const REMOVE_WORDS = /\b(hata do|hatao|hata|htao|remove|dismiss|clear|band karo|band kar|delete)\b|हटा|हटाओ|बंद करो/i;
 const UNREAD_WORDS = /\b(unread|unseen|rehne do|rahne do|chhodo|chhod do|mat padho|nahi padhna)\b|रहने दो|छोड़ दो|अनरीड/i;
 const READ_WORDS = /\b(padho|padh do|padh ke|read|sunao|suna do|batao|bata do)\b|पढ़ो|सुनाओ|बताओ/i;
+// A plain yes or no to the count ("Sir, ek reminder hai. Kya main bataun?"): taken here, never sent to the brain
+// (27 Nov 2026: "batao batao" came back as "kya bataun, mausam ke baare mein?"). A few words, all of one kind.
+const OFFER_YES = new Set(['haan', 'han', 'ha', 'haanji', 'hanji', 'ji', 'yes', 'yeah', 'ok', 'okay', 'sure', 'batao', 'bataiye', 'bata', 'do',
+  'bolo', 'boliye', 'sunao', 'sunaiye', 'suna', 'padho', 'padhiye', 'padh', 'theek', 'thik', 'hai', 'sir', 'please',
+  'हाँ', 'हां', 'जी', 'बताओ', 'बताइए', 'बता', 'दो', 'बोलो', 'बोलिए', 'सुनाओ', 'सुनाइए', 'सुना', 'पढ़ो', 'पढ़िए', 'ठीक', 'है', 'सर']);
+const OFFER_NO = new Set(['nahi', 'nahin', 'nhi', 'na', 'no', 'nope', 'not', 'now', 'abhi', 'baad', 'mein', 'me', 'rehne', 'rahne', 'do',
+  'chhodo', 'chhod', 'chodo', 'mat', 'ji', 'sir', 'later', 'नहीं', 'नही', 'ना', 'बाद', 'में', 'रहने', 'दो', 'छोड़ो', 'अभी', 'मत', 'जी', 'सर']);
+const OFFER_FILLER = new Set(['ji', 'sir', 'do', 'hai', 'जी', 'सर', 'दो', 'है']);
+function offerAnswer(text: string): 'yes' | 'no' | null {
+  const words = text.toLowerCase().replace(/[.,!?।]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 5) return null;
+  if (words.every((w) => OFFER_NO.has(w)) && words.some((w) => !OFFER_FILLER.has(w))) return 'no';
+  if (words.every((w) => OFFER_YES.has(w)) && words.some((w) => !OFFER_FILLER.has(w))) return 'yes';
+  return null;
+}
 const SHOW_WORDS = /\b(dikhao|dikha do|dikhaao|show|list)\b|दिखाओ/i;
 /** "Koi update hai?", "kuch aaya?", "anything for me?": the count by kind, then "padhun?"; nothing is read unasked. */
 const UPDATE_Q = /\b(koi update|kuch update|update hai|updates? (?:hai|hain|aaya|aaye)|kya aaya|kya aya|kuch aaya|kuch aya|kuch naya|kya naya|koi notification|koi alert|notifications?|alerts?|mere liye kuch|anything (?:for me|new|waiting)|what'?s new|any updates?)\b|कोई अपडेट|क्या आया|कुछ नया|कुछ आया/i;
@@ -812,6 +827,7 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     if (handleBatch(text)) return; // a word on the batch or the banner: done here, never a "which one?"
     const pendingOffer = offerRef.current;
     if (pendingOffer) {
+      if (answerOffer(offerAnswer(text))) return; // "batao" / "nahi": settled here, never read by the brain
       interpret(text, '', `JARVIS asked: "${pendingOffer.text}" (${pendingOffer.count} alerts kept while away)`);
       return;
     }
@@ -925,6 +941,30 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
     }
     expectingRef.current = false;
     push('jarvis', message, { tone: 'error' });
+  };
+
+  /** A plain yes or no to the count: yes reads them one at a time (the engine), no leaves them and brings them back
+   *  at the usual "later" time. True when it was one of the two; false = the words were something else. */
+  const answerOffer = (yn: 'yes' | 'no' | null): boolean => {
+    if (!yn || !offerRef.current) return false;
+    offerRef.current = null;
+    questionRef.current = null;
+    if (yn === 'yes') {
+      expectingRef.current = true;
+      silenceRef.current = 0;
+      acceptOffer();
+      return true;
+    }
+    expectingRef.current = false;
+    snoozeOffer()
+      .then((back) => {
+        const en = back ? `Okay, I'll bring it up again ${back.label}.` : "Okay, I'll remind you again later.";
+        const hi = hiLine(en, back ? `ठीक है, ${back.labelHi || back.label} फिर बताऊँगा।` : 'ठीक है, बाद में फिर बताऊँगा।');
+        if (hi) reply(hi.show, hi.speak, 'hi', false);
+        else reply(en, undefined, 'en', false);
+      })
+      .catch(() => sayOwn(`Sorry ${address}, I couldn't set that.`, `माफ़ कीजिए ${addressHi}, वो सेट नहीं हो पाया।`, { interrupt: true }));
+    return true;
   };
 
   // "Sir, while you were away: … Shall I read them?" — asked once JARVIS is idle (or right after "Hey JARVIS").
@@ -1264,6 +1304,12 @@ export function ConversationProvider({ children }: { children: React.ReactNode }
   const liveTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
     const said = String(args.said ?? '').trim();
     const pq = questionRef.current;
+    if (said && offerRef.current && answerOffer(offerAnswer(said))) {
+      // A yes or no to the count on the live line: what the engine then says is the voice's answer.
+      const until = nowMs() + 8000;
+      while (!hasCollected() && nowMs() < until) await new Promise((r) => setTimeout(r, 60));
+      return JSON.stringify({ say: takeCollected() || 'Ji.' });
+    }
     if (said && (handleQuiet(said) || handleBatch(said))) {
       // A word on the batch or the banner, done on the phone: the line it says is the voice's answer.
       const until = nowMs() + 8000;

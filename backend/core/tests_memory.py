@@ -352,6 +352,25 @@ class ClosedAppOfferTests(BaseCase):
         self.assertEqual(r["show"], "Sir, pay the vendor.")
         self.assertEqual(r["action"], "read_missed")
 
+    def test_batao_and_nahi_to_the_count_are_taken_without_the_model(self):
+        # 27 Nov 2026: "batao batao" was read by the model as "tell me something"; a plain yes or no never reaches it now.
+        items = [{"kind": "reminder", "key": "k1", "title": "Call the bank", "spoken": "Sir, call the bank.", "question": None}]
+        self.offer(items)
+        with mock.patch("core.ai_brain.interpret", side_effect=AssertionError("the model must not read a plain yes")):
+            r = conversation.turn(self.md, "batao batao")
+        self.assertEqual(r["show"], "Sir, call the bank.")
+        self.assertEqual(conversation.offer_answer("haan ji"), "yes")
+        self.assertEqual(conversation.offer_answer("बताओ"), "yes")
+        self.assertEqual(conversation.offer_answer("nahi abhi nahi"), "no")
+        self.assertEqual(conversation.offer_answer("baad mein"), "no")
+        self.assertIsNone(conversation.offer_answer("kal ka plan batao"))
+        self.assertIsNone(conversation.offer_answer("ji"))  # a filler alone is not an answer
+        self.offer(items)
+        with mock.patch("core.ai_brain.interpret", side_effect=AssertionError("the model must not read a plain no")):
+            r = conversation.turn(self.md, "nahi")
+        self.assertEqual(r["action"], "snoozed")
+        self.assertTrue(ReminderSnooze.objects.filter(user=self.md, key="k1").exists())
+
     def test_a_no_to_one_read_item_keeps_the_rest_and_a_first_without_a_question_counts_the_next(self):
         when = tu.now_local() + timedelta(minutes=20)
         services.create_private_task(self.md, {"title": "Call the bank", "kind": Kind.CALL, "due_date": when.date(),
