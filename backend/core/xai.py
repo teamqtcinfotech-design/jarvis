@@ -203,6 +203,7 @@ def tts_stream(text: str, *, voice: str | None = None, sample_rate: int = 24000)
     with _tts_lock:
         last_error = None
         for attempt in (1, 2):
+            first = True  # no sound yet: a connection that fails before the first chunk may be tried once more
             try:
                 if _tts_ws is None or _tts_key != key:
                     if _tts_ws is not None:
@@ -215,7 +216,6 @@ def tts_stream(text: str, *, voice: str | None = None, sample_rate: int = 24000)
                 ws = _tts_ws
                 ws.send(json.dumps({"type": "text.delta", "delta": text[:60000]}))
                 ws.send(json.dumps({"type": "text.done"}))
-                first = True
                 while True:
                     raw = ws.recv(timeout=20)
                     if isinstance(raw, bytes):
@@ -259,7 +259,13 @@ def tts_stream(text: str, *, voice: str | None = None, sample_rate: int = 24000)
                 if attempt == 2 or not first:
                     break
         LAST.update(error=f"tts stream: {type(last_error).__name__}: {str(last_error)[:120]}")
-        raise XaiError(502, f"voice stream failed: {last_error}")
+        # A refusal (403: credits used up or the monthly limit reached; 401: a bad key) is said as such.
+        why = str(last_error)
+        if "403" in why:
+            why = "xAI refused the voice (HTTP 403: credits used up or the monthly spending limit reached)"
+        elif "401" in why:
+            why = "xAI refused the key (HTTP 401)"
+        raise XaiError(502, f"voice stream failed: {why}")
 
 
 def tts_voices() -> list:
