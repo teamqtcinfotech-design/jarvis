@@ -211,6 +211,24 @@ def run_item(user: User, p: dict) -> dict:
     raise ServiceError("invalid", "I can't do that here.", 422)
 
 
+def _sent_line(lines: list[dict]) -> tuple[str, str]:
+    """"Sent to Nikki, Priya and Gauri." / "Nikki, Priya और Gauri को भेज दिया।" for a list done together; the speaker's
+    own items among them are counted ("and 1 saved on your list")."""
+    people: list[str] = []
+    for r in lines:
+        for name in r.get("people") or []:
+            if name not in people:
+                people.append(name)
+    own = sum(1 for r in lines if not r.get("people"))
+    if not people:
+        return f"All {len(lines)} saved.", f"सभी {len(lines)} सेव हो गए।"
+    who = people[0] if len(people) == 1 else ", ".join(people[:-1]) + " and " + people[-1]
+    who_hi = people[0] if len(people) == 1 else ", ".join(people[:-1]) + " और " + people[-1]
+    en = f"Sent to {who}." + (f" And {own} saved on your list." if own else "")
+    hi = f"{who_hi} को भेज दिया।" + (f" और {own} आपकी लिस्ट में सेव हो गए।" if own else "")
+    return en, hi
+
+
 def run_card(user: User, card: dict) -> dict:
     """Do a whole card: the main item and every further one said in the same breath. Returns {"en", "hi", "saved": n,
     "failed": [(title, message)], "undo": [refs]}; what was saved is remembered for undo."""
@@ -239,8 +257,9 @@ def run_card(user: User, card: dict) -> dict:
     if len(items) == 1 and lines:
         en, hi = lines[0]["en"], lines[0]["hi"]
     elif not failed:
-        # Each one said as it was done ("Sunil has it: bank work. The message has gone to Himanshu."), never a bare "all saved".
-        en, hi = " ".join(r["en"] for r in lines), " ".join(r["hi"] for r in lines)
+        # A list he has already seen and sent: one line naming the people it went to, never the items one by one
+        # (his rule, 27 Nov 2026); what was his own is counted.
+        en, hi = _sent_line(lines)
     else:
         names = "; ".join(f"{t} ({m.rstrip('.')})" for t, m in failed)
         en = f"Saved {saved} of {len(items)}. Could not save: {names}."

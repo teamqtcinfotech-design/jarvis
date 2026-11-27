@@ -157,6 +157,66 @@ class ActPathTests(BaseCase):
         self.assertFalse(SharedTask.objects.filter(title="Check the ledger").exists())
         self.assertEqual(d["engine"], "act")
 
+    def test_the_same_work_for_several_people_is_sent_at_once_and_the_brain_says_the_line(self):
+        # His rule (27 Nov 2026): the same work to several named people goes at once, one line naming them.
+        def line(results):
+            fact = results["t1_0"]
+            self.assertTrue(fact["done"], fact)
+            self.assertEqual(fact["people"], ["Nikki", "Priya"])
+            self.assertEqual([s["what"] for s in fact["sent"]], ["Complete all your pending tasks by tomorrow"] * 2)
+            return {"say_en": "Nikki aur Priya ko bhej diya.", "say_hi": "Nikki और Priya को भेज दिया।", "about": []}
+
+        same = [{"to": "Nikki", "title": "Complete all your pending tasks by tomorrow"}, {"to": "Priya", "title": "Complete all your pending tasks by tomorrow"}]
+        d = self.say("in dono ko bolo kal tak apne saare pending task complete karein", _FakeModel([("give_work", {"items": same, "send_now": True})], line))
+        self.assertEqual(SharedTask.objects.filter(title="Complete all your pending tasks by tomorrow").count(), 2)
+        self.assertEqual({t.assignee_user_id for t in SharedTask.objects.filter(title="Complete all your pending tasks by tomorrow")}, {self.nikki.id, self.pa.id})
+        self.assertEqual(d["spoken_reply"], "Nikki aur Priya ko bhej diya.")
+        self.assertIn(d["speak_text"], ("Nikki aur Priya ko bhej diya.", "Nikki और Priya को भेज दिया।"))  # the twin of his language
+        self.assertTrue(d["booked"] and d["undo"])
+        self.assertFalse(d.get("batch"))
+
+    def test_a_list_card_is_spoken_in_the_brains_words_not_read_item_by_item(self):
+        # Different work for different people: the list stays on the phone for his yes; the line said with it is the
+        # brain's one question, never the card's read-back; the card itself is untouched.
+        def line(results):
+            fact = results["t1_0"]
+            self.assertTrue(fact["card"], fact)
+            self.assertEqual([(i["to"], i["what"]) for i in fact["items"]], [("Nikki", "Check the ledger"), ("Priya", "Send the courier")])
+            self.assertNotIn("needs", fact)
+            return {"say_en": "Nikki aur Priya — bhej dun?", "say_hi": "Nikki और Priya — भेज दूँ?", "about": []}
+
+        model = _FakeModel([("give_work", {"items": [{"to": "Nikki", "title": "Check the ledger"}, {"to": "Priya", "title": "Send the courier"}], "send_now": False})], line)
+        d = self.say("Nikki ko bolo ledger check kare aur Priya ko bolo courier bhej de", model)
+        self.assertEqual(len(d.get("batch") or []), 1)
+        self.assertFalse(d.get("booked"))
+        self.assertFalse(SharedTask.objects.filter(title="Check the ledger").exists())
+        self.assertEqual(d["spoken_reply"], "Nikki aur Priya — bhej dun?")
+        self.assertEqual([b["title"] for b in d["batch"]], ["Send the courier"])  # the card itself is untouched
+        self.assertEqual(d["engine"], "act")
+        # The brain's line is in the thread (what it said), and the yes runs the list in one line naming the people.
+        sent = json.dumps(model.requests[-1]["messages"], ensure_ascii=False)
+        self.assertIn("the list is on the phone and nothing is sent yet", sent)  # the facts went to the brain, not a read-back
+        card = {k: v for k, v in d.items() if k not in ("say", "view")}
+        r = self.md_client.post("/api/v1/assistant/execute/", {"card": card}, format="json", HTTP_IDEMPOTENCY_KEY="list-1")
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(r.json()["en"], "Sent to Nikki and Priya.")
+        self.assertEqual(r.json()["hi"], "Nikki और Priya को भेज दिया।")
+        self.assertTrue(SharedTask.objects.filter(title="Check the ledger", assignee_user=self.nikki).exists())
+        self.assertTrue(SharedTask.objects.filter(title="Send the courier", assignee_user=self.pa).exists())
+
+    def test_send_now_waits_when_the_card_still_needs_an_answer(self):
+        # A name nobody knows: nothing is sent; the brain gets what the card needs and asks in its own words.
+        def line(results):
+            fact = results["t1_0"]
+            self.assertTrue(fact.get("card") and fact.get("needs"), fact)
+            return {"say_en": "Aman kaun hai? Team mein nahi mila.", "say_hi": "", "about": []}
+
+        model = _FakeModel([("give_work", {"items": [{"to": "Nikki", "title": "File the return"}, {"to": "Aman", "title": "File the return"}], "send_now": True})], line)
+        d = self.say("Nikki aur Aman ko bolo return file karein", model)
+        self.assertFalse(d.get("booked"))
+        self.assertFalse(SharedTask.objects.filter(title="File the return").exists())
+        self.assertEqual(d["spoken_reply"], "Aman kaun hai? Team mein nahi mila.")
+
     def test_unsure_hands_the_same_turn_fresh_to_the_strong_model(self):
         sid = str(self.sharma.id)
         model = _FakeModel({"escalate": True}, [("edit_item", {"id": sid, "priority": "URGENT"})],

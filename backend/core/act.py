@@ -44,7 +44,9 @@ WHAT YOU DO
 - Specific = done at once: a clear change to one item (its time, day, length, name, priority), a delete, a complete, one piece of work for one person, a message, a reminder. No "shall I?", no reading back. The speaker can say undo for a minute.
 - Ask only when it is genuinely unclear which item or which person is meant: ONE short question naming the choices by day or time ("Sharma ji ki do meetings hain: kal 10:30 wali ya Friday 4 baje wali?"). Never the same question twice; never a list of titles unasked. When the words themselves cannot be understood, say once "{address}, phir se boliye." Never say "samajh nahi aaya".
 - Clashes: when create_item or move_item returns a clash, ask the one named question with the suggested time ("Aapki 4 baje Mehta ji ke saath meeting hai. Sharma ji ko 4:30 rakh dun?") and stop, unless the speaker already said what to do: "isko aage kar do" / "baaki aage kar do" / "push the other" = make_room, then create or move with force; "Mehta ji 4 pe hi" = the new one takes the suggested slot; "wahin rakho" / "4 baje hi" = force. Two meetings never share a time unless forced on purpose. The answer to your clash question comes in the next turn: act on it then.
-- Several things in one breath: do all of them (several tool calls in one go) and reply with one line naming each. Work for two or more people in one breath goes through give_work in ONE call with all its items: the server shows them as a list the speaker checks and sends.
+- Several things in one breath: do all of them (several tool calls in one go) and reply with one line naming each. Work for two or more people in one breath goes through give_work in ONE call with all its items.
+- give_work (his rule, 27 Nov 2026): the SAME work for several named people → send_now true: it is sent at once, and you reply with one line naming the people ("Nikki, Ankur Sir aur Gauri ko bhej diya."), never the work per person. DIFFERENT work for different people → send_now false: the list is on the phone for him to check; you reply with ONE short question naming only the people ("Nikki, Priya aur Gauri — bhej dun?"); his next yes sends all of them. "In sabko" / "sab ko" / "in teeno ko" right after you named some people (a list of who has pending work, say) means exactly those people, never the whole company.
+- A card on the phone (a tool result with "card"): the details are on the screen, so say ONE line and never the items one by one: the one question the card needs (a name nobody knows, a clash), or "bhej dun?" with the people's names. Say "sent" or "done" only when the result says done.
 - Questions: one exact sentence from the facts (the name for one item, the number for a number, yes or no first and at most one nearby fact); totals in hours and minutes from the diary; never count or add up yourself. "Dikhao" / "list" = also set show.
 - Someone else's personal items are private; the tools already keep them out.
 
@@ -109,8 +111,10 @@ WRITE_TOOLS = [
      "input_schema": {"type": "object", "properties": {"day": {"type": "string", "description": "today, tomorrow, a weekday or YYYY-MM-DD"},
                                                        "minutes": {"type": "integer"}, "after_time": _TIME}}},
     {"name": "give_work",
-     "description": "Work for people: someone on the team (by name or job), a staff member of the company panel, a department, or everyone. One call with EVERY item of the sentence. One item for one person is sent at once; two or more items become a list the speaker checks and sends.",
-     "input_schema": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
+     "description": "Work for people: someone on the team (by name or job), a staff member of the company panel, a department, or everyone. One call with EVERY item of the sentence. One item for one person is sent at once. Several items: send_now true = the same work for several named people, sent at once; send_now false = different work for different people, shown as a list the speaker checks and sends with one yes.",
+     "input_schema": {"type": "object", "properties": {
+         "send_now": {"type": "boolean", "description": "true when the same work goes to several named people (sent at once); false for different work to different people (a list, one yes sends all)"},
+         "items": {"type": "array", "items": {"type": "object", "properties": {
          "to": {"type": "string", "description": "the name as said (or a job: PA, accountant), several comma-separated, a department, or 'everyone'"},
          "title": {"type": "string", "description": "the work in a few clear words"},
          "kind": {"type": "string", "enum": ["TASK", "MEETING", "CALL", "PAYMENT", "FOLLOW_UP", "APPROVAL"]},
@@ -164,7 +168,8 @@ class _Turn:
         self.refs: list[dict] = []
         self.label = ""
         self.undo = False
-        self.draft: dict | None = None   # a card (or a fixed-engine reply) that is the turn's answer itself
+        self.draft: dict | None = None   # a card on the phone (the model writes the line said with it), or a fixed-engine reply
+        self.engine_answer = False       # the fixed engine answered (old_engine): its line stands, the model says nothing
         self._full: dict | None = None
 
     def full(self) -> dict:
@@ -375,10 +380,11 @@ def _free_slot(t: _Turn, a: dict) -> dict:
     return {"free": {"date": sug["due_date"], "time": sug["due_time"], **_when(sug["due_date"], sug["due_time"])}}
 
 
-def _engine_draft(t: _Turn, name: str, form: dict) -> dict:
-    """A form for the fixed engine (work for people, a message, a reminder, a memory): its own routing, checks,
-    categories and read-back lines are reused as they are. A card (a list to send, a question) becomes the turn's
-    answer itself; a thing saved at once comes back as a fact with its line."""
+def _engine_draft(t: _Turn, name: str, form: dict, send_now: bool = False) -> dict:
+    """A form for the fixed engine (work for people, a message, a reminder, a memory): its own routing, checks and
+    categories are reused as they are. A thing saved at once comes back as a fact with the engine's line. A card (a
+    list to send, a question) stays on the phone, and the model writes the line said with it (his ask, 27 Nov 2026:
+    the brain decides what is spoken, never a read-back of the list); with send_now a clean list is sent at once."""
     from . import livevoice  # noqa: PLC0415 — livevoice imports this module
     cmd = livevoice.cmd_for(t.user, name, {**form, "said": t.text})
     cmd.pop("_said", None)
@@ -390,9 +396,84 @@ def _engine_draft(t: _Turn, name: str, form: dict) -> dict:
         last = actions.last_done(t.user) or {}
         t.refs.extend(r for r in (last.get("refs") or []) if r not in t.refs)
         return {"done": True, "said": draft.get("spoken_reply") or "", "said_hi": draft.get("reply_hi") or ""}
+    facts = _card_facts(draft)
+    if send_now and not facts.get("needs"):
+        return _send_card_now(t, draft, facts)
     t.draft = draft
-    return {"card": True, "said": draft.get("question") or draft.get("spoken_reply") or "",
-            "note": "the speaker sees this on the phone and answers there; say nothing more"}
+    if facts.get("needs"):
+        facts["note"] = "the card waits on the phone: ask the one question in your own words (one line), nothing is sent yet"
+    else:
+        facts["note"] = ("the list is on the phone and nothing is sent yet: ask one short question naming only the people "
+                         "('Nikki, Priya aur Gauri — bhej dun?'); his next yes sends all of them")
+    return facts
+
+
+def _card_facts(draft: dict) -> dict:
+    """What a card on the phone holds, as plain facts for the model: each item's person, words and time, and what
+    the card still needs (an unknown name, a clash) before it can go."""
+    items = [draft] + [b for b in (draft.get("batch") or []) if isinstance(b, dict)]
+    rows = []
+    for it in items:
+        who = [str(a.get("name") or "") for a in (it.get("assignees") or []) if isinstance(a, dict)]
+        if it.get("staff"):
+            who.append(str((it.get("staff") or {}).get("name") or ""))
+        if it.get("team"):
+            who.append(str((it.get("team") or {}).get("label") or "the team"))
+        rows.append({"to": ", ".join(w for w in who if w) or str(it.get("staff_name") or ""),
+                     "what": it.get("message") if it.get("action") == "message" else it.get("title") or "",
+                     "when": it.get("due_label") or "", "kind": it.get("kind") or ""})
+    needs = ""
+    if draft.get("needs_clarification"):
+        needs = draft.get("question") or draft.get("clarification_question") or "the card needs an answer"
+    elif (draft.get("schedule") or {}).get("question"):
+        needs = (draft.get("schedule") or {}).get("question") or ""
+    out = {"card": True, "items": rows, "people": sorted({r["to"] for r in rows if r["to"]})}
+    if needs:
+        out["needs"] = needs
+    return out
+
+
+def _send_card_now(t: _Turn, draft: dict, facts: dict) -> dict:
+    """The same work for several people (send_now): the list is sent at once, every item by the path its yes would
+    take (the team's work and messages together, staff of the panel through the gateway)."""
+    items = [draft] + [b for b in (draft.get("batch") or []) if isinstance(b, dict)]
+    team = {"private_task", "md_request", "message"} | actions.PERSON_ACTIONS | set(actions.LEGACY)
+    sent, failed = [], []
+    together = [it for it in items if it.get("action") in team]
+    if together:
+        r = actions.run_card(t.user, {**together[0], "batch": together[1:]})
+        t.refs.extend(x for x in (r.get("undo") or []) if x not in t.refs)
+        failed += [{"what": title, "why": why} for title, why in r.get("failed") or []]
+        missed = {x for x, _m in r.get("failed") or []}  # named as run_card names them
+        sent += [{"to": f["to"], "what": f["what"]} for it, f in zip(items, facts["items"])
+                 if it.get("action") in team and (it.get("title") or "one item") not in missed]
+    for it, f in zip(items, facts["items"]):
+        if it.get("action") not in ("delegation", "team_delegation"):
+            continue
+        data = actions._task_data(it)  # noqa: SLF001 — the card's own reading of the item
+        try:
+            if it["action"] == "delegation":
+                staff = services.staff_qs().get(id=(it.get("staff") or {})["id"])
+                task, command = services.delegate_to_staff(t.user, data, staff, category_key=it.get("category_key") or "",
+                                                           description=it.get("transcript") or t.text)
+                if command.state == command.State.REJECTED:
+                    task.delete()
+                    failed.append({"what": f["what"], "why": command.error_message or "the staff app did not accept it"})
+                    continue
+                t.refs.append({"type": "shared", "id": str(task.id)})
+            else:
+                ids = [m["id"] for m in (it.get("team") or {}).get("members", [])]
+                r = services.delegate_to_team(t.user, data, ids, category_key=it.get("category_key") or "", description=it.get("transcript") or t.text)
+                failed += [{"what": f["what"], "why": f"not given to {x['name']}"} for x in r.get("not_assigned") or []]
+                t.refs.extend({"type": "shared", "id": str(x["id"])} for x in r.get("assigned") or [] if x.get("id"))
+            sent.append({"to": f["to"], "what": f["what"]})
+        except (services.ServiceError, ObjectDoesNotExist, KeyError, ValueError) as exc:
+            failed.append({"what": f["what"], "why": getattr(exc, "message", "it could not be sent")})
+    t.writes += len(sent)
+    t.label = t.label or (sent[0]["what"] if sent else "")
+    people = sorted({s["to"] for s in sent if s["to"]})
+    return {"done": bool(sent), "sent": sent, "people": people, "failed": failed,
+            "note": "say one line naming the people it went to" + (", and name what failed" if failed else "")}
 
 
 def _give_work(t: _Turn, a: dict) -> dict:
@@ -405,7 +486,7 @@ def _give_work(t: _Turn, a: dict) -> dict:
                       "due_date": it.get("date") or "", "due_time": it.get("time") or "", "in_minutes": it.get("in_minutes") or 0})
     if not items:
         return {"error": "no work item was given"}
-    return _engine_draft(t, "give_work", {"items": items})
+    return _engine_draft(t, "give_work", {"items": items}, send_now=bool(a.get("send_now")) and len(items) > 1)
 
 
 def _send_message(t: _Turn, a: dict) -> dict:
@@ -437,6 +518,7 @@ def _old_engine(t: _Turn, _a: dict) -> dict:
     draft = assistant.build_draft(t.user, t.text, t.previous, t.history, "", None, include_private=t.include_private,
                                   pending=None, screen=t.screen, engine_only=True)
     t.draft = draft
+    t.engine_answer = True  # a setting, a screen action: the engine's own line is the answer
     return {"card": True, "said": draft.get("question") or draft.get("spoken_reply") or "", "note": "the fixed engine answered; say nothing more"}
 
 
@@ -594,9 +676,9 @@ def _model_turn(t: _Turn, model: str, system: list, thread: list, first: dict) -
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": json.dumps(facts, ensure_ascii=False, default=str)[:TOOL_RESULT_CHARS]})
             turn_messages.append({"role": "user", "content": results})
-            if t.draft is not None:
-                return {"card": True}, turn_messages
-            continue
+            if t.engine_answer:
+                return {"card": True}, turn_messages  # the fixed engine's line stands (a setting, a screen action)
+            continue  # a card on the phone included: the model writes the line said with it
         if response.stop_reason == "refusal":
             return None, turn_messages
         text = ai_brain._first_text(response)  # noqa: SLF001
@@ -645,6 +727,8 @@ def run(user: User, text: str, *, previous: str = "", history: list | None = Non
     if data is None or data.get("escalate") is True:
         if t.writes:
             data = {"say_en": "Done: " + (t.label or "the change") + ".", "say_hi": "", "about": []}  # the writes stand; the reply is the facts
+        elif t.draft is not None and not t.engine_answer:
+            data = {"say_en": t.draft.get("question") or t.draft.get("spoken_reply") or "", "say_hi": t.draft.get("question_hi") or "", "about": []}
         else:
             return None
     _save_thread(row, thread, turn_messages, recap)
@@ -654,8 +738,24 @@ def run(user: User, text: str, *, previous: str = "", history: list | None = Non
     if t.draft is not None:
         draft = t.draft
         draft["engine"], draft["model"] = "act", used
+        if not t.engine_answer:
+            _voice_card(t, draft, data)
         return draft
     return _finish(t, data, used)
+
+
+def _voice_card(t: _Turn, draft: dict, data: dict) -> None:
+    """The card keeps everything it shows and asks on the phone; the line spoken with it is the model's (his ask,
+    27 Nov 2026), in the speaker's language, with the card's own line only when the model gave none."""
+    en = " ".join(str(data.get("say_en") or "").split())[:600]
+    hi = " ".join(str(data.get("say_hi") or "").split())[:600]
+    hi = hi if ai_brain._DEVANAGARI.search(hi) else ""  # noqa: SLF001
+    if not en:
+        return
+    lang = lang_mod.lang_for(t.user, t.text)
+    draft["spoken_reply"], draft["reply_en"], draft["reply_hi"] = en, en, hi
+    draft["speak_text"], draft["speak_lang"] = (hi, "hi") if lang == "hi" and hi else (en, "en")
+    draft["reply_language"] = lang
 
 
 def _save_thread(row: BrainThread, thread: list, turn_messages: list, recap: str) -> None:
