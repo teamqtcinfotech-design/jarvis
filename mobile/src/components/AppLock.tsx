@@ -11,19 +11,32 @@ import { colors, fonts } from '@/lib/theme';
 
 import { Icon, Txt } from './ui';
 
+const PROMPT_TIMEOUT_MS = 30_000; // a fingerprint prompt that never answers (MIUI, a second prompt over the first) frees the button
+
 export function AppLock() {
   const { user } = useSession();
   const [locked, setLocked] = useState(false);
   const [asking, setAsking] = useState(false);
+  const askingRef = useRef(false); // the in-progress guard as a ref: the button and the listeners never hold a stale copy
   const wentBackAt = useRef(0);
 
   const ask = useCallback(async () => {
-    if (asking) return;
+    if (askingRef.current) return;
+    askingRef.current = true;
     setAsking(true);
-    const ok = await unlock('Unlock JARVIS');
+    let ok = false;
+    try {
+      ok = await Promise.race([
+        unlock('Unlock JARVIS'),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), PROMPT_TIMEOUT_MS)),
+      ]);
+    } catch {
+      ok = false;
+    }
+    askingRef.current = false;
     setAsking(false);
     if (ok) setLocked(false);
-  }, [asking]);
+  }, []);
 
   // A cold start, and every return to the front after a long enough time away.
   useEffect(() => {
@@ -42,7 +55,8 @@ export function AppLock() {
         return;
       }
       if (s === 'active') {
-        const away = wentBackAt.current ? Date.now() - wentBackAt.current : 0;
+        if (!wentBackAt.current) return; // the launch itself (Android reports "active" then too): the cold start above asks once
+        const away = Date.now() - wentBackAt.current;
         wentBackAt.current = 0;
         if (!(await lockEnabled())) return;
         if (away >= 5 * 60_000 || !recentlyUnlocked()) {
@@ -56,8 +70,7 @@ export function AppLock() {
       alive = false;
       sub.remove();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- ask is stable enough; re-arming on it would re-prompt
-  }, [user]);
+  }, [user, ask]);
 
   // The rest of the app is told while the cover is up (nothing opens, nothing is said until the unlock).
   const covering = !!user && locked;
