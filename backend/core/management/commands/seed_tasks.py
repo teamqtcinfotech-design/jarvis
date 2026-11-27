@@ -112,7 +112,8 @@ class Command(BaseCommand):
         total = sum(n for _n, n in wants) + max(0, opts["me"])
         if not total:
             raise CommandError("nothing to do: give --staff and/or --me")
-        titles = pick_titles(rows, total, opts["seed"])
+        meetings_wanted = bool(opts["me"]) and not opts["no_meetings"]
+        titles = pick_titles(rows, total + (len(MEETINGS) if meetings_wanted else 0), opts["seed"])  # the meetings get titles of their own
         today = tu.today_local()
         plan = []  # (who, label, kind, due_date, due_time, minutes, priority, title)
         at = 0
@@ -127,13 +128,13 @@ class Command(BaseCommand):
             at += 1
             day = today + timedelta(days=OFFSETS[i % len(OFFSETS)])
             plan.append((None, md.spoken_name, Kind.TASK, day, None, minutes_of(t["hours"]), t["priority"], t["title"]))
-        if opts["me"] and not opts["no_meetings"]:
+        if meetings_wanted:
             now = tu.now_local()
             for k, (offset, hour, minute, length) in enumerate(MEETINGS):
                 day = today + timedelta(days=offset)
                 if offset == 0 and tu.combine_local(day, time(hour, minute)) <= now + timedelta(minutes=20):
                     day = day + timedelta(days=1)  # the hour has passed today: tomorrow at the same time
-                subject = titles[(at + k) % len(titles)]["title"]
+                subject = titles[at + k]["title"]
                 plan.append((None, md.spoken_name, Kind.MEETING, day, time(hour, minute), length,
                              Priority.HIGH if k == 0 else Priority.NORMAL, f"Meeting: {subject[:70]}"))
 
@@ -160,7 +161,7 @@ class Command(BaseCommand):
                     made += 1
                     if cmd.state == IntegrationCommand.State.REJECTED:
                         failed += 1
-                        self.stdout.write(self.style.WARNING(f"  panel refused '{title[:60]}' for {who.name}: {cmd.last_error or cmd.state}"))
+                        self.stdout.write(self.style.WARNING(f"  panel refused '{title[:60]}' for {who.name}: {cmd.error_message or cmd.error_code or cmd.state}"))
                     elif cmd.state == IntegrationCommand.State.SUCCEEDED:
                         sent += 1
             except Exception as err:  # noqa: BLE001 — one bad item must not stop the rest

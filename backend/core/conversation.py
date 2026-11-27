@@ -192,8 +192,8 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     speak = draft.get("speak_text") or draft["spoken_reply"]
     show = draft["spoken_reply"]
     said_in = draft.get("reply_language", "en")  # the language of this sentence: every line below follows it
-    if offer and action != "confirm_pending":
-        state["offer"] = None  # he asked for something else: the reminders stay in his list
+    if offer and action != "confirm_pending" and not (offer.get("closed_app") and asked and action in {"cancel_pending", "snooze"}):
+        state["offer"] = None  # he asked for something else: the reminders stay in his list (a no to ONE read item keeps the rest)
     if asked and action not in {"confirm_pending", "cancel_pending", "snooze"}:
         state["asked"] = None  # he asked for something else: the reminder stays where it is
 
@@ -272,10 +272,8 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     # item), so he decides again.
     left = state.get("offer")
     if asked and action in {"confirm_pending", "cancel_pending", "snooze"} and left and left.get("closed_app") and left.get("items"):
-        n = len(left["items"])
-        more = f"{address}, {n} more. Shall I tell you?" if n > 1 else f"{address}, one more. Shall I tell you?"
-        more_hi = f"{address_hi}, {n} और हैं। क्या मैं बताऊँ?" if n > 1 else f"{address_hi}, एक और है। क्या मैं बताऊँ?"
         hindi = resp.get("say_lang") == "hi" or said_in == "hi"
+        more, more_hi = _more_line(len(left["items"]), address, address_hi)
         resp = {**resp, "show": f"{resp['show']} {more}".strip(), "say": f"{resp['say']} {more_hi if hindi else more}".strip(),
                 "say_lang": "hi" if hindi else resp.get("say_lang", "en"), "listen": True}
     state["history"].append({"role": "jarvis", "text": resp["show"]})
@@ -284,9 +282,16 @@ def turn(user: User, text: str, *, event: str = "", locked: bool = False, privat
     return resp
 
 
+def _more_line(n: int, address: str, address_hi: str) -> tuple[str, str]:
+    """"Sir, 2 more. Shall I tell you?" and its Hindi twin: the next of the offered ones, counted, never read unasked."""
+    en = f"{address}, {n} more. Shall I tell you?" if n > 1 else f"{address}, one more. Shall I tell you?"
+    hi = f"{address_hi}, {n} और हैं। क्या मैं बताऊँ?" if n > 1 else f"{address_hi}, एक और है। क्या मैं बताऊँ?"
+    return en, hi
+
+
 def _read_offered(state: dict, offer: dict, lang: str, address: str, address_hi: str) -> dict:
     """"Haan" to the count: the first offered item is read with its question (and becomes the thing asked about);
-    the rest wait for the next count."""
+    the rest wait for the next count. One with no question of its own is followed by that count straight away."""
     items = list(offer.get("items") or [])
     if not items:
         state["offer"] = None
@@ -300,7 +305,12 @@ def _read_offered(state: dict, offer: dict, lang: str, address: str, address_hi:
     if q:
         state["asked"] = {"kind": first.get("kind") or "reminder", "key": first.get("key") or "", "id": first.get("id") or "",
                           "title": first.get("title") or "", "question": q.get("en") or ""}
-    return _resp(line, line, "hi" if hindi else "en", listen=True, action="asking" if q else "read_missed")
+        return _resp(line, line, "hi" if hindi else "en", listen=True, action="asking")
+    if rest:
+        more, more_hi = _more_line(len(rest), address, address_hi)
+        line = f"{line} {more_hi if hindi else more}"
+        return _resp(line, line, "hi" if hindi else "en", listen=True, action="asking")
+    return _resp(line, line, "hi" if hindi else "en", listen=True, action="read_missed")
 
 
 def _leave_offered(user: User, offer: dict, lang: str) -> dict:

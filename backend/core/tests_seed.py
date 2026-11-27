@@ -17,7 +17,8 @@ SUBJECTS = ["GST no. ke CA sir se update leni hai", "Tour & travels ka letter he
             "SBI ka OTP mail ke through receive hona chahiye", "5 Cr loan ke liye salary slip ki baat karni hai",
             "FIM ki list ready karke franchise partners ko bhejni hai", "Appointment letter bhijwana hai", "Demat format update karna hai",
             "Software point ki update daily milni chahiye", "Pan drive data save karna hai", "demo", "test meeting", "short",
-            "Done already once", "Customer care ke email replies", "Rohtash sir ka task bar banvana hai"]
+            "Done already once", "Customer care ke email replies", "Rohtash sir ka task bar banvana hai",
+            "Mercedes gaadi ka logo alignment karwana hai", "Staff ki attendance sheet banani hai"]
 
 
 class SeedTasksTests(BaseCase):
@@ -70,6 +71,8 @@ class SeedTasksTests(BaseCase):
         self.assertTrue(any(m.due_date == today + timedelta(days=30) for m in meetings))  # next month
         titles = {t.title for t in list(staff) + tasks}
         self.assertEqual(len(titles), 9)  # every title once
+        subjects = {m.title.removeprefix("Meeting: ") for m in meetings}
+        self.assertFalse(subjects & titles)  # the meetings have titles of their own, never one already given as a task
         for bad in ("demo", "test meeting", "short", "Done already once"):
             self.assertNotIn(bad, titles)
 

@@ -297,7 +297,7 @@ class ConversationLoop(private val context: Context, private val notifier: WakeN
                 return
             }
             heardAnything = true
-            WakeBus.notePresent()  // he spoke to JARVIS: he is here
+            WakeBus.notePresent(context)  // he spoke to JARVIS: he is here
             send(text)
         }
 

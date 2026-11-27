@@ -211,6 +211,11 @@ def run_item(user: User, p: dict) -> dict:
     raise ServiceError("invalid", "I can't do that here.", 422)
 
 
+def item_name(item: dict) -> str:
+    """How a card item is named when it fails (a message by its words, else its title)."""
+    return (item.get("title") or item.get("message") or "one item") if isinstance(item, dict) else "one item"
+
+
 def _sent_line(lines: list[dict]) -> tuple[str, str]:
     """"Sent to Nikki, Priya and Gauri." / "Nikki, Priya और Gauri को भेज दिया।" for a list done together; the speaker's
     own items among them are counted ("and 1 saved on your list")."""
@@ -240,16 +245,16 @@ def run_card(user: User, card: dict) -> dict:
             # A further item over a meeting already there: never saved over it. It is left out, named, and he says
             # it again with a time (the main item's clash is settled through the card's own question).
             first = (sched.get("clashes") or [{}])[0]
-            failed.append((item.get("title") or "one item", f"it is at the same time as {first.get('title') or 'another meeting'}; say it again with a time"))
+            failed.append((item_name(item), f"it is at the same time as {first.get('title') or 'another meeting'}; say it again with a time"))
             continue
         try:
             r = run_item(user, item)
         except ServiceError as err:
-            failed.append((item.get("title") or "one item", err.message))
+            failed.append((item_name(item), err.message))
             continue
         except (ObjectDoesNotExist, ValueError, KeyError) as err:
             log.info("card item not done: %s", type(err).__name__)
-            failed.append((item.get("title") or "one item", "it could not be found any more"))
+            failed.append((item_name(item), "it could not be found any more"))
             continue
         saved += 1
         refs += r["undo"]

@@ -141,7 +141,7 @@ class LiveLoop(private val context: Context, private val notifier: WakeNotifier)
             "heard" -> if (data.optBoolean("final")) {
                 val text = data.optString("text").trim()
                 if (text.isNotEmpty()) {
-                    WakeBus.notePresent()  // he spoke to JARVIS: he is here
+                    WakeBus.notePresent(context)  // he spoke to JARVIS: he is here
                     history.add(JSONObject().put("role", "user").put("text", text))
                     notifier.showConversation("You: $text")
                     overlay.update("“$text”", "thinking")

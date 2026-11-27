@@ -787,7 +787,7 @@ function MemorySection() {
             <Icon name={m.source === 'learned' ? 'sparkles-outline' : 'bookmark-outline'} size={16} color={colors.gold} />
             <View style={{ flex: 1, marginLeft: 8 }}>
               <Txt variant="body">{m.text}</Txt>
-              {m.source === 'learned' ? <Txt variant="small">Learned{m.kind && m.kind !== 'note' ? ` · ${m.kind}` : ''}</Txt> : null}
+              {m.source === 'learned' ? <Txt variant="small">Learned{m.kind && m.kind !== 'note' ? ` · ${m.kind.charAt(0).toUpperCase()}${m.kind.slice(1)}` : ''}</Txt> : null}
             </View>
             <Pressable onPress={() => forget(m.id)} hitSlop={10} accessibilityLabel="Forget this">
               <Icon name="trash-outline" size={18} color={colors.muted} />

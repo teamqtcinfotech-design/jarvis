@@ -51,10 +51,20 @@ object WakeBus {
     /** When he was last known to be with the phone: unlocked it, said "Hey JARVIS", spoke to JARVIS (his rule, 26 Nov
      *  2026: JARVIS speaks only to someone who is really there; otherwise it shows, and counts when he is back). */
     @Volatile var lastPresentAt = 0L
+    /** When the screen last came on (0 = off): a screen on for longer than its own timeout is being used. */
+    @Volatile var screenOnSince = 0L
     const val HERE_MS = 3 * 60_000L
+    const val KEY_PRESENT_AT = "present_at"
 
-    fun notePresent() {
+    /** He is here now; kept in the settings too (with a context), so a restarted service still knows. */
+    fun notePresent(context: Context? = null) {
         lastPresentAt = System.currentTimeMillis()
+        if (context != null) prefs(context).edit().putLong(KEY_PRESENT_AT, lastPresentAt).apply()
+    }
+
+    fun loadPresent(context: Context) {
+        val saved = prefs(context).getLong(KEY_PRESENT_AT, 0L)
+        if (saved > lastPresentAt) lastPresentAt = saved
     }
 
     fun presentNow(): Boolean = System.currentTimeMillis() - lastPresentAt < HERE_MS

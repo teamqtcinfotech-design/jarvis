@@ -352,6 +352,32 @@ class ClosedAppOfferTests(BaseCase):
         self.assertEqual(r["show"], "Sir, pay the vendor.")
         self.assertEqual(r["action"], "read_missed")
 
+    def test_a_no_to_one_read_item_keeps_the_rest_and_a_first_without_a_question_counts_the_next(self):
+        when = tu.now_local() + timedelta(minutes=20)
+        services.create_private_task(self.md, {"title": "Call the bank", "kind": Kind.CALL, "due_date": when.date(),
+                                               "due_time": when.time().replace(second=0, microsecond=0)})
+        due = next(r for r in reminders_for(self.md, hours=1)["reminders"] if r["title"] == "Call the bank" and r["label"] == "due")
+        items = [{"kind": "reminder", "key": "k0", "title": "A note", "spoken": "Sir, Nikki sent a note.", "question": None},
+                 {"kind": "reminder", "key": due["key"], "title": "Call the bank", "spoken": due["spoken"], "question": due["question"]},
+                 {"kind": "reminder", "key": "k2", "title": "Pay the vendor", "spoken": "Sir, pay the vendor.", "question": None}]
+        self.offer(items)
+        # The first has no question of its own: it is read and the next is counted in the same breath.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")):
+            r = conversation.turn(self.md, "haan")
+        self.assertEqual(r["show"], "Sir, Nikki sent a note. Sir, 2 more. Shall I tell you?")
+        self.assertEqual(r["action"], "asking")
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")):
+            r = conversation.turn(self.md, "haan")
+        self.assertTrue(r["show"].startswith(due["spoken"]))
+        # "Nahi" to the bank call's own question leaves that one, and the last is still counted, not lost.
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="cancel_pending")):
+            r = conversation.turn(self.md, "nahi")
+        self.assertTrue(r["show"].startswith("Okay, leaving it."), r)
+        self.assertTrue(r["show"].endswith("Sir, one more. Shall I tell you?"), r)
+        with mock.patch("core.ai_brain.interpret", return_value=_cmd(intent="confirm_pending")):
+            r = conversation.turn(self.md, "haan")
+        self.assertEqual(r["show"], "Sir, pay the vendor.")
+
     def test_no_brings_them_back_at_the_usual_later_time(self):
         alert = Alert.objects.create(recipient=self.md, kind=Alert.Kind.INFO, title="A note", body="b", spoken_text="Sir, a note.")
         items = [{"kind": "reminder", "key": "task:1:due", "title": "Call the bank", "spoken": "Sir, call the bank.", "question": None},

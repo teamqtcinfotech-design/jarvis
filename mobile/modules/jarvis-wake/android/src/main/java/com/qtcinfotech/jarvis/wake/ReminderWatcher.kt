@@ -252,7 +252,7 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         }
         prefs.edit().remove(WakeBus.KEY_HELD_ITEMS).apply()
         if (still.isEmpty()) return
-        val heldAgain = announce(still, silent = false, back = true)
+        val heldAgain = announce(still, silent = false, back = true, shown = true)
         val told = still.filter { s -> heldAgain.none { it.key == s.key } }
         if (told.isNotEmpty()) tell(told)
     }
@@ -310,19 +310,21 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
      * Without a conversation possible on this phone, everything is said as one sentence, the old way.
      * The lines come from the server already in the reader's language (Hindi or English); the wrapper follows them.
      */
-    private fun announce(items: List<Item>, silent: Boolean, back: Boolean = false): List<Item> {
+    private fun announce(items: List<Item>, silent: Boolean, back: Boolean = false, shown: Boolean = false): List<Item> {
         val address = prefs.getString(WakeBus.KEY_ADDRESS, "Sir") ?: "Sir"
         val addressHi = prefs.getString(WakeBus.KEY_ADDRESS_HI, address) ?: address
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         val unlocked = pm.isInteractive && !km.isKeyguardLocked
         val speakLocked = prefs.getBoolean(WakeBus.KEY_SPEAK_LOCKED, false)
-        for (item in items) {
-            if (item.ring && item.alertId != null) {
-                notifier.showRing(item.alertId, item.title, item.spoken, if (item.urgent) "URGENT" else "NORMAL", item.quiet, item.seenLabel)
-            } else {
-                notifier.show(item.key, if (item.isPrivate) "JARVIS" else "JARVIS · Reminder",
-                    if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent, silentSound())
+        if (!shown) {  // (held items were shown when they were held: not posted a second time on his return)
+            for (item in items) {
+                if (item.ring && item.alertId != null) {
+                    notifier.showRing(item.alertId, item.title, item.spoken, if (item.urgent) "URGENT" else "NORMAL", item.quiet, item.seenLabel)
+                } else {
+                    notifier.show(item.key, if (item.isPrivate) "JARVIS" else "JARVIS · Reminder",
+                        if (item.isPrivate) "You have a private reminder. Open JARVIS to see it." else item.title, item.urgent, silentSound())
+                }
             }
         }
         if (silent) {
@@ -330,7 +332,9 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
             return emptyList()
         }
         val hereOnly = prefs.getBoolean(WakeBus.KEY_HERE_ONLY, true)
-        val present = (unlocked && (!hereOnly || WakeBus.presentNow())) || speakLocked
+        // Here = unlocked and (an unlock, a wake word or a word to JARVIS within the last minutes, or a screen that
+        // has stayed on longer than its own timeout: it would have gone dark unless he were using it).
+        val present = (unlocked && (!hereOnly || WakeBus.presentNow() || screenInUse(pm))) || speakLocked
         if (!present) {
             hold(items)
             return items
@@ -361,7 +365,9 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         }
         if (lines.isEmpty()) return emptyList()
         val listener = onAsk
-        if (listener != null && (LiveLoop.available(context) || ConversationLoop.available(context))) {
+        // The count and the conversation after it only when it is him for sure (unlocked): a locked phone that
+        // "speaks when locked" says the old one sentence and asks nothing, so nobody else answers for him.
+        if (unlocked && listener != null && (LiveLoop.available(context) || ConversationLoop.available(context))) {
             // The count only; the conversation that follows reads them on a yes, one at a time with their questions.
             val line = countLine(speakable, address, addressHi, back)
             speakThen(line) { listener(offerAbout(speakable, line)) }
@@ -377,6 +383,20 @@ class ReminderWatcher(private val context: Context, private val notifier: WakeNo
         }
         speak(text)
         return emptyList()
+    }
+
+    /** The screen has been on for longer than its own timeout (plus a little): it would have gone dark by itself
+     *  unless he were using the phone, so he is here. */
+    private fun screenInUse(pm: PowerManager): Boolean {
+        val since = WakeBus.screenOnSince
+        if (!pm.isInteractive || since == 0L) return false
+        val timeout = try {
+            android.provider.Settings.System.getInt(context.contentResolver, android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 60_000)
+        } catch (_: Throwable) {
+            60_000
+        }
+        if (timeout <= 0 || timeout > 30 * 60_000) return false  // "never" / "stay awake": says nothing about him
+        return System.currentTimeMillis() - since > timeout + 15_000
     }
 
     /** "Sir, ek reminder hai. Kya main bataun?" / "Sir, while you were away: 2 reminders and 1 message came. Shall I tell you?" */

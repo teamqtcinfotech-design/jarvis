@@ -72,9 +72,16 @@ class WakeService : Service() {
         current = this
         WakeBus.stateListener = { Handler(Looper.getMainLooper()).post { refreshBubble() } }
         // He unlocked the phone: he is here (his rule, 26 Nov 2026), and what was held while he was away is counted.
+        // The screen's on and off moments are kept too (a screen on for longer than its own timeout is being used).
+        WakeBus.loadPresent(this)
         try {
             // (A system broadcast still reaches a receiver that is not exported, which Android 14 insists on.)
-            ContextCompat.registerReceiver(this, presentReceiver, IntentFilter(Intent.ACTION_USER_PRESENT), ContextCompat.RECEIVER_NOT_EXPORTED)
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+            ContextCompat.registerReceiver(this, presentReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         } catch (e: Throwable) {
             Log.w(TAG, "could not watch for unlocks: ${e.message}")
         }
@@ -82,10 +89,16 @@ class WakeService : Service() {
 
     private val presentReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != Intent.ACTION_USER_PRESENT) return
-            WakeBus.notePresent()
-            val w = watcher ?: return
-            watcherThread?.looper?.let { Handler(it).postDelayed({ if (!stopped) w.onBack() }, 1_500) }
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_ON -> WakeBus.screenOnSince = System.currentTimeMillis()
+                Intent.ACTION_SCREEN_OFF -> WakeBus.screenOnSince = 0L
+                Intent.ACTION_USER_PRESENT -> {
+                    WakeBus.notePresent(this@WakeService)
+                    if (WakeBus.screenOnSince == 0L) WakeBus.screenOnSince = System.currentTimeMillis()
+                    val w = watcher ?: return
+                    watcherThread?.looper?.let { Handler(it).postDelayed({ if (!stopped) w.onBack() }, 1_500) }
+                }
+            }
         }
     }
 
@@ -509,7 +522,7 @@ class WakeService : Service() {
                         Log.i(TAG, String.format("%s detected (score %.3f, previous %.3f, streak %d, level %.0f, gain %.1f)",
                             phrase, score, was, run, envelope, gain))
                         WakeBus.countWake(this)
-                        WakeBus.notePresent()  // he called: he is here
+                        WakeBus.notePresent(this)  // he called: he is here
                         onWakeWord()
                     }
                 }

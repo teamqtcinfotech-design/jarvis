@@ -446,7 +446,7 @@ def _send_card_now(t: _Turn, draft: dict, facts: dict) -> dict:
         failed += [{"what": title, "why": why} for title, why in r.get("failed") or []]
         missed = {x for x, _m in r.get("failed") or []}  # named as run_card names them
         sent += [{"to": f["to"], "what": f["what"]} for it, f in zip(items, facts["items"])
-                 if it.get("action") in team and (it.get("title") or "one item") not in missed]
+                 if it.get("action") in team and actions.item_name(it) not in missed]
     for it, f in zip(items, facts["items"]):
         if it.get("action") not in ("delegation", "team_delegation"):
             continue
@@ -469,6 +469,11 @@ def _send_card_now(t: _Turn, draft: dict, facts: dict) -> dict:
             sent.append({"to": f["to"], "what": f["what"]})
         except (services.ServiceError, ObjectDoesNotExist, KeyError, ValueError) as exc:
             failed.append({"what": f["what"], "why": getattr(exc, "message", "it could not be sent")})
+    if not sent and not failed:
+        # Nothing here knew how to send this card (a kind the engine made that is not work for people): it stays
+        # on the phone for his yes, as a list, rather than vanish.
+        t.draft = draft
+        return {**facts, "note": "the list is on the phone and nothing is sent yet: ask one short question naming only the people; his next yes sends all of them"}
     t.writes += len(sent)
     t.label = t.label or (sent[0]["what"] if sent else "")
     people = sorted({s["to"] for s in sent if s["to"]})
